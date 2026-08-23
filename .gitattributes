@@ -1,0 +1,12 @@
+# Normalize line endings for all text files
+* text=auto
+
+# Explicit binary handling
+*.pdf binary
+*.docx binary
+*.xlsx binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.zip binary
