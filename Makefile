@@ -1,0 +1,85 @@
+.PHONY: help install install-backend install-frontend dev dev-backend dev-frontend \
+	test test-backend lint lint-backend lint-frontend format format-backend format-frontend \
+	typecheck migrate up down build seed pre-commit-install
+
+BACKEND_VENV := backend/.venv/Scripts
+
+help:
+	@echo "make install         Install backend + frontend dependencies"
+	@echo "make dev             Run backend and frontend dev servers (two terminals)"
+	@echo "make dev-backend     Run the FastAPI dev server (uvicorn --reload)"
+	@echo "make dev-frontend    Run the Vite dev server"
+	@echo "make test            Run backend tests"
+	@echo "make lint            Lint backend + frontend"
+	@echo "make format          Auto-format backend + frontend"
+	@echo "make typecheck       mypy (backend) + tsc --noEmit (frontend)"
+	@echo "make migrate         Apply Alembic migrations"
+	@echo "make up              docker compose up (all services)"
+	@echo "make down            docker compose down"
+	@echo "make build           docker compose build"
+	@echo "make seed            Seed employers/employees/policies + trigger ingestion"
+	@echo "make pre-commit-install   Install git hooks"
+
+install: install-backend install-frontend
+
+install-backend:
+	python -m venv backend/.venv
+	$(BACKEND_VENV)/pip.exe install --upgrade pip
+	$(BACKEND_VENV)/pip.exe install -e "backend[dev]"
+
+install-frontend:
+	cd frontend && npm install
+
+dev:
+	@echo "Run 'make dev-backend' and 'make dev-frontend' in separate terminals."
+
+dev-backend:
+	cd backend/src && ../.venv/Scripts/uvicorn.exe main:app --reload --port 8000
+
+dev-frontend:
+	cd frontend && npm run dev
+
+test: test-backend
+
+test-backend:
+	cd backend && .venv/Scripts/pytest.exe
+
+lint: lint-backend lint-frontend
+
+lint-backend:
+	cd backend && .venv/Scripts/ruff.exe check .
+	cd backend && .venv/Scripts/ruff.exe format --check .
+
+lint-frontend:
+	cd frontend && npm run lint
+
+format: format-backend format-frontend
+
+format-backend:
+	cd backend && .venv/Scripts/ruff.exe check --fix .
+	cd backend && .venv/Scripts/ruff.exe format .
+
+format-frontend:
+	cd frontend && npm run format
+
+typecheck:
+	cd backend && .venv/Scripts/mypy.exe --strict src
+	cd frontend && npx tsc --noEmit
+
+migrate:
+	cd backend && .venv/Scripts/alembic.exe upgrade head
+
+up:
+	docker compose up
+
+down:
+	docker compose down
+
+build:
+	docker compose build
+
+seed:
+	cd backend && .venv/Scripts/python.exe scripts/seed_data.py
+
+pre-commit-install:
+	backend/.venv/Scripts/pre-commit.exe install --hook-type pre-commit --hook-type commit-msg

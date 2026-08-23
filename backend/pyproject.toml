@@ -1,0 +1,76 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "policypal-backend"
+version = "0.1.0"
+description = "PolicyPal — RAG-powered employee benefits chatbot backend"
+requires-python = ">=3.11"
+license = { text = "UNLICENSED" }
+
+dependencies = [
+  "fastapi>=0.115,<0.116",
+  "uvicorn[standard]>=0.32,<0.33",
+  "pydantic>=2.9,<3",
+  "pydantic-settings>=2.6,<3",
+  "litellm>=1.63,<1.64",
+  "pinecone-client>=5.0,<6",
+  "sqlalchemy[asyncio]>=2.0,<2.1",
+  "asyncpg>=0.30,<0.31",
+  "alembic>=1.14,<1.15",
+  "python-jose[cryptography]>=3.3,<4",
+  "passlib[bcrypt]>=1.7,<2",
+  "celery[redis]>=5.4,<5.5",
+  "redis>=5.2,<6",
+  "unstructured>=0.16,<0.17",
+  "pymupdf>=1.24,<1.25",
+  "python-docx>=1.1,<1.2",
+  "openpyxl>=3.1,<3.2",
+  "lxml>=5.3,<5.4",
+  "structlog>=24.4,<25",
+  "tenacity>=9.0,<10",
+  "httpx>=0.27,<0.28",
+  "python-multipart>=0.0.12,<0.1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3,<9",
+  "pytest-asyncio>=0.24,<0.25",
+  "pytest-cov>=6.0,<7",
+  "ruff>=0.8,<0.9",
+  "mypy>=1.14,<1.15",
+  "pre-commit>=4.0,<5",
+  "pip-audit>=2.7,<3",
+  "faker>=33.1,<34",
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+py-modules = ["main"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+mypy_path = "src"
+strict = true
+warn_unused_ignores = true
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+source = ["src"]
