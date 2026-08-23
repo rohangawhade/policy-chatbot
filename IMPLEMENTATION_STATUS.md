@@ -588,6 +588,59 @@ periodically, not just when explicitly asked.
   An `asyncio.sleep` patch (autouse fixture) removes real backoff delay
   from the retry tests so they run in milliseconds, not seconds.
 
+### Step 3.3 — Pinecone adapter — DONE
+
+- `backend/src/adapters/vector_store/pinecone_adapter.py` —
+  `PineconeAdapter` fulfilling `VectorStorePort`. `pinecone-client` 5.x's
+  `Index` client is synchronous/blocking (no asyncio variant in this
+  pinned version), so every call runs it via `asyncio.to_thread()` to
+  keep the port genuinely async without blocking the event loop
+  (`coding-standards.md` section 9) — same pattern the LiteLLM adapter
+  didn't need (litellm ships real async entry points) but Pinecone does.
+  - `upsert()` maps `VectorRecord` → the SDK's `{id, values, metadata}`
+    dict shape; `query()` maps `ScoredVector` results back to
+    `VectorMatch` (coercing a `None` metadata to `{}` so callers never
+    have to null-check); `delete_by_metadata()` passes the filter
+    straight through — all three always take `namespace` from the
+    caller (never invented here), per plan.md's one-namespace-per-employer
+    tenant isolation strategy — real enforcement lands with Phase 5's
+    tenant context middleware.
+  - The index is resolved by name lazily (`pc.Index(name)` costs a
+    blocking `describe_index` round trip) on first use and cached on the
+    instance — the constructor itself makes no network call, so
+    `PineconeAdapter(...)` is safe to construct in a sync context (e.g.
+    app startup) even though every subsequent call is async.
+  - `tenacity` retry with exponential backoff, 3 attempts (per
+    `coding-standards.md` section 11's Pinecone limit), on
+    `pinecone.exceptions.ServiceException` (Pinecone's 5xx wrapper) plus
+    `ConnectionError`/`TimeoutError` — never on `UnauthorizedException`/
+    `NotFoundException`/`ForbiddenException`, which fail identically on
+    every attempt. Every retry logs the attempt number and error via
+    `structlog`, matching the LiteLLM adapter's pattern from Step 3.2.
+  - `pinecone.*` is already mypy-ignored (`ignore_missing_imports`, set
+    up in Step 1.1 alongside `celery.*` — no `py.typed` marker or
+    reliable stubs in this SDK), so the adapter's own boundary
+    (`Any`-typed `_index`, `response.matches`) is a pre-existing,
+    already-documented exemption rather than a new one.
+- **Validated with a fake client only, not against a real Pinecone
+  index**: `PINECONE_API_KEY` is empty in the local `.env` — no real
+  credentials available in this environment (same situation as Step
+  3.2's LLM keys). Tests monkeypatch the `Pinecone` class itself with a
+  fake client/index pair that records every call's arguments and can be
+  made to raise on demand, rather than hitting the real API. Revisit
+  with a real smoke test once a Pinecone key is available.
+- Validation: `ruff check`, `ruff format --check`, `mypy --strict src`
+  all pass. New `tests/test_pinecone_adapter.py` — index resolved by
+  name lazily and reused across calls, upsert sends the correct
+  id/values/metadata shape, upsert/query/delete each retry-then-succeed
+  and retry-exhaustion-then-reraise (3 attempts), a non-retryable error
+  short-circuits after one attempt, query passes through namespace/
+  top_k/filter correctly (including its `top_k=5`/`filter=None`
+  defaults), query maps `ScoredVector` results to `VectorMatch`
+  (including the `None`-metadata-to-`{}` coercion), delete passes
+  through namespace/filter — 100% coverage on the new file, 118 tests
+  passing across the whole suite (up from 105), zero warnings.
+
 ## Environment / tooling notes for future steps
 
 - **gh CLI**: installed via `winget install --id GitHub.cli`, authenticated
@@ -615,11 +668,9 @@ periodically, not just when explicitly asked.
 
 ## Next recommended step
 
-Merge the Step 3.2 PR, then continue Phase 3 — Infrastructure Adapters:
-Step 3.3 (`PineconeAdapter` implementing `VectorStorePort`, one namespace
-per employer), Step 3.4
-(`RedisCacheAdapter` + `InMemoryCacheAdapter` implementing `CachePort`),
-Step 3.5 (PostgreSQL repository adapters implementing every port in
-`repository_ports.py`, Unit of Work pattern), Step 3.6 (document processor
-adapters — PDF/DOCX/XLSX/XML — implementing `DocumentProcessorPort` via a
-`ProcessorFactory`).
+Merge the Step 3.3 PR, then continue Phase 3 — Infrastructure Adapters:
+Step 3.4 (`RedisCacheAdapter` + `InMemoryCacheAdapter` implementing
+`CachePort`), Step 3.5 (PostgreSQL repository adapters implementing
+every port in `repository_ports.py`, Unit of Work pattern), Step 3.6
+(document processor adapters — PDF/DOCX/XLSX/XML — implementing
+`DocumentProcessorPort` via a `ProcessorFactory`).
