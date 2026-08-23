@@ -67,9 +67,10 @@ mypy_path = "src"
 strict = true
 warn_unused_ignores = true
 
-# Celery ships no py.typed marker and no reliable upstream stubs.
+# Celery and the Pinecone client ship no py.typed marker and no reliable
+# upstream stubs.
 [[tool.mypy.overrides]]
-module = "celery.*"
+module = ["celery.*", "pinecone.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
