@@ -1,0 +1,25 @@
+# Local development overrides — hot reload and source mounts.
+# Applied automatically by `docker compose up` alongside docker-compose.yml.
+
+services:
+  backend:
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - ./backend/src:/app/src
+    environment:
+      APP_ENV: development
+
+  celery-worker:
+    command: celery -A workers.celery_app worker --loglevel=info --concurrency=1
+    volumes:
+      - ./backend/src:/app/src
+
+  frontend:
+    build:
+      target: build
+    command: npm run dev -- --host 0.0.0.0 --port 5173
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/index.html:/app/index.html

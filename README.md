@@ -26,6 +26,7 @@ See `files/plan.md` for the full design (tech stack rationale, data flow diagram
 
 - [x] Git delivery workflow: trunk-based, protected `main`, Conventional Commits, CI gates (Phase 0)
 - [x] Project scaffolding: backend/frontend skeletons, tooling (Phase 1, in progress)
+- [x] Docker Compose: postgres, redis, backend, celery-worker, frontend — with hot reload for local dev
 - [ ] PostgreSQL schema + Alembic migrations
 - [ ] Typed configuration (Pydantic Settings)
 - [ ] Health/readiness probes
@@ -89,7 +90,21 @@ make install            # creates backend/.venv and installs both backend + fron
 <details>
 <summary>🐳 Running with Docker</summary>
 
-Not yet available — `docker-compose.yml` and the service Dockerfiles land in Phase 1, Step 1.2. Until then, run the backend and frontend directly (see below).
+```bash
+cp .env.example .env   # fill in real values
+docker compose up
+```
+
+This brings up five services: `postgres`, `redis`, `backend` (FastAPI, hot-reload via `--reload`), `celery-worker`, and `frontend` (Vite dev server). `docker-compose.override.yml` is applied automatically and gives you hot reload for both backend and frontend — it's not something you need to reference explicitly.
+
+- Backend: http://localhost:8000
+- Frontend dev server: http://localhost:5173
+- Postgres: `localhost:5432` (user/password/db: `policypal`)
+- Redis: `localhost:6379`
+
+Inside the Compose network, services reach each other by service name (`redis`, `postgres`), not `localhost` — `docker-compose.yml` overrides `DATABASE_URL`/`REDIS_URL`/`CELERY_*` accordingly; you don't need to edit `.env` for this.
+
+`docker compose down -v` stops everything and removes the Postgres volume (fresh database next time).
 
 </details>
 
@@ -136,6 +151,8 @@ None yet — routes land in Phase 9. This table will be kept current as endpoint
 
 ```
 policypal/
+├── docker-compose.yml            # postgres, redis, backend, celery-worker, frontend
+├── docker-compose.override.yml   # local dev: hot reload, source mounts
 ├── backend/
 │   ├── src/
 │   │   ├── main.py              # FastAPI app factory
