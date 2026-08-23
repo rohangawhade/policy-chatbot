@@ -111,7 +111,29 @@ Inside the Compose network, services reach each other by service name (`redis`, 
 <details>
 <summary>🗄️ Database Setup</summary>
 
-Not yet available — Postgres schema + Alembic migrations land in Phase 1, Step 1.3.
+```bash
+docker compose up -d postgres   # or `make up` for the full stack
+make migrate                     # applies alembic upgrade head
+```
+
+Verify tables exist:
+
+```bash
+docker compose exec postgres psql -U policypal -d policypal -c "\dt"
+```
+
+Thirteen tables: `employers`, `employees`, `policies`, `employee_policies` (enrollment), `documents`, `document_chunks`, `conversations`, `messages`, `feedback`, `llm_cost_logs`, `request_latency_logs`, `flagged_responses`, `guardrail_rejections`.
+
+Tenant isolation is baked into the schema, not just query-time discipline: every tenant-scoped table carries an indexed `employer_id` (denormalized onto `messages`, `feedback`, `document_chunks`, and `flagged_responses` too, so those tables don't need a join through their parent to be scoped by employer).
+
+To generate a new migration after changing `backend/src/adapters/persistence/models.py`:
+
+```bash
+cd backend
+.venv/Scripts/alembic.exe revision --autogenerate -m "describe the change"
+```
+
+**If your change adds a new Postgres ENUM column** (or a new value to `models.py`'s `PyEnum` classes), check the generated migration — Alembic auto-creates the enum type on `create_table`/`add_column`, but does **not** auto-drop it in `downgrade()`. Follow the pattern already in `alembic/versions/*_initial_schema.py`: define the type once at module level with `create_type=False`, `.create(bind, checkfirst=True)` at the top of `upgrade()`, `.drop(bind, checkfirst=True)` at the end of `downgrade()`. Skipping this makes `downgrade` → `upgrade` fail with `type "..." already exists` — this bit us during Step 1.3, and `migration-check.yml` now runs a downgrade-then-upgrade cycle specifically to catch it before merge.
 
 </details>
 

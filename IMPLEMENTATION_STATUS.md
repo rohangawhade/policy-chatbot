@@ -162,6 +162,60 @@ merge).
   (not committed).
 - README.md updated with a working `docker compose up` quick-start.
 
+### Step 1.3 — PostgreSQL + Alembic setup — DONE
+
+- `backend/src/adapters/persistence/database.py` — async engine + session
+  factory, `get_session()` FastAPI dependency. Reads `DATABASE_URL` directly
+  from the environment (same pattern as `celery_app.py`) — Step 1.4's typed
+  config supersedes this.
+- `backend/src/adapters/persistence/models.py` — all 13 ORM tables from
+  plan.md's Step 1.3 list: `Employer`, `Employee` (the login principal for
+  all three roles — admin/employer/employee — distinguished by `role`;
+  `employer_id` nullable only for `admin`), `Policy`, `EmployeePolicy`
+  (enrollment), `Document`, `DocumentChunk`, `Conversation`, `Message`,
+  `Feedback`, `LLMCostLog`, `RequestLatencyLog`, `FlaggedResponse`,
+  `GuardrailRejection`. UUID primary keys, FK constraints, unique
+  constraints (`employees.email`, `employee_policies.(employee_id,
+  policy_id)`), and an indexed `employer_id` on every tenant-scoped table —
+  denormalized directly onto `document_chunks`, `feedback`, `messages`, and
+  `flagged_responses` (not just reachable via a join) so repository-level
+  tenant scoping (coding-standards.md section 8) never needs one.
+- `backend/alembic/` initialized; `env.py` rewritten for async SQLAlchemy
+  (`async_engine_from_config` + `connection.run_sync`), reads
+  `DATABASE_URL` from the environment, targets `Base.metadata` for
+  autogenerate.
+- First migration (`c66afd6b3aeb_initial_schema.py`) generated via
+  `alembic revision --autogenerate`.
+- **Two real bugs found and fixed during validation** (both documented
+  inline in the migration file and in the README's Database Setup section):
+  1. A model gap: `test_tenant_scoped_tables_have_an_employer_id_column`
+     (written for this step) failed for `messages` — it only had
+     `conversation_id`, not a denormalized `employer_id` like the other
+     analytics/log tables. Fixed in `models.py`, migration regenerated.
+  2. An Alembic/Postgres ENUM lifecycle bug: `op.create_table` auto-creates
+     a named Postgres ENUM type on first use, but `op.drop_table` does
+     **not** auto-drop it — so `alembic downgrade base` followed by
+     `alembic upgrade head` failed with `type "..." already exists` for
+     every one of the 6 enum types (not just `policy_type`, which is shared
+     across two tables — all of them, including single-table enums).
+     Fixed by defining each enum type once at module level
+     (`create_type=False`) and explicitly `.create()`/`.drop()`-ing them in
+     `upgrade()`/`downgrade()`. `migration-check.yml` now runs a
+     downgrade-then-upgrade cycle specifically to catch this class of bug
+     in future migrations.
+- Validation: three full `upgrade head` → `downgrade base` → `upgrade head`
+  cycles against a real Postgres 16 container, `alembic check` reports no
+  drift after each, `\dt` confirms all 13 tables (+ `alembic_version`) with
+  the right columns/types (`\d messages` spot-checked for `employer_id`).
+  `ruff`, `ruff format`, `mypy --strict` all pass. New tests added:
+  `tests/test_models.py` (table registry, tenant-scoping columns, timestamp
+  mixin, enum vocabularies, unique constraints, relationship wiring,
+  analytics-table columns) and `tests/test_database.py` (engine is async +
+  asyncpg, session factory config, `get_session()` yields a real
+  `AsyncSession`) — 100% coverage on both new files.
+- README.md updated with a Database Setup section (bring-up, verify tables,
+  how to generate future migrations, the ENUM lifecycle gotcha).
+
 ## Environment / tooling notes for future steps
 
 - **gh CLI**: installed via `winget install --id GitHub.cli`, authenticated
@@ -189,7 +243,8 @@ merge).
 
 ## Next recommended step
 
-Merge the Step 1.2 PR, then continue Phase 1 with Step 1.3 — PostgreSQL +
-Alembic setup (ORM models for all entities, first migration; requires two
-approvals per CODEOWNERS in principle, though see the solo-maintainer note
-above).
+Merge the Step 1.3 PR, then continue Phase 1 with Step 1.4 — typed
+configuration (Pydantic `BaseSettings`, replacing the direct `os.environ`
+reads in `database.py` and `celery_app.py`), then Step 1.5 — health/readiness
+probes (`/health`, `/ready`; also lets `docker-compose.yml` add the backend
+healthcheck it's currently missing).
