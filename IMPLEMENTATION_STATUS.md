@@ -55,6 +55,40 @@ Tracks progress against `files/plan.md`, per the process defined in
   venv or backend/frontend code exists yet to lint. Both will be exercised
   for real starting Phase 1 once `backend/` and `frontend/` exist.
 
+### Step 0.4 — Continuous integration pipelines — DONE
+
+- Files: `.github/workflows/{ci,pr-lint,secret-scan,dependency-audit,docker-build,migration-check,release}.yml`.
+- Branch: `ci/core-pipelines`.
+- `ci.yml` has `backend-quality` and `frontend-quality` jobs; both guard on
+  `backend/pyproject.toml` / `frontend/package.json` existing and no-op
+  cleanly until Phase 1 / Phase 10 add real code, so PRs aren't blocked by
+  checks for code that doesn't exist yet.
+- `docker-build.yml` and `migration-check.yml` guard the same way on
+  `backend/Dockerfile`/`frontend/Dockerfile` and `backend/alembic.ini`.
+- `pr-lint.yml` validates the PR title (Conventional Commits) and branch name
+  (`<type>/<scope>-<summary>`) against the same rules as `commitlint.config.js`
+  and `CONTRIBUTING.md`.
+- `secret-scan.yml` runs `gitleaks/gitleaks-action@v2` on every PR and push.
+- `dependency-audit.yml` runs `pip-audit`/`npm audit`, guarded the same way,
+  plus a weekly schedule.
+- `release.yml` uses `googleapis/release-please-action@v4` (release-type
+  `simple`) to derive the next semver from merged Conventional Commit types,
+  generate `CHANGELOG.md`, and cut a GitHub Release with a tag on merge of
+  its auto-generated release PR.
+- **Known limitation**: tags/commits created by `release-please-action`
+  (via `GITHUB_TOKEN`) are GitHub-API-created, not cryptographically signed
+  with the SSH key set up in Step 0.2. They'll show as GitHub-verified
+  (web-flow) but not "signed by rohangawhade's key." Getting true user/bot-key
+  signed release tags out of Actions needs a dedicated bot signing key stored
+  as a repo secret — deferred; flagging here rather than silently skipping it.
+- Once this PR is open, its own checks (`pr-lint`, `secret-scan`,
+  `dependency-audit`, `ci`, `docker-build`, `migration-check`) are the first
+  real run of all seven workflows. After they pass, required status checks
+  will be added to `main`'s branch protection to match.
+
+**Phase 0 — Git Repository & Delivery Workflow: COMPLETE** (pending this PR's
+merge).
+
 ## Environment / tooling notes for future steps
 
 - **gh CLI**: installed via `winget install --id GitHub.cli`, authenticated
@@ -77,7 +111,6 @@ Tracks progress against `files/plan.md`, per the process defined in
 
 ## Next recommended step
 
-Finish Step 0.3 (open PR, merge on go-ahead), then Step 0.4 — CI pipelines
-(`ci.yml`, `pr-lint.yml`, `secret-scan.yml`, `dependency-audit.yml`,
-`docker-build.yml`, `migration-check.yml`, `release.yml`), which completes
-Phase 0.
+Merge the Step 0.4 PR, confirm its checks pass, add required status checks to
+`main`'s branch protection to match, then start Phase 1 — Project
+Scaffolding & Infrastructure (Step 1.1: project skeleton).

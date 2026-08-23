@@ -1,0 +1,44 @@
+name: Docker Build
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  docker-build:
+    name: docker-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for Dockerfiles
+        id: check
+        run: |
+          echo "backend=$([ -f backend/Dockerfile ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "frontend=$([ -f frontend/Dockerfile ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        if: steps.check.outputs.backend == 'true' || steps.check.outputs.frontend == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build backend image
+        if: steps.check.outputs.backend == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          push: false
+          tags: policypal-backend:ci
+
+      - name: Build frontend image
+        if: steps.check.outputs.frontend == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          push: false
+          tags: policypal-frontend:ci
+
+      - name: No Dockerfiles yet
+        if: steps.check.outputs.backend == 'false' && steps.check.outputs.frontend == 'false'
+        run: echo "No backend/Dockerfile or frontend/Dockerfile yet — skipping (Phase 1 adds them)."
