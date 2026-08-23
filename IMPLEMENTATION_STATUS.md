@@ -379,6 +379,31 @@ merge).
   *incomplete* subclass still can't be instantiated, `AnalyticsRepository`
   exercised end-to-end) — 100% coverage, zero warnings, 59 tests total.
 
+### Step 2.3 — Domain events — DONE
+
+- `backend/src/core/domain/events.py` extended with all 11 concrete event
+  classes from plan.md's Step 2.3 list: `DocumentUploadedEvent`,
+  `DocumentProcessedEvent`, `DocumentEmbeddedEvent`,
+  `DocumentVersionReplacedEvent`, `EmployerCreatedEvent`,
+  `EmployeeEnrolledEvent`, `ChatMessageReceivedEvent`,
+  `ChatResponseGeneratedEvent`, `FeedbackReceivedEvent`,
+  `LowConfidenceResponseEvent`, `GuardrailRejectionEvent`. Each is a
+  frozen, `kw_only=True` dataclass subclassing `DomainEvent` (added in
+  Step 2.2) with its own fixed `event_type` default (re-declaring the
+  base's `event_type` field with a concrete default), so callers never
+  pass it by hand — e.g. `DocumentUploadedEvent(document_id=...,
+  employer_id=..., title=...)` is enough.
+- Verified before writing the full test suite that overriding a
+  no-default base field with a defaulted one in a `kw_only=True` subclass,
+  while also adding new required fields, actually constructs correctly —
+  ran it directly rather than assuming the dataclass-inheritance mechanics
+  work as expected.
+- Validation: `ruff`, `ruff format --check`, `mypy --strict src` all pass.
+  New `tests/test_domain_events.py` — one test per event class (fixed
+  `event_type`, payload fields, a frozen/immutability check, inherited
+  `timestamp`) — 100% coverage, zero warnings, 72 tests total across the
+  whole suite.
+
 ## Operational fix — release-please was silently failing since PR #6
 
 **What happened**: `release.yml` (added Step 0.4) has been failing on
@@ -424,6 +449,8 @@ workflow results automatically. Until that's addressed, checking
 (or the Actions tab) after merges is a manual step worth doing
 periodically, not just when explicitly asked.
 
+**Phase 2 — Core Domain & Ports: COMPLETE**.
+
 ## Environment / tooling notes for future steps
 
 - **gh CLI**: installed via `winget install --id GitHub.cli`, authenticated
@@ -451,11 +478,13 @@ periodically, not just when explicitly asked.
 
 ## Next recommended step
 
-Merge the Step 2.2 PR, then finish Phase 2 with Step 2.3 — the concrete
-domain event classes in `core/domain/events.py` (`DocumentUploadedEvent`,
-`DocumentProcessedEvent`, `DocumentVersionReplacedEvent`,
-`EmployerCreatedEvent`, `EmployeeEnrolledEvent`,
-`ChatMessageReceivedEvent`, `ChatResponseGeneratedEvent`,
-`FeedbackReceivedEvent`, `LowConfidenceResponseEvent`,
-`GuardrailRejectionEvent`), built on top of the `DomainEvent` base already
-added in Step 2.2.
+Merge the Step 2.3 PR (closes out Phase 2), then start Phase 3 —
+Infrastructure Adapters: Step 3.1 (`InMemoryEventBus` implementing
+`EventBusPort`), Step 3.2 (`LiteLLMAdapter` + `MockLLMAdapter`
+implementing `LLMPort`, with `tenacity` retry), Step 3.3 (`PineconeAdapter`
+implementing `VectorStorePort`, one namespace per employer), Step 3.4
+(`RedisCacheAdapter` + `InMemoryCacheAdapter` implementing `CachePort`),
+Step 3.5 (PostgreSQL repository adapters implementing every port in
+`repository_ports.py`, Unit of Work pattern), Step 3.6 (document processor
+adapters — PDF/DOCX/XLSX/XML — implementing `DocumentProcessorPort` via a
+`ProcessorFactory`).
