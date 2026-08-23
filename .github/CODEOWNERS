@@ -1,0 +1,17 @@
+# CODEOWNERS
+#
+# Paths touching auth, tenant isolation, persistence adapters, and database
+# migrations require review from the owners below before merge, per the
+# Git Workflow section of files/plan.md.
+#
+# NOTE: plan.md specifies two approvals for these paths. Branch protection
+# currently requires 0 approving reviews repo-wide because this is a
+# solo-maintained repository (GitHub does not allow self-approval, and there
+# is no second reviewer yet). Once a second maintainer joins, raise
+# `required_approving_review_count` to 2 for these paths via branch
+# protection / a ruleset, matching what CODEOWNERS already declares here.
+
+backend/src/core/services/auth_service.py   @rohangawhade
+backend/src/api/middleware/tenant_context.py @rohangawhade
+backend/src/adapters/persistence/            @rohangawhade
+backend/alembic/versions/                    @rohangawhade
