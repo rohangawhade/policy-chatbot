@@ -379,6 +379,51 @@ merge).
   *incomplete* subclass still can't be instantiated, `AnalyticsRepository`
   exercised end-to-end) — 100% coverage, zero warnings, 59 tests total.
 
+## Operational fix — release-please was silently failing since PR #6
+
+**What happened**: `release.yml` (added Step 0.4) has been failing on
+every push to `main` since PR #6 merged (2026-08-23 14:02) — 5 failures
+in a row (#6-#10), completely unnoticed. Root cause: the repo-level
+setting "Allow GitHub Actions to create and approve pull requests" was
+off (GitHub's default for new repos), so `release-please-action` could
+authenticate and compute the next version fine, but failed the instant it
+tried to actually *open* its release PR: `GitHub Actions is not permitted
+to create or approve pull requests.` PRs #3-#5 had shown green only
+because release-please found no user-facing commits yet and skipped
+opening a PR entirely — the failure path was never exercised until real
+`feat`/`fix` commits started landing.
+
+**Why this was missed**: every validation pass in Phases 0-2 checked the
+7 PR-triggered required status checks (via `gh pr checks`) obsessively,
+but `release.yml` only triggers on push to `main` — a separate event
+that happens *after* merge, which was never independently watched. This
+is a real gap in the validation process, not a one-off — checking what
+gates the merge is not the same as checking what the merge itself
+triggers.
+
+**Caught by**: the user directly asking to inspect a specific failed
+Action run and report the cause honestly.
+
+**Fixed**: `gh api --method PUT repos/.../actions/permissions/workflow -f
+default_workflow_permissions=read -F can_approve_pull_request_reviews=true`
+(user-approved — this write is classifier-blocked, like `gh pr merge`).
+Verified by re-running the exact failed job (`gh run rerun`), not just
+assuming the setting change worked — it succeeded and opened a real
+release PR proposing `v1.0.0`.
+
+**Follow-on decision**: a first release at `v1.0.0` is wrong for a
+project mid-Phase-2 of 14. Closed that PR unmerged, added
+`release-please-config.json` + `.release-please-manifest.json` (seeding
+`"." : "0.1.0"` as the baseline) so future runs propose sane pre-1.0
+versions instead. `release.yml` updated to reference these files instead
+of the inline `release-type: simple` input.
+
+**Standing gap, not yet closed**: nothing currently watches push-to-`main`
+workflow results automatically. Until that's addressed, checking
+`gh run list --repo rohangawhade/policy-chatbot --workflow=release.yml`
+(or the Actions tab) after merges is a manual step worth doing
+periodically, not just when explicitly asked.
+
 ## Environment / tooling notes for future steps
 
 - **gh CLI**: installed via `winget install --id GitHub.cli`, authenticated
