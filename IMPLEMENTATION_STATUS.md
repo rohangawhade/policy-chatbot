@@ -216,6 +216,55 @@ merge).
 - README.md updated with a Database Setup section (bring-up, verify tables,
   how to generate future migrations, the ENUM lifecycle gotcha).
 
+### Step 1.4 — Configuration management — DONE
+
+- `backend/src/config.py` — nine typed, independently-instantiable Pydantic
+  `BaseSettings` classes (own `env_prefix` each, per
+  `files/coding-standards.md` section 10): `AppConfig`, `DatabaseConfig`,
+  `RedisConfig`, `CacheConfig`, `CeleryConfig`, `PineconeConfig`,
+  `LLMConfig`, `AuthConfig`, `CorsConfig`. `LLMConfig`/`AuthConfig` match
+  the plan's four explicitly-named sections plus `DatabaseConfig`/
+  `RedisConfig`/`PineconeConfig`/`CacheConfig`; `AppConfig` and
+  `CorsConfig` added beyond that list since `.env.example` already declared
+  `APP_*`/`CORS_*` vars with nowhere typed to live. Each class also reads
+  the repo-root `.env` automatically (`_ENV_FILE`, resolved from
+  `config.py`'s own path so it's correct regardless of CWD) for local
+  host-based dev — real env vars (e.g. Docker Compose's `environment:`
+  overrides from Step 1.2) still always win.
+- Renamed `.env.example`'s `REDIS_CACHE_TTL_SECONDS` to `CACHE_TTL_SECONDS`
+  so it cleanly maps to its own `CacheConfig` section instead of living
+  under `RedisConfig`'s prefix.
+- Refactored `database.py`, `celery_app.py`, and `alembic/env.py` (all three
+  previously read `DATABASE_URL`/`CELERY_*` directly from `os.environ`, with
+  a note in each saying Step 1.4 would supersede this) to use the new
+  `config` module instead.
+- **Real bug found and fixed**: `mypy --strict src` failed with `Source
+  file found twice under different module names: "src.config" and
+  "config"` once `celery_app.py`/`database.py` started doing
+  `from config import ...`. Root cause: `backend/src/__init__.py`
+  (created during Step 1.1's scaffolding) made mypy treat `src` as an
+  importable package itself, so `src/config.py` got resolved both as
+  `src.config` (via the `mypy --strict src` directory walk) and as bare
+  `config` (via `mypy_path = "src"` resolving the import). Fixed by
+  deleting `backend/src/__init__.py` — it was wrong for this src-layout
+  from the start (`src/` is meant to be a path root, not a package; code
+  imports `core.x`, `config`, `main` bare, never `src.x`), it just hadn't
+  surfaced as a problem until something inside `src/` imported another
+  top-level module by its bare name.
+- Validation: `ruff`, `ruff format --check`, `mypy --strict src` all pass;
+  new `tests/test_config.py` (module-level singleton types, sane
+  non-secret defaults, env-prefix isolation between sections, `.env`-file
+  isolation via pydantic-settings' `_env_file=None` override, CORS origin
+  list parsing) — 100% coverage. Re-ran the full Step 1.3 migration
+  validation (`alembic upgrade head` / `alembic check`) against a real
+  Postgres container to confirm `alembic/env.py`'s refactor still works,
+  and re-ran the full `docker compose up` stack end-to-end (backend,
+  celery-worker, postgres, redis, frontend) to confirm the config refactor
+  still correctly picks up Compose's `redis://redis:...` overrides.
+- README.md updated (API Keys & Model Configuration section now describes
+  the typed config layer; Features checklist also caught up — Postgres/
+  Alembic was done in 1.3 but the checkbox was missed then).
+
 ## Environment / tooling notes for future steps
 
 - **gh CLI**: installed via `winget install --id GitHub.cli`, authenticated
@@ -243,8 +292,7 @@ merge).
 
 ## Next recommended step
 
-Merge the Step 1.3 PR, then continue Phase 1 with Step 1.4 — typed
-configuration (Pydantic `BaseSettings`, replacing the direct `os.environ`
-reads in `database.py` and `celery_app.py`), then Step 1.5 — health/readiness
-probes (`/health`, `/ready`; also lets `docker-compose.yml` add the backend
-healthcheck it's currently missing).
+Merge the Step 1.4 PR, then continue Phase 1 with Step 1.5 —
+health/readiness probes (`GET /health`, `GET /ready`; also lets
+`docker-compose.yml` add the backend healthcheck it's currently missing,
+closing out Phase 1).

@@ -27,8 +27,8 @@ See `files/plan.md` for the full design (tech stack rationale, data flow diagram
 - [x] Git delivery workflow: trunk-based, protected `main`, Conventional Commits, CI gates (Phase 0)
 - [x] Project scaffolding: backend/frontend skeletons, tooling (Phase 1, in progress)
 - [x] Docker Compose: postgres, redis, backend, celery-worker, frontend — with hot reload for local dev
-- [ ] PostgreSQL schema + Alembic migrations
-- [ ] Typed configuration (Pydantic Settings)
+- [x] PostgreSQL schema + Alembic migrations
+- [x] Typed configuration (Pydantic Settings)
 - [ ] Health/readiness probes
 - [ ] Core domain models & ports (Phase 2)
 - [ ] Infrastructure adapters: LiteLLM, Pinecone, Redis, Postgres repos, document processors (Phase 3)
@@ -148,6 +148,8 @@ Not yet available — the document download/generation/seed scripts land in Phas
 <summary>🔑 API Keys & Model Configuration</summary>
 
 See `.env.example` for the full list of environment variables. Model tiers are entirely config-driven (`LLM_CHEAP_MODEL`, `LLM_POWERFUL_MODEL`, `LLM_EMBEDDING_MODEL`) — if `LLM_POWERFUL_MODEL` is left empty or its provider key is missing, every query automatically falls back to the cheap model tier. No code changes needed.
+
+All configuration is typed and validated via `backend/src/config.py` (Pydantic Settings) — one class per concern (`AppConfig`, `DatabaseConfig`, `RedisConfig`, `CacheConfig`, `CeleryConfig`, `PineconeConfig`, `LLMConfig`, `AuthConfig`, `CorsConfig`), each reading only its own env-var prefix. For local host-based development it also reads the repo-root `.env` automatically (no manual `source .env` needed) — real environment variables (e.g. Docker Compose's overrides) always win over the file.
 
 </details>
 
