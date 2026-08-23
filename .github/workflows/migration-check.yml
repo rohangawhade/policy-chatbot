@@ -55,6 +55,15 @@ jobs:
           DATABASE_URL: postgresql+asyncpg://policypal:policypal@localhost:5432/policypal
         run: alembic upgrade head
 
+      - name: Downgrade and re-upgrade (catch non-repeatable migrations)
+        if: steps.check.outputs.exists == 'true'
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql+asyncpg://policypal:policypal@localhost:5432/policypal
+        run: |
+          alembic downgrade base
+          alembic upgrade head
+
       - name: Check for model drift
         if: steps.check.outputs.exists == 'true'
         working-directory: backend
