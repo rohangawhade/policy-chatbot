@@ -1,0 +1,160 @@
+# PolicyPal
+
+A RAG-powered chatbot that answers employees' and employers' benefits policy questions, scoped to their own company's enrolled plans.
+
+## What This Project Does
+
+PolicyPal lets an employee log in and ask plain-English questions like "What's my dental deductible?" or "Am I covered for physical therapy?" and get an answer sourced from their own employer's actual policy documents — not a generic chatbot guess. It refuses to answer anything outside benefits/policy topics, and every answer cites which document and section it came from. Employers upload their plan documents once; admins get a dashboard showing what people are asking, what it's costing, and where the bot is struggling.
+
+## Architecture Overview
+
+The backend is a FastAPI service built with hexagonal (ports & adapters) architecture: business logic in `core/` never imports a framework or a specific database/vector-store/LLM library directly — it depends only on abstract interfaces (`core/ports/`), and concrete implementations (`adapters/`) plug into those interfaces at the API layer. This means swapping Pinecone for another vector DB, or adding a new LLM provider, is a new adapter file, not a rewrite.
+
+```
+User Query → Guardrails (off-topic reject) → Redis cache check → Query Router
+  (cheap vs powerful model) → Embed query → Pinecone search (tenant-scoped)
+  → assemble prompt with retrieved chunks + enrollment data → stream LLM
+  response over SSE → cache + persist → analytics events (cost, latency,
+  low-confidence flags) logged for the admin dashboard
+```
+
+Document ingestion runs the same way in reverse: uploaded PDF/DOCX/XLSX/XML → the right processor (via a factory, keyed on file type) → metadata extraction → semantic chunking → embeddings → Pinecone (namespaced per employer) + Postgres chunk references, all as a Celery background task.
+
+See `files/plan.md` for the full design (tech stack rationale, data flow diagrams, phase-by-phase implementation plan) and `files/coding-standards.md` for the engineering rules this codebase follows.
+
+## Features
+
+- [x] Git delivery workflow: trunk-based, protected `main`, Conventional Commits, CI gates (Phase 0)
+- [x] Project scaffolding: backend/frontend skeletons, tooling (Phase 1, in progress)
+- [ ] PostgreSQL schema + Alembic migrations
+- [ ] Typed configuration (Pydantic Settings)
+- [ ] Health/readiness probes
+- [ ] Core domain models & ports (Phase 2)
+- [ ] Infrastructure adapters: LiteLLM, Pinecone, Redis, Postgres repos, document processors (Phase 3)
+- [ ] Chunking & embedding pipeline (Phase 4)
+- [ ] Auth + multi-tenancy (Phase 5)
+- [ ] RAG pipeline: guardrails, query routing, retrieval, streaming generation (Phase 6)
+- [ ] Document versioning (Phase 7)
+- [ ] Celery ingestion workers (Phase 8)
+- [ ] API routes (Phase 9)
+- [ ] React chat UI + admin dashboard (Phase 10)
+- [ ] Data acquisition & seeding (Phase 11)
+- [ ] RAGAS evaluation pipeline (Phase 12)
+- [ ] DI audit (Phase 13)
+- [ ] Production polish: logging, error handling, rate limiting (Phase 14)
+
+Track detailed step-by-step progress in `IMPLEMENTATION_STATUS.md`.
+
+## Tech Stack
+
+| Layer               | Technology                                   |
+| -------------------- | --------------------------------------------- |
+| Backend API          | FastAPI (async, Python 3.11+)                 |
+| LLM Gateway          | LiteLLM                                       |
+| RAG Pipeline         | Custom-built                                  |
+| Vector Database      | Pinecone                                      |
+| Relational Database  | PostgreSQL (SQLAlchemy async + Alembic)       |
+| Authentication       | OAuth2 + JWT                                  |
+| Background Jobs      | Celery + Redis                                |
+| Caching              | Redis                                         |
+| Document Parsing     | unstructured, PyMuPDF, python-docx, openpyxl  |
+| Frontend             | React 18 + TypeScript + Tailwind CSS + Vite   |
+| Streaming            | Server-Sent Events (SSE)                      |
+| Containerization     | Docker Compose                                |
+| RAG Evaluation       | RAGAS + golden dataset + user feedback        |
+| CI/CD                | GitHub Actions                                |
+
+<details>
+<summary>🛠️ Prerequisites</summary>
+
+- Python 3.11+ (developed against 3.12)
+- Node.js 20+ (developed against 22)
+- Docker + Docker Compose
+- A GitHub account with `gh` CLI if you're contributing (see `CONTRIBUTING.md`)
+
+</details>
+
+<details>
+<summary>📦 Environment Setup</summary>
+
+```bash
+git clone https://github.com/rohangawhade/policy-chatbot.git
+cd policy-chatbot
+cp .env.example .env   # fill in real values — see "API Keys & Model Configuration" below
+make install            # creates backend/.venv and installs both backend + frontend deps
+```
+
+</details>
+
+<details>
+<summary>🐳 Running with Docker</summary>
+
+Not yet available — `docker-compose.yml` and the service Dockerfiles land in Phase 1, Step 1.2. Until then, run the backend and frontend directly (see below).
+
+</details>
+
+<details>
+<summary>🗄️ Database Setup</summary>
+
+Not yet available — Postgres schema + Alembic migrations land in Phase 1, Step 1.3.
+
+</details>
+
+<details>
+<summary>📄 Loading Documents</summary>
+
+Not yet available — the document download/generation/seed scripts land in Phase 11.
+
+</details>
+
+<details>
+<summary>🔑 API Keys & Model Configuration</summary>
+
+See `.env.example` for the full list of environment variables. Model tiers are entirely config-driven (`LLM_CHEAP_MODEL`, `LLM_POWERFUL_MODEL`, `LLM_EMBEDDING_MODEL`) — if `LLM_POWERFUL_MODEL` is left empty or its provider key is missing, every query automatically falls back to the cheap model tier. No code changes needed.
+
+</details>
+
+<details>
+<summary>🧪 Running RAG Evaluation</summary>
+
+Not yet available — lands in Phase 12.
+
+</details>
+
+<details>
+<summary>🔧 Common Issues & Troubleshooting</summary>
+
+Nothing tracked yet — this section grows as issues are discovered and fixed.
+
+</details>
+
+## API Endpoints
+
+None yet — routes land in Phase 9. This table will be kept current as endpoints are added.
+
+## Project Structure
+
+```
+policypal/
+├── backend/
+│   ├── src/
+│   │   ├── main.py              # FastAPI app factory
+│   │   ├── core/                # Domain models, ports, services — zero framework imports
+│   │   ├── adapters/            # LiteLLM, Pinecone, Redis, Postgres, document processors
+│   │   ├── api/                 # Routes, middleware, DI wiring
+│   │   └── workers/             # Celery tasks
+│   └── scripts/                 # Seed data, doc download/generation
+├── frontend/
+│   └── src/                     # React 18 + TypeScript + Tailwind (Vite)
+├── data/eval/                   # Golden Q&A dataset for RAG evaluation
+├── eval/                        # RAGAS evaluation runner
+└── files/                       # Project plan and coding standards (source of truth)
+```
+
+Full target structure is in `files/plan.md` under "Folder Structure."
+
+## How It Works (Layman's Terms)
+
+An employer uploads their benefits documents once. Behind the scenes, PolicyPal reads those documents, breaks them into meaningful chunks, and stores them so it can find the relevant part instantly later — like a very good index at the back of a book, except it understands meaning, not just keywords.
+
+When an employee asks a question, PolicyPal first checks the question is actually about benefits (it politely declines anything else), looks up the most relevant chunks from that employer's documents, checks the employee's own enrollment records if the question is personal ("what am I covered for"), and then asks an AI model to write an answer using only that retrieved information — citing exactly which document it came from. Simple questions go to a cheap, fast model; more complex ones (comparisons, multi-policy questions) automatically route to a more capable model. Everything is logged so an admin can see what's costing money, what's slow, and what the bot is struggling to answer well.

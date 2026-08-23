@@ -89,6 +89,47 @@ Tracks progress against `files/plan.md`, per the process defined in
 **Phase 0 — Git Repository & Delivery Workflow: COMPLETE** (pending this PR's
 merge).
 
+## Phase 1 — Project Scaffolding & Infrastructure
+
+### Step 1.1 — Initialize project skeleton — DONE
+
+- Backend: `backend/pyproject.toml` (setuptools src-layout: `core`,
+  `adapters`, `api`, `workers` importable as top-level packages, `main` as a
+  top-level module — matches the bare-import style in
+  `files/coding-standards.md`), full `core/`/`adapters/`/`api/`/`workers`
+  directory skeleton with `__init__.py` per package, `backend/src/main.py`
+  (minimal FastAPI app factory), `backend/tests/__init__.py`.
+- Frontend: scaffolded with `npm create vite@latest -- --template react-ts`,
+  then adjusted to match the plan/coding-standards exactly:
+  - Pinned `react`/`react-dom` to `^18.3.1` (plan specifies React 18; latest
+    Vite scaffolds installed React 19 by default).
+  - Replaced the default `oxlint` lint setup with real ESLint (flat config,
+    `typescript-eslint` + `react-hooks` + `react-refresh` + `eslint-config-prettier`)
+    since `files/coding-standards.md` and `.pre-commit-config.yaml` (Step 0.3)
+    both assume ESLint specifically.
+  - Added `strict: true` to `tsconfig.app.json` — not on by default in the
+    newest Vite template, required by coding-standards section 5.
+  - Tailwind CSS v4 (latest) wired via `@tailwindcss/vite` + `@import
+    "tailwindcss";` in `index.css`, plus `tailwind.config.ts` for explicit
+    content globs (v4 auto-detects content, but the plan's folder structure
+    names this file explicitly).
+  - Removed the default template's boilerplate (logos, marketing copy,
+    `App.css`) — replaced `App.tsx` with a one-line placeholder.
+- `.env.example` — all env vars for app/database/redis/celery/Pinecone/LLM
+  tiers/auth/CORS/frontend, matching `files/coding-standards.md` section 10
+  and the model-routing config shown in `files/plan.md`.
+- `Makefile` — install/dev/test/lint/format/typecheck/migrate/up/down/build/seed
+  targets (Windows paths, since this is the actual dev machine).
+- `README.md` — full structure per `files/coding-standards.md` section 14
+  (What This Project Does, Architecture Overview, Features checklist, Tech
+  Stack, collapsible setup sections, Project Structure, How It Works).
+- Validation:
+  - `pip install -e ".[dev]"` succeeded in `backend/.venv` (all deps resolve).
+  - `python -c "from main import app"` → `PolicyPal 0.1.0`.
+  - `ruff check .` / `ruff format --check .` / `mypy --strict src` all pass.
+  - Frontend: `npm run lint` (ESLint) passes, `npm run build` (`tsc -b && vite
+    build`) succeeds and produces a Tailwind-compiled CSS bundle.
+
 ## Environment / tooling notes for future steps
 
 - **gh CLI**: installed via `winget install --id GitHub.cli`, authenticated
@@ -102,15 +143,16 @@ merge).
   `.claude/settings.*` permissions. The user added an explicit allow rule to
   `.claude/settings.local.json`. Per-PR: I still ask for a go-ahead in chat
   before merging (user's stated preference), then run `gh pr merge`.
-- **Python**: 3.12.6 available (`python`/`py`). A dedicated project venv
-  (`.venv`) will be created in Phase 1 per the autopilot instruction to use a
-  project-local env, not the global interpreter.
+- **Python**: 3.12.6 available (`python`/`py`). Project venv created at
+  `backend/.venv` per the autopilot instruction to use a project-local env,
+  not the global interpreter. All backend commands in the Makefile invoke it
+  by full path (Windows layout: `.venv/Scripts/*.exe`).
+- **Node**: v22.12.0 / npm 11.12.1 available.
 - **Commit signing**: SSH-based, configured locally (per-repo, not global) —
   see `CONTRIBUTING.md` "Signed commits" section for the reusable setup
   steps.
 
 ## Next recommended step
 
-Merge the Step 0.4 PR, confirm its checks pass, add required status checks to
-`main`'s branch protection to match, then start Phase 1 — Project
-Scaffolding & Infrastructure (Step 1.1: project skeleton).
+Merge the Step 1.1 PR, then continue Phase 1 with Step 1.2 — Docker Compose
+setup (`docker-compose.yml`, backend/frontend `Dockerfile`s, health checks).
