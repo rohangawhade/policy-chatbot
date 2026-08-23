@@ -30,8 +30,7 @@ See `files/plan.md` for the full design (tech stack rationale, data flow diagram
 - [x] PostgreSQL schema + Alembic migrations
 - [x] Typed configuration (Pydantic Settings)
 - [x] Health/readiness probes
-- [x] Core domain models (Phase 2, in progress)
-- [ ] Core ports (Phase 2)
+- [x] Core domain models & ports (Phase 2, in progress)
 - [ ] Infrastructure adapters: LiteLLM, Pinecone, Redis, Postgres repos, document processors (Phase 3)
 - [ ] Chunking & embedding pipeline (Phase 4)
 - [ ] Auth + multi-tenancy (Phase 5)

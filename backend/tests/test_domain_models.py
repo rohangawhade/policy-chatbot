@@ -14,6 +14,7 @@ from core.domain.conversation import Conversation, Message, MessageRole
 from core.domain.document import Document, DocumentChunk, DocumentStatus
 from core.domain.employee import Employee, UserRole
 from core.domain.employer import Employer
+from core.domain.events import DomainEvent
 from core.domain.feedback import Feedback, FeedbackRating
 from core.domain.policy import Enrollment, Policy, PolicyType
 
@@ -170,3 +171,39 @@ def test_domain_models_construct_from_orm_style_objects_via_from_attributes() ->
     domain_employer = Employer.model_validate(_FakeOrmEmployer())
 
     assert domain_employer.name == "Acme Corp"
+
+
+def test_domain_event_has_type_and_timestamp() -> None:
+    event = DomainEvent(event_type="document.uploaded")
+
+    assert event.event_type == "document.uploaded"
+    assert event.timestamp is not None
+
+
+def test_domain_event_is_frozen() -> None:
+    event = DomainEvent(event_type="document.uploaded")
+
+    with pytest.raises(AttributeError):
+        event.event_type = "document.processed"  # type: ignore[misc]
+
+
+def test_domain_event_subclass_can_add_required_fields_without_ordering_errors() -> None:
+    """kw_only=True on the base avoids the classic dataclass-inheritance
+    trap where a required subclass field can't follow a base field that
+    has a default."""
+    from dataclasses import dataclass
+    from uuid import UUID
+
+    @dataclass(frozen=True, kw_only=True)
+    class _DocumentUploadedEvent(DomainEvent):
+        document_id: UUID
+        employer_id: UUID
+
+    document_id = uuid4()
+    employer_id = uuid4()
+    event = _DocumentUploadedEvent(
+        event_type="document.uploaded", document_id=document_id, employer_id=employer_id
+    )
+
+    assert event.document_id == document_id
+    assert event.employer_id == employer_id

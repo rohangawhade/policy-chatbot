@@ -335,6 +335,50 @@ merge).
   actually works against an ORM-shaped object) — 100% coverage, zero
   warnings.
 
+### Step 2.2 — Port interfaces (ABCs) — DONE
+
+- `backend/src/core/ports/{llm_port,vector_store_port,event_bus_port,cache_port,document_processor_port,repository_ports}.py`
+  — every ABC from plan.md's Step 2.2 list. `repository_ports.py` uses a
+  generic `RepositoryPort[T]` base (get/create/update/delete) per
+  `files/coding-standards.md` section 5's "use TypeVar and Generic for
+  generic repository interfaces", with one subclass per entity adding its
+  own query methods (`EmployeeRepository.get_by_email`,
+  `DocumentRepository.get_latest_version` for Step 7.1's version tracking,
+  `DocumentChunkRepository.deactivate_by_document` for Step 7.2's soft
+  delete, etc.), plus a combined `AnalyticsRepository` for the four
+  observability tables (written together fire-and-forget, read together by
+  the admin dashboard — one port, not four, per how they're actually used).
+- `VectorStorePort`/`EventBusPort` needed small supporting types that
+  don't belong in `core/domain/` (they're port-contract shapes, not
+  entities): `VectorRecord`/`VectorMatch` (frozen dataclasses) defined
+  directly in `vector_store_port.py`, and an `EventHandler` type alias in
+  `event_bus_port.py`.
+- **Prerequisite added ahead of Step 2.3**: `EventBusPort.publish()` needs
+  a type to publish against, but concrete domain events don't exist until
+  Step 2.3. Added a minimal `core/domain/events.py` with just the
+  `DomainEvent` base (frozen, `kw_only=True` — avoids the classic
+  dataclass-inheritance trap where a subclass's required field can't
+  follow a base field that has a default) — a small, strictly-required
+  prerequisite per `files/autopilot-prompt.md`'s execution rules. Step 2.3
+  extends this same file with the concrete event classes.
+- Real subtlety caught before it became a bug: `LLMPort.generate_stream`
+  is meant to be implemented as an async generator (`async def ...: yield
+  token`), which genuinely requires `async def` in Python — an earlier
+  draft declared the abstract method with plain `def` on the theory that
+  "callers shouldn't await it", which is correct about the *calling*
+  convention (`async for`, never `await`) but wrong about how async
+  generators are *declared*. Fixed before commit by giving the abstract
+  stub a real `yield` so it's unambiguously typed as `AsyncIterator[str]`
+  the same way a real implementation would be.
+- Validation: `ruff`, `ruff format --check`, `mypy --strict src` all pass.
+  New `tests/test_ports.py` (LLM/VectorStore/EventBus/Cache/
+  DocumentProcessor — each proven instantiable only via a complete
+  concrete subclass, plus a frozen-dataclass immutability check for
+  `VectorRecord`/`VectorMatch`) and `tests/test_repository_ports.py`
+  (generic base can't be instantiated directly, an intentionally
+  *incomplete* subclass still can't be instantiated, `AnalyticsRepository`
+  exercised end-to-end) — 100% coverage, zero warnings, 59 tests total.
+
 ## Environment / tooling notes for future steps
 
 - **gh CLI**: installed via `winget install --id GitHub.cli`, authenticated
@@ -362,7 +406,11 @@ merge).
 
 ## Next recommended step
 
-Merge the Step 2.1 PR, then continue Phase 2 with Step 2.2 — abstract port
-interfaces in `core/ports/` (`LLMPort`, `VectorStorePort`, `EventBusPort`,
-`CachePort`, `DocumentProcessorPort`, repository ports — one per entity),
-then Step 2.3 — domain events in `core/domain/events.py`.
+Merge the Step 2.2 PR, then finish Phase 2 with Step 2.3 — the concrete
+domain event classes in `core/domain/events.py` (`DocumentUploadedEvent`,
+`DocumentProcessedEvent`, `DocumentVersionReplacedEvent`,
+`EmployerCreatedEvent`, `EmployeeEnrolledEvent`,
+`ChatMessageReceivedEvent`, `ChatResponseGeneratedEvent`,
+`FeedbackReceivedEvent`, `LowConfidenceResponseEvent`,
+`GuardrailRejectionEvent`), built on top of the `DomainEvent` base already
+added in Step 2.2.
