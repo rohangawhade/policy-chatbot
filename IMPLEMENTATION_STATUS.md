@@ -641,6 +641,52 @@ periodically, not just when explicitly asked.
   through namespace/filter — 100% coverage on the new file, 118 tests
   passing across the whole suite (up from 105), zero warnings.
 
+### Step 3.4 — Redis cache adapter — DONE
+
+- `backend/src/adapters/cache/redis_cache_adapter.py` —
+  `RedisCacheAdapter` fulfilling `CachePort` via `redis.asyncio.Redis`
+  (a genuine async client — no thread-wrapping needed, unlike Step 3.3's
+  Pinecone adapter). `tenacity` retry with exponential backoff, 3
+  attempts (no explicit ceiling is named for cache calls in
+  `coding-standards.md` section 11, so this matches the LLM/Pinecone
+  ceiling as a reasoned default for the same class of failure — called
+  out explicitly in the adapter's own comment rather than left
+  unexplained), on `redis.exceptions.ConnectionError`/`TimeoutError`
+  only. Cache-key construction (a hash of employer_id + query_text +
+  model_tier, per plan.md) is entirely caller-driven — the adapter only
+  ever sees an opaque string key, the same "adapter has no opinion,
+  caller decides" pattern as `LiteLLMAdapter`'s `model=` parameter.
+  `ttl_seconds` is likewise per-call and caller-supplied (`None` means
+  no expiration); `CacheConfig.ttl_seconds` (Step 1.4, default 3600) is
+  what a caller reaches for, not something this adapter reads itself.
+- `backend/src/adapters/cache/in_memory_cache_adapter.py` —
+  `InMemoryCacheAdapter` fulfilling `CachePort` with a plain dict and
+  lazy TTL expiry (checked on access via `time.monotonic()`, no
+  background eviction thread) — the dev/testing stand-in plan.md asks
+  for, so tests and local dev don't need a running Redis.
+- **Validated against a real Redis instance, not just mocks** — unlike
+  Steps 3.2/3.3 (no LLM/Pinecone credentials available at all), a real
+  Redis is one `docker compose up -d redis` away. Brought up the actual
+  `redis:7-alpine` container from Step 1.2's `docker-compose.yml` and
+  ran `RedisCacheAdapter` against it directly (exists→false, get→None,
+  set with a TTL, get→value, exists→true, delete, get→None again) via a
+  throwaway script, confirmed `REDIS_SMOKE_TEST_OK`, then deleted the
+  script and tore the container back down (`docker compose down redis`)
+  — nothing from this left in the working tree.
+- Validation: `ruff check`, `ruff format --check`, `mypy --strict src`
+  all pass with zero suppressions in the new files. New
+  `tests/test_redis_cache_adapter.py` (get hit/miss, retry-then-succeed,
+  retry-exhaustion-then-reraise, non-retryable error short-circuits, set
+  passes through value/ttl including the no-ttl case, set's retry
+  ceiling, delete passes through, exists true/false) and
+  `tests/test_in_memory_cache_adapter.py` (get miss, set-then-get,
+  overwrite, delete removes/no-ops on a missing key, exists true/false,
+  a no-TTL value never expiring, a TTL'd value expiring after but not
+  before its deadline — using a monkeypatched `time.monotonic()` for a
+  deterministic clock, `exists` reflecting expiry too) — 100% coverage
+  on both new files, 142 tests passing across the whole suite (up from
+  118), zero warnings.
+
 ## Environment / tooling notes for future steps
 
 - **gh CLI**: installed via `winget install --id GitHub.cli`, authenticated
@@ -668,9 +714,8 @@ periodically, not just when explicitly asked.
 
 ## Next recommended step
 
-Merge the Step 3.3 PR, then continue Phase 3 — Infrastructure Adapters:
-Step 3.4 (`RedisCacheAdapter` + `InMemoryCacheAdapter` implementing
-`CachePort`), Step 3.5 (PostgreSQL repository adapters implementing
-every port in `repository_ports.py`, Unit of Work pattern), Step 3.6
-(document processor adapters — PDF/DOCX/XLSX/XML — implementing
+Merge the Step 3.4 PR, then continue Phase 3 — Infrastructure Adapters:
+Step 3.5 (PostgreSQL repository adapters implementing every port in
+`repository_ports.py`, Unit of Work pattern), Step 3.6 (document
+processor adapters — PDF/DOCX/XLSX/XML — implementing
 `DocumentProcessorPort` via a `ProcessorFactory`).
