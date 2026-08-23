@@ -451,6 +451,47 @@ periodically, not just when explicitly asked.
 
 **Phase 2 — Core Domain & Ports: COMPLETE**.
 
+## Phase 3 — Infrastructure Adapters
+
+### Step 3.1 — In-memory event bus adapter — DONE
+
+- `backend/src/adapters/event_bus/in_memory_event_bus.py` —
+  `InMemoryEventBus` fulfilling `EventBusPort` (added Step 2.2). Keyed by
+  `event_type` string (not the event class) so handlers can subscribe
+  without importing every concrete event class. Supports both sync and
+  async handlers (`inspect.isawaitable(result)` on the handler's return
+  value decides whether to `await` it) per plan.md's Step 3.1
+  requirement. A handler that raises is caught, logged via
+  `structlog.exception` (with the event type and handler name), and does
+  not prevent other subscribed handlers from running — matches
+  `files/coding-standards.md` section 12's "analytics logging must never
+  block the main request" principle, generalized to any handler since the
+  bus has no way to know which handlers are analytics vs. not.
+  `unsubscribe()` on an unknown event type or a handler not currently
+  subscribed logs a warning and returns rather than raising (no caller
+  currently needs unsubscribe to be strict).
+  Docstring explicitly states the swap-for-Kafka intent from plan.md's
+  Step 3.1 ("Swap this for `KafkaEventBus`... zero core logic changes").
+- This is the first adapter in the codebase to use `structlog`
+  (declared as a dependency since Step 0.1/pyproject.toml, unused until
+  now) — used at its default configuration (no `structlog.configure()`
+  call exists yet anywhere in the app); Step 13's structured-logging setup
+  (JSON in prod, pretty-print in dev, correlation_id/employer_id/user_id
+  on every entry) is a cross-cutting concern from `coding-standards.md`
+  section 13, not a dedicated plan.md step — will be wired centrally
+  whichever step first needs request-scoped context (likely Phase 5's
+  auth/tenant middleware).
+- Validation: `ruff check`, `ruff format --check`, `mypy --strict src` all
+  pass. New `tests/test_in_memory_event_bus.py` — sync handler dispatch,
+  async handler dispatch (awaited), multiple handlers called in
+  subscription order, handlers for a different event type not invoked,
+  publish with zero subscribers doesn't raise, a failing sync handler and
+  a failing async handler each don't block sibling handlers, unsubscribe
+  removes a handler so it stops receiving events, unsubscribe on an
+  unknown event type or an unregistered handler doesn't raise — 100%
+  coverage on the new file, zero warnings, 83 tests passing across the
+  whole suite (up from 72).
+
 ## Environment / tooling notes for future steps
 
 - **gh CLI**: installed via `winget install --id GitHub.cli`, authenticated
@@ -478,11 +519,10 @@ periodically, not just when explicitly asked.
 
 ## Next recommended step
 
-Merge the Step 2.3 PR (closes out Phase 2), then start Phase 3 —
-Infrastructure Adapters: Step 3.1 (`InMemoryEventBus` implementing
-`EventBusPort`), Step 3.2 (`LiteLLMAdapter` + `MockLLMAdapter`
-implementing `LLMPort`, with `tenacity` retry), Step 3.3 (`PineconeAdapter`
-implementing `VectorStorePort`, one namespace per employer), Step 3.4
+Merge the Step 3.1 PR, then continue Phase 3 — Infrastructure Adapters:
+Step 3.2 (`LiteLLMAdapter` + `MockLLMAdapter` implementing `LLMPort`, with
+`tenacity` retry), Step 3.3 (`PineconeAdapter` implementing
+`VectorStorePort`, one namespace per employer), Step 3.4
 (`RedisCacheAdapter` + `InMemoryCacheAdapter` implementing `CachePort`),
 Step 3.5 (PostgreSQL repository adapters implementing every port in
 `repository_ports.py`, Unit of Work pattern), Step 3.6 (document processor
