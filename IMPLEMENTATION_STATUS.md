@@ -265,6 +265,37 @@ merge).
   the typed config layer; Features checklist also caught up — Postgres/
   Alembic was done in 1.3 but the checkbox was missed then).
 
+### Step 1.5 — Health check endpoints — DONE
+
+- `backend/src/api/routes/health_routes.py`: `GET /health` (liveness,
+  always 200, no dependency checks) and `GET /ready` (readiness — checks
+  PostgreSQL via a real `SELECT 1`, Redis via a real `PING`; Pinecone via a
+  real `list_indexes()` call only if `PINECONE_API_KEY` is configured,
+  else reported as `not_configured` and not counted as a failure). Returns
+  HTTP 503 (not just an `"error"` body) when not ready, so orchestrators
+  keying off status code behave correctly. Kept dependency-light on
+  purpose — no repository ports, no domain services — so it works even if
+  the rest of the app is broken.
+- Wired into `main.py` via `app.include_router(health_routes.router)`.
+- `docker-compose.yml`'s `backend` service healthcheck (deferred since
+  Step 1.2, when `/health` didn't exist yet) now targets it.
+- Validation: `ruff`, `ruff format --check`, `mypy --strict src` all pass
+  (added a targeted mypy override for `pinecone.*`, same situation as
+  `celery.*` in Step 1.2 — no py.typed marker or reliable stubs). New
+  `tests/test_health_routes.py` — unit tests for each `_check_*` helper
+  (success and failure paths, including the real Pinecone-configured
+  branch, mocked) plus integration tests through `TestClient` for both
+  200/ready and 503/not-ready response shapes — 100% coverage.
+  **Additionally verified against the real stack, not just mocks**: ran
+  the actual app against live Postgres + Redis containers and confirmed
+  `/health` and `/ready` both report `ok`; stopped the Postgres container
+  and confirmed `/ready` correctly flips to HTTP 503 with
+  `"database": "error"`; brought up the full `docker compose up` stack and
+  confirmed `docker compose ps` shows the backend as `(healthy)`.
+
+**Phase 1 — Project Scaffolding & Infrastructure: COMPLETE** (pending this
+PR's merge).
+
 ## Environment / tooling notes for future steps
 
 - **gh CLI**: installed via `winget install --id GitHub.cli`, authenticated
@@ -292,7 +323,8 @@ merge).
 
 ## Next recommended step
 
-Merge the Step 1.4 PR, then continue Phase 1 with Step 1.5 —
-health/readiness probes (`GET /health`, `GET /ready`; also lets
-`docker-compose.yml` add the backend healthcheck it's currently missing,
-closing out Phase 1).
+Merge the Step 1.5 PR (closes out Phase 1), then start Phase 2 — Core
+Domain & Ports: Step 2.1 (pure domain models in `core/domain/`, zero
+framework imports) and Step 2.2 (abstract port interfaces in `core/ports/`
+— `LLMPort`, `VectorStorePort`, `EventBusPort`, `CachePort`,
+`DocumentProcessorPort`, repository ports).

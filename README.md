@@ -25,11 +25,11 @@ See `files/plan.md` for the full design (tech stack rationale, data flow diagram
 ## Features
 
 - [x] Git delivery workflow: trunk-based, protected `main`, Conventional Commits, CI gates (Phase 0)
-- [x] Project scaffolding: backend/frontend skeletons, tooling (Phase 1, in progress)
+- [x] Project scaffolding: backend/frontend skeletons, tooling (Phase 1)
 - [x] Docker Compose: postgres, redis, backend, celery-worker, frontend — with hot reload for local dev
 - [x] PostgreSQL schema + Alembic migrations
 - [x] Typed configuration (Pydantic Settings)
-- [ ] Health/readiness probes
+- [x] Health/readiness probes
 - [ ] Core domain models & ports (Phase 2)
 - [ ] Infrastructure adapters: LiteLLM, Pinecone, Redis, Postgres repos, document processors (Phase 3)
 - [ ] Chunking & embedding pipeline (Phase 4)
@@ -169,7 +169,12 @@ Nothing tracked yet — this section grows as issues are discovered and fixed.
 
 ## API Endpoints
 
-None yet — routes land in Phase 9. This table will be kept current as endpoints are added.
+| Method | Path      | Auth | Description                                                                                     |
+| ------ | --------- | ---- | ------------------------------------------------------------------------------------------------- |
+| GET    | `/health` | None | Liveness probe — 200 if the process is up. No dependency checks.                                  |
+| GET    | `/ready`  | None | Readiness probe — checks PostgreSQL and Redis (required) and Pinecone (if configured). 503 if not ready. |
+
+Remaining routes land in Phase 9. This table will be kept current as endpoints are added.
 
 ## Project Structure
 
