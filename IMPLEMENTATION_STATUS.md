@@ -293,8 +293,47 @@ merge).
   `"database": "error"`; brought up the full `docker compose up` stack and
   confirmed `docker compose ps` shows the backend as `(healthy)`.
 
-**Phase 1 — Project Scaffolding & Infrastructure: COMPLETE** (pending this
-PR's merge).
+**Phase 1 — Project Scaffolding & Infrastructure: COMPLETE**.
+
+## Phase 2 — Core Domain & Ports
+
+### Step 2.1 — Domain models — DONE
+
+- `backend/src/core/domain/{employer,employee,policy,document,conversation,feedback,analytics}.py`
+  — pure Pydantic `BaseModel`s, zero imports from FastAPI/SQLAlchemy/any
+  adapter (verified: only stdlib + pydantic imports, plus one
+  domain-to-domain import of `PolicyType` in `document.py`, which is fine).
+  Mirrors the 13 ORM tables from Step 1.3 exactly, matching plan.md's Step
+  2.1 model list (`Enrollment` — plan's name — lives in `policy.py`, next
+  to `Policy`, since the plan's folder tree doesn't list a separate
+  `enrollment.py`/`message.py` file).
+  - Every model sets `model_config = ConfigDict(from_attributes=True)` so
+    Phase 3's repository adapters can do `Employer.model_validate(orm_row)`
+    without hand-written field-by-field mapping.
+  - `id`/timestamp fields have sensible `default_factory` values (`uuid4`,
+    `datetime.now(UTC)`) so domain objects are directly constructible
+    before persistence, not just after loading from the DB.
+  - `Employee` includes `hashed_password` (needed by the future
+    `AuthService`) — this is domain data, not a persistence detail; API
+    layers must remember to exclude it from response schemas when that
+    matters (Phase 9).
+- **Real bug found and fixed**: used `datetime.utcnow()` for every
+  timestamp default (7 files) — deprecated in Python 3.12
+  (`DeprecationWarning`, scheduled for removal). Only surfaced because
+  `pytest` runs on 3.12 and warnings were visible in the test summary; the
+  code itself worked fine, it just wasn't clean. Fixed by switching to
+  `datetime.now(UTC)` everywhere, **and** added
+  `filterwarnings = ["error::DeprecationWarning", "error::PendingDeprecationWarning"]`
+  to `pyproject.toml`'s pytest config so this class of bug fails CI
+  immediately in future steps instead of accumulating silently. Confirmed
+  no other deprecation warnings exist anywhere in the current dependency
+  set after adding this.
+- Validation: `ruff`, `ruff format --check`, `mypy --strict src` all pass.
+  New `tests/test_domain_models.py` — one focused test per model
+  (construction, defaults, enum values, a validation-error case for a
+  missing required field, and one test proving `from_attributes=True`
+  actually works against an ORM-shaped object) — 100% coverage, zero
+  warnings.
 
 ## Environment / tooling notes for future steps
 
@@ -323,8 +362,7 @@ PR's merge).
 
 ## Next recommended step
 
-Merge the Step 1.5 PR (closes out Phase 1), then start Phase 2 — Core
-Domain & Ports: Step 2.1 (pure domain models in `core/domain/`, zero
-framework imports) and Step 2.2 (abstract port interfaces in `core/ports/`
-— `LLMPort`, `VectorStorePort`, `EventBusPort`, `CachePort`,
-`DocumentProcessorPort`, repository ports).
+Merge the Step 2.1 PR, then continue Phase 2 with Step 2.2 — abstract port
+interfaces in `core/ports/` (`LLMPort`, `VectorStorePort`, `EventBusPort`,
+`CachePort`, `DocumentProcessorPort`, repository ports — one per entity),
+then Step 2.3 — domain events in `core/domain/events.py`.

@@ -77,6 +77,10 @@ ignore_missing_imports = true
 pythonpath = ["src"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+filterwarnings = [
+  "error::DeprecationWarning",
+  "error::PendingDeprecationWarning",
+]
 
 [tool.coverage.run]
 source = ["src"]
