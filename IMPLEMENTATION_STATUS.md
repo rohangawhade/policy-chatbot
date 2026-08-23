@@ -130,6 +130,38 @@ merge).
   - Frontend: `npm run lint` (ESLint) passes, `npm run build` (`tsc -b && vite
     build`) succeeds and produces a Tailwind-compiled CSS bundle.
 
+### Step 1.2 — Docker Compose setup — DONE
+
+- Files: `docker-compose.yml` (postgres, redis, backend, celery-worker,
+  frontend, named volume, bridge network), `docker-compose.override.yml`
+  (hot reload: `uvicorn --reload` + source mount for backend, `celery`
+  concurrency=1 + source mount for celery-worker, `npm run dev` targeting the
+  Dockerfile's `build` stage + source mount for frontend), `backend/Dockerfile`,
+  `frontend/Dockerfile` (multi-stage: build then `serve` the static output).
+- `backend/src/workers/celery_app.py` — a minimal, real (not mocked) Celery
+  app with no tasks registered yet, so the `celery-worker` service has
+  something genuine to run. Step 8.1 configures routing/retries/dead-letter
+  handling on this same file.
+- **Bug found and fixed during validation**: `.env.example`'s
+  `REDIS_URL`/`CELERY_BROKER_URL`/`CELERY_RESULT_BACKEND`/`DATABASE_URL` use
+  `localhost`, correct for host-based `make dev-backend` but wrong inside the
+  Compose network (services reach each other by service name). Fixed by
+  adding an `environment:` block to the `backend` and `celery-worker`
+  services in `docker-compose.yml` that overrides just those four vars to
+  use `postgres`/`redis` as hostnames — `env_file: .env` still supplies
+  everything else (API keys, secrets, LLM config).
+- Also fixed a `CPendingDeprecationWarning` from Celery by setting
+  `broker_connection_retry_on_startup = True` explicitly.
+- Validation: `docker compose build` succeeds for all three custom images;
+  `docker compose up -d` brings up all 5 containers cleanly — postgres and
+  redis report `healthy`, celery-worker logs `Connected to redis://redis:...`
+  and `ready`, backend responds (404 on `/` — expected, no routes yet;
+  confirms the server itself is up), frontend dev server responds 200 on
+  `:5173`. Torn down with `docker compose down -v` after validation; the
+  `.env` used for testing was a local, gitignored copy of `.env.example`
+  (not committed).
+- README.md updated with a working `docker compose up` quick-start.
+
 ## Environment / tooling notes for future steps
 
 - **gh CLI**: installed via `winget install --id GitHub.cli`, authenticated
@@ -151,8 +183,13 @@ merge).
 - **Commit signing**: SSH-based, configured locally (per-repo, not global) —
   see `CONTRIBUTING.md` "Signed commits" section for the reusable setup
   steps.
+- **Docker Desktop**: installed but was not running at the start of Phase 1;
+  started via `Docker Desktop.exe` and polled until `docker info` succeeded
+  (~1-2 min cold start). Needed before any `docker compose` command works.
 
 ## Next recommended step
 
-Merge the Step 1.1 PR, then continue Phase 1 with Step 1.2 — Docker Compose
-setup (`docker-compose.yml`, backend/frontend `Dockerfile`s, health checks).
+Merge the Step 1.2 PR, then continue Phase 1 with Step 1.3 — PostgreSQL +
+Alembic setup (ORM models for all entities, first migration; requires two
+approvals per CODEOWNERS in principle, though see the solo-maintainer note
+above).

@@ -1,0 +1,88 @@
+name: policypal
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: policypal
+      POSTGRES_PASSWORD: policypal
+      POSTGRES_DB: policypal
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U policypal"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - policypal
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - policypal
+
+  backend:
+    build:
+      context: ./backend
+    env_file:
+      - .env
+    environment:
+      # Override .env's host-based (localhost) values — inside the Compose
+      # network, services are reached by service name, not localhost.
+      DATABASE_URL: postgresql+asyncpg://policypal:policypal@postgres:5432/policypal
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - policypal
+    # Healthcheck targeting /health is added in Step 1.5, once that route exists.
+
+  celery-worker:
+    build:
+      context: ./backend
+    command: celery -A workers.celery_app worker --loglevel=info
+    working_dir: /app/src
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://policypal:policypal@postgres:5432/policypal
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - policypal
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "4173:4173"
+    networks:
+      - policypal
+
+volumes:
+  postgres_data:
+
+networks:
+  policypal:
+    driver: bridge

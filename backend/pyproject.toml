@@ -67,6 +67,11 @@ mypy_path = "src"
 strict = true
 warn_unused_ignores = true
 
+# Celery ships no py.typed marker and no reliable upstream stubs.
+[[tool.mypy.overrides]]
+module = "celery.*"
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
