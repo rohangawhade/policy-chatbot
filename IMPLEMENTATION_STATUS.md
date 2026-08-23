@@ -492,6 +492,102 @@ periodically, not just when explicitly asked.
   coverage on the new file, zero warnings, 83 tests passing across the
   whole suite (up from 72).
 
+### Step 3.2 — LiteLLM adapter — DONE
+
+- `backend/src/adapters/llm/litellm_adapter.py` — `LiteLLMAdapter`
+  fulfilling `LLMPort`. `generate()`/`generate_stream()` call
+  `litellm.acompletion()` (the async entry point — plan.md says
+  `litellm.completion()`, but `coding-standards.md` section 9 requires
+  every I/O-bound call to be genuinely `async`, and `acompletion()` is
+  LiteLLM's async equivalent); `embed()` calls `litellm.aembedding()`.
+  Model name is 100% caller-driven (`model=` param on every call,
+  ultimately sourced from `LLMConfig.cheap_model`/`powerful_model`/
+  `embedding_model` set up in Step 1.4) — the adapter itself has no
+  opinion on model tier.
+  - `tenacity` retry with exponential backoff on `APIConnectionError`,
+    `Timeout`, `RateLimitError`, `ServiceUnavailableError` only (never on
+    e.g. an auth/bad-request error, which fails identically every time):
+    3 attempts for `generate`/`generate_stream`, 2 for `embed`, per
+    `coding-standards.md` section 11's explicit per-call-type limits.
+    Every retry logs the attempt number and error via `structlog`
+    (`before_sleep` hook).
+  - `generate_stream()`'s retry covers only *establishing* the stream
+    (a private `_start_stream` helper) — once tokens have reached the
+    caller, a transparent retry would silently replay or duplicate
+    output, so a mid-stream failure propagates as-is instead.
+  - `litellm.acompletion()` is typed to return
+    `Union[ModelResponse, CustomStreamWrapper]` regardless of the
+    `stream=` value passed (no `@overload`s), and `ModelResponse.choices`
+    is itself typed `list[Union[Choices, StreamingChoices]]` — both
+    narrowed via explicit `isinstance` checks (raising `TypeError` on a
+    mismatch) rather than an `# type: ignore`, so `mypy --strict` passes
+    with zero suppressions in this file.
+- `backend/src/adapters/llm/mock_llm_adapter.py` — `MockLLMAdapter`
+  fulfilling `LLMPort` with no network calls: `generate`/`generate_stream`
+  return/stream a fixed canned string; `embed()` derives each vector
+  deterministically from a SHA-256 hash of the input text, so retrieval/
+  similarity tests built on it later get stable, reproducible results
+  without a real embedding model.
+- **Two real bugs found and fixed during validation, both in test
+  infrastructure rather than the adapter itself**:
+  1. `import litellm` alone (even before any of our code runs) raises a
+     `PydanticDeprecatedSince20` `DeprecationWarning` (a class-based
+     `Config` still used somewhere inside litellm 1.63.x's own
+     `types/llms/openai.py`) and, separately, an
+     `importlib.resources.open_text` `DeprecationWarning` under Python
+     3.12 (`litellm/utils.py`) — both promoted to hard errors by
+     `pyproject.toml`'s `filterwarnings`, breaking test collection the
+     instant any test imports `litellm`. Neither is our code. Fixed with
+     `backend/tests/conftest.py`, which imports `litellm` once up front
+     inside `warnings.catch_warnings()`/`simplefilter("ignore")` — the
+     module is cached in `sys.modules` afterward, so every later
+     `import litellm` (in the adapter or in test files) is a silent
+     no-op that can't re-trigger the warning.
+  2. `litellm/__init__.py` unconditionally calls `dotenv.load_dotenv()`
+     at import time, which loads the repo-root `.env` file straight into
+     the real process `os.environ` — indistinguishable afterward from a
+     genuinely exported env var, for the rest of the process. This
+     silently broke `test_config.py`'s `_env_file=None` isolation
+     (`PineconeConfig(_env_file=None).api_key` started returning `""`
+     instead of `None`, picked up from the local `.env`'s empty
+     `PINECONE_API_KEY=` line) the moment `conftest.py` imported
+     `litellm` for fix #1. Fixed by snapshotting `os.environ` before the
+     import and deleting exactly the keys `dotenv.load_dotenv()` added
+     (real env vars are never touched either way — `load_dotenv()`
+     defaults to not overriding a value that's already set). Production
+     impact is judged benign for the same reason (real env vars, e.g.
+     Docker Compose `environment:` overrides, already win), but this is
+     a real latent side effect worth knowing about if `litellm` is ever
+     imported before `config.py` reads an env var somewhere unexpected —
+     flagging here rather than silently working around it only in tests.
+- **Validated with mocks only, not against a real provider**: both
+  `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` are empty in the local `.env`
+  — no real credentials are available in this environment. Every
+  `LiteLLMAdapter` test monkeypatches `litellm.acompletion`/
+  `litellm.aembedding` directly (constructing real `litellm` response
+  objects — `ModelResponse`, `Choices`, `Message`, `ModelResponseStream`,
+  `StreamingChoices`, `Delta`, `EmbeddingResponse` — rather than raw
+  dicts, so the tests still catch a real shape mismatch). No live API
+  call has been made. Revisit with a real smoke test once a provider key
+  is available (`MockLLMAdapter` is the deliberate stand-in for local
+  dev/testing until then, per plan.md's explicit ask for one).
+- Validation: `ruff check`, `ruff format --check`, `mypy --strict src`
+  all pass with zero suppressions in the new files. New
+  `tests/test_litellm_adapter.py` (success path, `None`-content edge
+  case, retry-then-succeed, retry-exhaustion-then-reraise, non-retryable
+  error short-circuits after one attempt, wrong-response-type guards for
+  both `generate` and the embedded `Choices`/`StreamingChoices` check,
+  streaming token extraction skipping empty deltas, streaming
+  retry-then-succeed, embed happy path, embed's 2-attempt retry ceiling,
+  embed wrong-response-type guard) and `tests/test_mock_llm_adapter.py`
+  (non-empty deterministic `generate`, `generate_stream` tokens joining
+  back to the same canned response, `embed` one-vector-per-input in
+  order, deterministic per-text, distinct across different texts,
+  correct dimensionality) — 100% coverage on both new adapter files, 105
+  tests passing across the whole suite (up from 83), zero warnings.
+  An `asyncio.sleep` patch (autouse fixture) removes real backoff delay
+  from the retry tests so they run in milliseconds, not seconds.
+
 ## Environment / tooling notes for future steps
 
 - **gh CLI**: installed via `winget install --id GitHub.cli`, authenticated
@@ -519,10 +615,9 @@ periodically, not just when explicitly asked.
 
 ## Next recommended step
 
-Merge the Step 3.1 PR, then continue Phase 3 — Infrastructure Adapters:
-Step 3.2 (`LiteLLMAdapter` + `MockLLMAdapter` implementing `LLMPort`, with
-`tenacity` retry), Step 3.3 (`PineconeAdapter` implementing
-`VectorStorePort`, one namespace per employer), Step 3.4
+Merge the Step 3.2 PR, then continue Phase 3 — Infrastructure Adapters:
+Step 3.3 (`PineconeAdapter` implementing `VectorStorePort`, one namespace
+per employer), Step 3.4
 (`RedisCacheAdapter` + `InMemoryCacheAdapter` implementing `CachePort`),
 Step 3.5 (PostgreSQL repository adapters implementing every port in
 `repository_ports.py`, Unit of Work pattern), Step 3.6 (document processor
