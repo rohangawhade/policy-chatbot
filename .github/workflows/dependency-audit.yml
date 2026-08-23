@@ -1,0 +1,60 @@
+name: Dependency Audit
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * 1" # weekly, Monday 06:00 UTC
+
+jobs:
+  dependency-audit:
+    name: dependency-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for backend
+        id: backend
+        run: |
+          if [ -f "backend/pyproject.toml" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-python@v5
+        if: steps.backend.outputs.exists == 'true'
+        with:
+          python-version: "3.12"
+
+      - name: pip-audit
+        if: steps.backend.outputs.exists == 'true'
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip pip-audit
+          pip-audit -r <(pip freeze) || pip-audit --requirement pyproject.toml
+
+      - name: Check for frontend
+        id: frontend
+        run: |
+          if [ -f "frontend/package.json" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.frontend.outputs.exists == 'true'
+        with:
+          node-version: "20"
+
+      - name: npm audit
+        if: steps.frontend.outputs.exists == 'true'
+        working-directory: frontend
+        run: npm audit --audit-level=high
+
+      - name: Nothing to audit yet
+        if: steps.backend.outputs.exists == 'false' && steps.frontend.outputs.exists == 'false'
+        run: echo "No backend/pyproject.toml or frontend/package.json yet — skipping."
