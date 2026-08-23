@@ -48,7 +48,7 @@ dev = [
 
 [tool.setuptools]
 package-dir = { "" = "src" }
-py-modules = ["main"]
+py-modules = ["main", "config"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
