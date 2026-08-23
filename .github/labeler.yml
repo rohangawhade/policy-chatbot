@@ -1,0 +1,45 @@
+# Auto-labels PRs by branch prefix, for use with actions/labeler (added in Step 0.4's ci.yml).
+"type: feature":
+  - head-branch: ["^feat/"]
+
+"type: bug":
+  - head-branch: ["^fix/"]
+
+"type: hotfix":
+  - head-branch: ["^hotfix/"]
+
+"type: refactor":
+  - head-branch: ["^refactor/", "^perf/"]
+
+"type: docs":
+  - head-branch: ["^docs/"]
+
+"type: chore":
+  - head-branch: ["^chore/", "^build/", "^ci/", "^test/"]
+
+"type: security":
+  - head-branch: ["^security/"]
+
+# Component labels by changed path
+"area: backend":
+  - changed-files:
+      - any-glob-to-any-file: "backend/**"
+
+"area: frontend":
+  - changed-files:
+      - any-glob-to-any-file: "frontend/**"
+
+"area: infra":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "docker-compose*.yml"
+          - "backend/Dockerfile"
+          - "frontend/Dockerfile"
+          - ".github/workflows/**"
+
+"area: data":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "backend/scripts/**"
+          - "data/eval/**"
+          - "eval/**"
