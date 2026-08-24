@@ -36,7 +36,7 @@ See `files/plan.md` for the full design (tech stack rationale, data flow diagram
 - [x] Auth + multi-tenancy: JWT access/refresh tokens, role guards, tenant context middleware (Phase 5)
 - [x] RAG pipeline: guardrails, query routing, retrieval, prompt assembly, streaming generation, conversation memory (Phase 6)
 - [x] Document versioning: version tracking, vector/chunk replacement, cache invalidation (Phase 7)
-- [ ] Celery ingestion workers (Phase 8)
+- [x] Celery ingestion workers: queue routing, retries, dead-letter handling, full ingestion pipeline, status tracking (Phase 8)
 - [ ] API routes (Phase 9)
 - [ ] React chat UI + admin dashboard (Phase 10)
 - [ ] Data acquisition & seeding (Phase 11)
