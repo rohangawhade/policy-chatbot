@@ -1222,6 +1222,60 @@ periodically, not just when explicitly asked.
   from 286), zero warnings. Run against a real
   `docker compose up -d postgres` container, torn down after.
 
+### Step 5.2 — Auth middleware — DONE
+
+- `backend/src/api/dependencies.py` — **new file**, the project's first
+  real DI wiring (`files/plan.md`'s api/ folder structure names this
+  file's exact purpose). `get_employee_repository(session)` wraps
+  `PostgresEmployeeRepository`; `get_auth_service(employee_repository)`
+  builds a real `AuthService` from `AuthConfig`'s values (defined since
+  Step 1.4, unused until now). Both are plain FastAPI dependency
+  functions chained via `Depends(...)`, not a container/registry — no
+  more machinery than the two dependencies that actually exist today
+  needs.
+- `backend/src/api/middleware/auth_middleware.py` —
+  `get_current_user(token, auth_service)` decodes the request's bearer
+  token (via `fastapi.security.OAuth2PasswordBearer`) into a
+  `TokenPayload` (plan.md's "CurrentUser" — reused directly rather than
+  defining a duplicate type, since the shape is identical), converting
+  `AuthService`'s `InvalidTokenError` into a 401
+  (`coding-standards.md` section 6: "API layer converts domain
+  exceptions to HTTP status codes"). Also rejects a refresh token
+  presented as an access token here — `AuthService.decode_token()`
+  itself only validates structure/signature/expiry, not which token
+  type is appropriate for the caller's purpose, so that check belongs
+  at this boundary. `require_role(*allowed_roles: UserRole)` is a
+  dependency *factory*: returns a nested dependency that 403s if
+  `current_user.role` isn't in `allowed_roles`, used as
+  `dependencies=[Depends(require_role(UserRole.ADMIN))]` on a route.
+  **Deviates from plan.md's literal `require_role("admin")` string
+  example** — uses `UserRole` enum members instead, since the enum
+  already exists and a string param would need its own validation/typo
+  surface for no benefit.
+- `pyproject.toml` gained a `[tool.ruff.lint.flake8-bugbear]
+  extend-immutable-calls` entry for `fastapi.Depends`/`Query`/`Path`/
+  `Header`/`Body`/`Security` — ruff's B008 ("no function calls in
+  argument defaults") otherwise flags every single `Depends(...)`
+  default, which is FastAPI's own required DI pattern, not a bug. Ruff's
+  documented mechanism for exactly this. Will matter for every future
+  route/dependency file, not just this one.
+- Validation: `ruff check`, `ruff format --check`, `mypy --strict src`
+  all pass. New `tests/test_dependencies.py` (2 tests, against a real
+  `db_session`): each DI function returns the right concrete type, and
+  `get_auth_service`'s result is wired with the actual configured
+  secret/algorithm (proven by decoding a token encoded with
+  `auth_config`'s own values). New `tests/test_auth_middleware.py` (8
+  tests, via a throwaway `FastAPI` app + `TestClient`, with
+  `get_auth_service` overridden to a test-secret-keyed `AuthService` —
+  the standard FastAPI dependency-override testing pattern): no token,
+  garbage token, valid access token, refresh-token-as-access-token, and
+  expired-token cases for `get_current_user`; role-allowed/role-denied/
+  no-token cases for `require_role`. 100% coverage on both new files,
+  **100% coverage across the entire `src/` tree** (1489/1489
+  statements), 311 tests passing across the whole suite (up from 301),
+  zero warnings. Run against a real `docker compose up -d postgres`
+  container, torn down after.
+
 ## Environment / tooling notes for future steps
 
 - **Celery tasks need `include=` in `celery_app.py`**: a new
@@ -1275,23 +1329,25 @@ periodically, not just when explicitly asked.
 ## Next recommended step
 
 Phase 4 (Chunking & Embedding Pipeline) is COMPLETE. Phase 5
-(Authentication & Multi-Tenancy) is underway: Step 5.1 (`AuthService` —
-OAuth2 password flow, JWT access + refresh tokens) is done (PR not yet
-opened/merged as of this writing — see branch `feat/auth-service-jwt`).
-Continue with Step 5.2 (auth middleware — a FastAPI dependency that
-calls `AuthService.decode_token()` on the incoming request's bearer
-token and attaches a `CurrentUser` to it, plus `require_role(...)`
-guards; this is the first step that needs `api/dependencies.py` — DI
-wiring doesn't exist yet, so constructing a real `AuthService` for the
-app needs a session-scoped `EmployeeRepository` and `AuthConfig`'s
-values threaded through FastAPI's dependency injection for the first
-time), Step 5.3 (tenant context middleware — `employer_id` from the JWT
-into a `contextvars` context, every repository query and vector search
-auto-scoped to it; this is the step that finally activates the tenant
-scoping every Phase 3 adapter/repository has been built to accept but
-not yet enforce). **Both remaining steps require two CODEOWNERS
-approvals per `files/plan.md`**, though Step 0.2's note applies —
-solo-maintainer repo currently has `required_approving_review_count: 0`.
+(Authentication & Multi-Tenancy): Steps 5.1 (`AuthService`) and 5.2
+(auth middleware, `api/dependencies.py`) are done (Step 5.2's PR not yet
+opened/merged as of this writing — see branch
+`security/auth-middleware-role-guards`). Continue with Step 5.3, the
+last step of the phase — tenant context middleware: extract
+`employer_id` from the already-authenticated `TokenPayload` (Step 5.2's
+`get_current_user`) into a `contextvars.ContextVar`, set by a FastAPI
+middleware early in the request lifecycle, so every repository query
+and vector search can read it without threading it through every
+function signature. This is the step that finally *activates* the
+tenant scoping every Phase 3 repository/adapter has been built to
+accept as a parameter but never enforces on its own — worth reviewing
+how `PostgresRepository` subclasses currently take `employer_id` as a
+plain method argument (e.g. `list_by_employer`) before deciding whether
+Step 5.3 should wrap repositories to auto-inject it, or whether
+enforcement is better left to each call site reading the context var
+explicitly. **Requires two CODEOWNERS approvals per `files/plan.md`**,
+though Step 0.2's note applies — solo-maintainer repo currently has
+`required_approving_review_count: 0`.
 
 As of 2026-08-24 the user asked to stop pausing for confirmation before
 merges or at phase boundaries — merge once CI is green and keep going,
