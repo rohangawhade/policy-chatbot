@@ -1142,6 +1142,69 @@ periodically, not just when explicitly asked.
 
 **Phase 4 — Chunking & Embedding Pipeline: COMPLETE.**
 
+## Phase 5 — Authentication & Multi-Tenancy
+
+### Step 5.1 — Auth service + JWT — DONE
+
+- `backend/src/core/services/auth_service.py` — `AuthService`: OAuth2
+  password flow (`files/plan.md` Step 5.1). `authenticate(email,
+  password)` looks up the account via `EmployeeRepository.get_by_email`,
+  verifies the bcrypt hash and `is_active`, and issues a `TokenPair`
+  (access + refresh JWTs). Both tokens carry `sub` (user id),
+  `employer_id` (`null` for `ADMIN`, per `core/domain/employee.py`'s
+  existing "None only for ADMIN" rule), `role`, and a `token_type` claim
+  distinguishing access from refresh — `refresh_access_token()` checks
+  this explicitly so a refresh token can never be used to skip
+  authentication as an access token, and vice versa.
+  `hash_password`/`verify_password` are `@staticmethod`s (bcrypt, 12
+  rounds, per `coding-standards.md` section 8) — no service state needed
+  for either. `decode_token()` and `refresh_access_token()` are
+  synchronous (pure JWT work, no I/O); only `authenticate()` is async
+  (the repository call). Constructor takes `secret_key`/`algorithm`/
+  expiry values explicitly rather than reading `config` itself — same
+  "service has no opinion, caller decides" pattern as `SemanticChunker`/
+  `EmbeddingService`; Step 5.2's DI wiring will pass in `AuthConfig`'s
+  values (already defined since Step 1.4, unused until now).
+- `core/domain/errors.py` gained `AuthenticationError` (base) →
+  `InvalidCredentialsError` (deliberately identical message/code for
+  "no such email" and "wrong password" — never let a caller distinguish
+  the two) and `InvalidTokenError` (malformed/expired/wrong-type token).
+  Neither existed before since nothing raised them until now, per this
+  file's own stated policy of only defining exceptions an actual caller
+  needs.
+- **Real, unrelated dependency bug found and fixed**: `passlib[bcrypt]`
+  (pinned `>=1.7,<2`, unmaintained since 2020) probes
+  `bcrypt.__about__.__version__` internally to detect a legacy wrap bug
+  — that attribute was removed in `bcrypt` 4.0. With no upper bound of
+  its own, `pip` resolved `bcrypt` 5.0.0, and passlib's *own internal
+  self-test* (which hashes a 250+ byte dummy secret to probe the bug)
+  then hit `bcrypt` 4.0+'s new 72-byte password limit — every single
+  call to `hash_password`/`verify_password` raised `ValueError`
+  immediately, unrelated to any real password's length. Fixed by pinning
+  `bcrypt>=3.2,<4.0` directly in `pyproject.toml` (same class of fix as
+  Step 3.6's `onnx` pin — steering dependency resolution to a version
+  the direct dependency actually supports, not replacing the library
+  choice itself). Verified with a fresh `pip install -e ".[dev]"` and a
+  full `docker compose build backend` — both resolve `bcrypt==3.2.2`
+  cleanly.
+- Validation: `ruff check`, `ruff format --check`, `mypy --strict src`
+  all pass (`jose.*`/`passlib.*` added to `pyproject.toml`'s
+  `ignore_missing_imports` override — no stubs, same as
+  celery/pinecone/fitz/openpyxl/lxml). New `tests/test_auth_service.py`
+  (19 tests, via a `FakeEmployeeRepository`): password hash/verify round
+  trip and rejection, successful authentication issuing a valid token
+  pair (including the `ADMIN`/no-`employer_id` case), each credential
+  failure mode (unknown email, inactive account, wrong password) all
+  raising the same `InvalidCredentialsError`, token decoding rejecting a
+  wrong signing key/expired token/missing claims/garbage input, and
+  refresh-token issuance including the token-type guard rejecting an
+  access token presented as a refresh token. `tests/test_errors.py`
+  extended for the three new exception classes. 100% coverage on both
+  new/changed files, **100% coverage across the entire `src/` tree**
+  (1455/1455 statements), 301 tests passing across the whole suite (up
+  from 286), zero warnings. Run against a real
+  `docker compose up -d postgres` container, torn down after.
+
 ## Environment / tooling notes for future steps
 
 - **Celery tasks need `include=` in `celery_app.py`**: a new
@@ -1194,26 +1257,24 @@ periodically, not just when explicitly asked.
 
 ## Next recommended step
 
-Phase 4 (Chunking & Embedding Pipeline) is done, Steps 4.1-4.4 all
-complete (Step 4.4's PR not yet opened/merged as of this writing — see
-the branch `feat/embedding-and-indexing-task`). Continue with Phase 5 — Authentication & Multi-Tenancy: Step 5.1
-(`auth_service.py` — OAuth2 password flow, JWT access + refresh tokens
-via `python-jose`, password hashing via `passlib[bcrypt]`; tokens carry
-`user_id`/`employer_id`/`role`; **requires two CODEOWNERS approvals**
-per `files/plan.md`, though Step 0.2's note applies — solo-maintainer
-repo currently has `required_approving_review_count: 0`), Step 5.2
-(auth middleware — FastAPI dependency decoding/validating JWTs,
-`require_role(...)` guards), Step 5.3 (tenant context middleware —
-`employer_id` from the JWT into a `contextvars` context, every
-repository query and vector search auto-scoped to it; this is the step
-that finally activates the tenant scoping every Phase 3 adapter/
-repository has been built to accept but not yet enforce).
-
-This is also the first phase needing real user/password domain
-work — worth reviewing `core/domain/employee.py`'s existing
-`hashed_password` field (added Step 2.1) and `EmployeeRepository` (Step
-3.5) before starting, since both already exist and Step 5.1 builds on
-them rather than adding new persistence.
+Phase 4 (Chunking & Embedding Pipeline) is COMPLETE. Phase 5
+(Authentication & Multi-Tenancy) is underway: Step 5.1 (`AuthService` —
+OAuth2 password flow, JWT access + refresh tokens) is done (PR not yet
+opened/merged as of this writing — see branch `feat/auth-service-jwt`).
+Continue with Step 5.2 (auth middleware — a FastAPI dependency that
+calls `AuthService.decode_token()` on the incoming request's bearer
+token and attaches a `CurrentUser` to it, plus `require_role(...)`
+guards; this is the first step that needs `api/dependencies.py` — DI
+wiring doesn't exist yet, so constructing a real `AuthService` for the
+app needs a session-scoped `EmployeeRepository` and `AuthConfig`'s
+values threaded through FastAPI's dependency injection for the first
+time), Step 5.3 (tenant context middleware — `employer_id` from the JWT
+into a `contextvars` context, every repository query and vector search
+auto-scoped to it; this is the step that finally activates the tenant
+scoping every Phase 3 adapter/repository has been built to accept but
+not yet enforce). **Both remaining steps require two CODEOWNERS
+approvals per `files/plan.md`**, though Step 0.2's note applies —
+solo-maintainer repo currently has `required_approving_review_count: 0`.
 
 As of 2026-08-24 the user asked to stop pausing for confirmation before
 merges or at phase boundaries — merge once CI is green and keep going,
