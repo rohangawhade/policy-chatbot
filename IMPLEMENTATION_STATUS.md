@@ -1045,8 +1045,99 @@ periodically, not just when explicitly asked.
   zero warnings. Run against a real `docker compose up -d postgres`
   container, torn down after.
 
+### Step 4.4 — Embedding and indexing task — DONE
+
+- `backend/src/core/services/embedding_service.py` — `EmbeddingService`
+  (the exact collaborator `files/coding-standards.md` section 1's SRP
+  example names): `embed_and_store(chunks, document)` embeds every
+  chunk's text in one `LLMPort.embed()` call, upserts one `VectorRecord`
+  per chunk to Pinecone (namespace = `str(document.employer_id)`, per
+  plan.md's one-namespace-per-employer tenant isolation), persists each
+  `DocumentChunk` via `DocumentChunkRepository`, then publishes
+  `DocumentEmbeddedEvent`. Vector metadata carries
+  `employer_id`/`document_id`/`document_title`/`document_version`/
+  `chunk_index` always, plus `policy_type`/`section_title`/`page_number`
+  when set on the source `Document`/`DocumentChunk` — this is where Step
+  4.1's original per-chunk metadata list (`document_title`/`policy_type`)
+  actually lands, per Step 4.3's correction. Pure ports dependency —
+  fully unit-testable without a real LLM, vector store, database, or
+  event bus. An empty `chunks` list is a valid, uneventful completion
+  (still publishes `chunk_count=0`), not an error.
+- `backend/src/workers/embedding_task.py` — the actual Celery task
+  (`embedding.embed_and_index_document`), registered on the shared
+  `celery_app`. Thin by design: deserializes `Document`/`DocumentChunk`
+  from `.model_dump(mode="json")` dicts (Celery's default JSON
+  serializer can't carry `UUID`/`datetime` directly), bridges into
+  `EmbeddingService`'s async code via `asyncio.run()`, owns one DB
+  session for the task (constructed fresh, committed once at the end —
+  the same "single session, committed at the boundary" UoW rule the API
+  layer will follow, just with the Celery task as the boundary instead
+  of an HTTP request), and constructs concrete adapters
+  (`LiteLLMAdapter`, `PineconeAdapter`, `PostgresDocumentChunkRepository`,
+  `InMemoryEventBus`) fresh per invocation rather than at module level —
+  `PineconeAdapter`'s constructor raises immediately when
+  `PINECONE_API_KEY` isn't configured (no key in this environment, per
+  Steps 3.2/3.3), so building it at import time would break every
+  credential-less environment including this one and CI.
+- **Real bug found and fixed by real Docker validation, not just
+  mocks**: after `docker compose up -d --build celery-worker`, the
+  running worker's startup banner showed an **empty** `[tasks]` list —
+  `embedding.embed_and_index_document` never registered. Root cause:
+  `celery -A workers.celery_app worker` (the Dockerfile's actual
+  command) only ever imports `celery_app.py` itself; nothing imports
+  `embedding_task.py`, so its `@app.task` decorator never runs. Fixed by
+  adding `include=["workers.embedding_task"]` to the `Celery(...)`
+  constructor — Celery's own mechanism for importing task modules for
+  their registration side effect after `app` already exists (avoids the
+  circular import that a direct `import workers.embedding_task` at the
+  bottom of `celery_app.py` would hit, since `embedding_task.py` itself
+  does `from workers.celery_app import app`). Re-verified by rebuilding
+  and confirming `embedding.embed_and_index_document` now appears in the
+  worker's `[tasks]` list. **This class of bug — a task that's fully
+  unit-tested but never actually registers with a real worker — can't
+  be caught by any unit test**, only by starting the real worker
+  process and reading its own startup output; worth remembering for
+  Phase 8's `document_ingestion_task.py`, which will hit the exact same
+  `include=` requirement.
+- Validation: `ruff check`, `ruff format --check`, `mypy --strict src`
+  all pass (`@app.task` needed a documented `# type: ignore[misc]` —
+  `celery.*`'s `ignore_missing_imports` override makes the decorator
+  resolve to `Any`, which mypy strict's `disallow_untyped_decorators`
+  still flags). New `tests/test_embedding_service.py` (7 tests, via
+  fakes for all four ports): embeds all chunk texts with the configured
+  model, upserts one record per chunk to the employer namespace, vector
+  metadata includes/omits the optional fields correctly, every chunk
+  persisted via the repository, `DocumentEmbeddedEvent` published with
+  the right `chunk_count`, the empty-chunks no-op-but-still-publishes
+  path. New `tests/test_embedding_task.py` (4 tests, via monkeypatched
+  adapter constructors and a fake session/context-manager): the task is
+  registered on the Celery app, `Document`/`DocumentChunk` survive a
+  JSON round-trip, `_embed_and_index` wires every adapter into
+  `EmbeddingService` correctly and commits the session, the Celery entry
+  point deserializes its JSON args and delegates correctly. 100%
+  coverage on both new files, **100% coverage across the entire `src/`
+  tree** (1380/1380 statements), 286 tests passing across the whole
+  suite (up from 275), zero warnings. Run against a real
+  `docker compose up -d postgres` container for the test suite, **and**
+  a full `docker compose up -d --build` of every service (postgres,
+  redis, backend, celery-worker, frontend) to catch the task
+  registration bug above — all five containers came up healthy/running,
+  torn down after (`docker compose down`, no `-v`).
+
+**Phase 4 — Chunking & Embedding Pipeline: COMPLETE.**
+
 ## Environment / tooling notes for future steps
 
+- **Celery tasks need `include=` in `celery_app.py`**: a new
+  `@app.task`-decorated module doesn't register with a running worker
+  just by existing — `celery -A workers.celery_app worker` only imports
+  `celery_app.py` itself. Add the new module's dotted path to
+  `Celery(..., include=[...])` (Step 4.4 did this for
+  `workers.embedding_task`; Phase 8's `document_ingestion_task.py` will
+  need the same). No unit test catches a missing registration — verify
+  with `docker compose up -d --build celery-worker` and check the
+  worker's own startup banner for a `[tasks]` list containing the new
+  task name.
 - **Standing gap**: `rag-eval` (added in Step 4.2) is not yet in `main`'s
   required status checks — `gh api --method PATCH .../branches/main/
   protection/required_status_checks` to add it was classifier-blocked
@@ -1087,26 +1178,26 @@ periodically, not just when explicitly asked.
 
 ## Next recommended step
 
-Steps 4.1-4.3 are done (Step 4.3's PR not yet opened/merged as of this
-writing — see the branch `feat/chunker-pipeline`). Continue Phase 4 —
-Chunking & Embedding Pipeline: Step 4.4, the last step of the phase —
-a Celery task that takes a `Document` + its raw extracted text, runs it
-through `ChunkerPipeline.process()`, embeds each resulting chunk's text
-via `LLMPort.embed()` (a genuinely new embedding call per chunk — not
-reusing `SemanticChunker`'s internal sentence-level embeddings, which
-are only for topic-boundary detection and are discarded), upserts to
-Pinecone via `VectorStorePort.upsert()` with metadata built from the
-`Document` (`employer_id`, `policy_id`, `doc_id`, `chunk_index`,
-`doc_version`, plus `document_title`/`policy_type`/`section_title`/
-`page_number` per plan.md Step 4.1's original metadata list), persists
-`DocumentChunk` rows via `DocumentChunkRepository` for traceability, and
-publishes `DocumentEmbeddedEvent`. This is also the first step that
-needs real Celery task wiring (`celery_app.py` currently has no
-registered tasks) and DI-style construction of `ChunkerPipeline` (needs
-a concrete `LLMPort` and `LLMConfig.embedding_model`) — likely worth
-sanity-checking how `adapters/persistence`'s session-per-request pattern
-translates to a Celery task context (no FastAPI request to hang a
-session off of) before writing it.
+Phase 4 (Chunking & Embedding Pipeline) is done, Steps 4.1-4.4 all
+complete (Step 4.4's PR not yet opened/merged as of this writing — see
+the branch `feat/embedding-and-indexing-task`). Continue with Phase 5 — Authentication & Multi-Tenancy: Step 5.1
+(`auth_service.py` — OAuth2 password flow, JWT access + refresh tokens
+via `python-jose`, password hashing via `passlib[bcrypt]`; tokens carry
+`user_id`/`employer_id`/`role`; **requires two CODEOWNERS approvals**
+per `files/plan.md`, though Step 0.2's note applies — solo-maintainer
+repo currently has `required_approving_review_count: 0`), Step 5.2
+(auth middleware — FastAPI dependency decoding/validating JWTs,
+`require_role(...)` guards), Step 5.3 (tenant context middleware —
+`employer_id` from the JWT into a `contextvars` context, every
+repository query and vector search auto-scoped to it; this is the step
+that finally activates the tenant scoping every Phase 3 adapter/
+repository has been built to accept but not yet enforce).
+
+This is also the first phase needing real user/password domain
+work — worth reviewing `core/domain/employee.py`'s existing
+`hashed_password` field (added Step 2.1) and `EmployeeRepository` (Step
+3.5) before starting, since both already exist and Step 5.1 builds on
+them rather than adding new persistence.
 
 As of 2026-08-24 the user asked to stop pausing for confirmation before
 merges or at phase boundaries — merge once CI is green and keep going,
