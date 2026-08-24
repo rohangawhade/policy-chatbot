@@ -11,6 +11,7 @@ from enum import Enum as PyEnum
 
 from sqlalchemy import (
     Boolean,
+    DateTime,
     Enum,
     Float,
     ForeignKey,
@@ -28,8 +29,14 @@ class Base(DeclarativeBase):
 
 
 class TimestampMixin:
-    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
+    # timezone=True is required: domain models (Step 2.1) generate
+    # timezone-aware `datetime.now(UTC)` values, which asyncpg refuses to
+    # bind into a naive `TIMESTAMP WITHOUT TIME ZONE` column (SQLAlchemy's
+    # default for a bare `Mapped[datetime]`).
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
 
 
 class UserRole(PyEnum):
@@ -122,7 +129,9 @@ class EmployeePolicy(Base):
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     employee_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("employees.id"), index=True)
     policy_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("policies.id"), index=True)
-    enrolled_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    enrolled_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
     employee: Mapped[Employee] = relationship(back_populates="enrollments")
@@ -159,7 +168,7 @@ class DocumentChunk(Base):
     section_title: Mapped[str | None] = mapped_column(String(512))
     page_number: Mapped[int | None] = mapped_column(Integer)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     document: Mapped[Document] = relationship(back_populates="chunks")
 
@@ -185,7 +194,7 @@ class Message(Base):
     role: Mapped[MessageRole] = mapped_column(Enum(MessageRole, name="message_role"))
     content: Mapped[str] = mapped_column(Text, nullable=False)
     model_used: Mapped[str | None] = mapped_column(String(128))
-    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
     feedback: Mapped[list["Feedback"]] = relationship(back_populates="message")
@@ -200,7 +209,7 @@ class Feedback(Base):
     employer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("employers.id"), index=True)
     rating: Mapped[FeedbackRating] = mapped_column(Enum(FeedbackRating, name="feedback_rating"))
     comment: Mapped[str | None] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     message: Mapped[Message] = relationship(back_populates="feedback")
 
@@ -216,7 +225,7 @@ class LLMCostLog(Base):
     output_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
     estimated_cost_usd: Mapped[float] = mapped_column(Float, nullable=False)
     query_complexity_score: Mapped[float | None] = mapped_column(Float)
-    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class RequestLatencyLog(Base):
@@ -229,7 +238,7 @@ class RequestLatencyLog(Base):
     llm_ms: Mapped[int | None] = mapped_column(Integer)
     overhead_ms: Mapped[int | None] = mapped_column(Integer)
     model_tier: Mapped[str | None] = mapped_column(String(16))
-    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class FlaggedResponse(Base, TimestampMixin):
@@ -255,4 +264,4 @@ class GuardrailRejection(Base):
     employer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("employers.id"), index=True)
     query_text: Mapped[str] = mapped_column(Text, nullable=False)
     rejection_reason: Mapped[str] = mapped_column(String(128), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

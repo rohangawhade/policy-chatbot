@@ -14,6 +14,25 @@ jobs:
   backend-quality:
     name: backend-quality
     runs-on: ubuntu-latest
+    # Step 3.5's repository tests hit a real Postgres (mocking
+    # SQLAlchemy's Session/Select internals would be too weak to catch
+    # real mapping bugs — see IMPLEMENTATION_STATUS.md's Step 3.5 entry
+    # for the ORM/domain enum and timezone bugs this actually caught).
+    # Same image/credentials as migration-check.yml's service.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: policypal
+          POSTGRES_PASSWORD: policypal
+          POSTGRES_DB: policypal
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
 
@@ -53,9 +72,18 @@ jobs:
         working-directory: backend
         run: mypy --strict src
 
+      - name: Apply migrations (for repository tests)
+        if: steps.check.outputs.exists == 'true'
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql+asyncpg://policypal:policypal@localhost:5432/policypal
+        run: alembic upgrade head
+
       - name: pytest with coverage
         if: steps.check.outputs.exists == 'true'
         working-directory: backend
+        env:
+          DATABASE_URL: postgresql+asyncpg://policypal:policypal@localhost:5432/policypal
         run: pytest --cov=src --cov-report=term-missing --cov-fail-under=80
 
       - name: No backend yet
