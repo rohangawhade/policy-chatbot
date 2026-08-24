@@ -131,6 +131,10 @@ async def test_cache_port_concrete_implementation_satisfies_the_contract() -> No
         async def exists(self, key: str) -> bool:
             return key in self.store
 
+        async def delete_by_prefix(self, prefix: str) -> None:
+            for key in [key for key in self.store if key.startswith(prefix)]:
+                del self.store[key]
+
     cache = _FakeCache()
     await cache.set("k", "v")
     assert await cache.get("k") == "v"
@@ -139,6 +143,14 @@ async def test_cache_port_concrete_implementation_satisfies_the_contract() -> No
     await cache.delete("k")
     assert await cache.get("k") is None
     assert await cache.exists("k") is False
+
+    await cache.set("prefix:a", "1")
+    await cache.set("prefix:b", "2")
+    await cache.set("other:c", "3")
+    await cache.delete_by_prefix("prefix:")
+    assert await cache.get("prefix:a") is None
+    assert await cache.get("prefix:b") is None
+    assert await cache.get("other:c") == "3"
 
 
 def test_document_processor_port_concrete_implementation_satisfies_the_contract() -> None:

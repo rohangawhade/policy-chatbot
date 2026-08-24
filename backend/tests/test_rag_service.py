@@ -17,7 +17,7 @@ from core.domain.events import (
     DomainEvent,
     LowConfidenceResponseEvent,
 )
-from core.domain.policy import Enrollment
+from core.domain.policy import Enrollment, PolicyType
 from core.ports.cache_port import CachePort
 from core.ports.event_bus_port import EventBusPort, EventHandler
 from core.ports.llm_port import LLMPort, UsageCost
@@ -69,6 +69,7 @@ class FakeCache(CachePort):
         self._stored = stored or {}
         self.get_calls: list[str] = []
         self.set_calls: list[tuple[str, str, int | None]] = []
+        self.delete_by_prefix_calls: list[str] = []
 
     async def get(self, key: str) -> str | None:
         self.get_calls.append(key)
@@ -83,6 +84,11 @@ class FakeCache(CachePort):
 
     async def exists(self, key: str) -> bool:
         raise NotImplementedError
+
+    async def delete_by_prefix(self, prefix: str) -> None:
+        self.delete_by_prefix_calls.append(prefix)
+        for key in [key for key in self._stored if key.startswith(prefix)]:
+            del self._stored[key]
 
 
 class FakeVectorStore(VectorStorePort):
@@ -363,6 +369,86 @@ async def test_cache_key_differs_across_queries_for_the_same_employer() -> None:
     key_two = service._cache_key(employer_id, "What's my copay?")
 
     assert key_one != key_two
+
+
+async def test_cache_key_differs_across_policy_types_for_the_same_query() -> None:
+    service = _service(FakeLLM(), FakeCache(), FakeVectorStore(), FakeEnrollmentRepository())
+    employer_id = uuid4()
+
+    key_dental = service._cache_key(employer_id, "What's my deductible?", PolicyType.DENTAL)
+    key_vision = service._cache_key(employer_id, "What's my deductible?", PolicyType.VISION)
+    key_none = service._cache_key(employer_id, "What's my deductible?", None)
+
+    assert len({key_dental, key_vision, key_none}) == 3
+
+
+async def test_cache_key_for_a_detected_policy_type_shares_the_invalidation_prefix() -> None:
+    service = _service(FakeLLM(), FakeCache(), FakeVectorStore(), FakeEnrollmentRepository())
+    employer_id = uuid4()
+
+    key = service._cache_key(employer_id, "What's my dental deductible?", PolicyType.DENTAL)
+
+    assert key.startswith(service._cache_key_prefix(employer_id, PolicyType.DENTAL))
+
+
+async def test_retrieve_uses_the_detected_policy_types_cache_key() -> None:
+    employer_id, employee_id = uuid4(), uuid4()
+    llm, vector_store = FakeLLM(), FakeVectorStore()
+    probe_service = _service(llm, FakeCache(), vector_store, FakeEnrollmentRepository())
+    expected_key = probe_service._cache_key(
+        employer_id, "What's my dental deductible?", PolicyType.DENTAL
+    )
+    cache = FakeCache({expected_key: "cached dental answer"})
+    service = _service(llm, cache, vector_store, FakeEnrollmentRepository())
+
+    result = await service.retrieve("What's my dental deductible?", employee_id, employer_id)
+
+    assert result.cached_response == "cached dental answer"
+    assert result.policy_type == PolicyType.DENTAL
+
+
+async def test_invalidate_version_cache_deletes_by_the_employer_and_policy_type_prefix() -> None:
+    cache = FakeCache()
+    service = _service(FakeLLM(), cache, FakeVectorStore(), FakeEnrollmentRepository())
+    employer_id = uuid4()
+
+    await service.invalidate_version_cache(employer_id, PolicyType.DENTAL)
+
+    assert cache.delete_by_prefix_calls == [
+        service._cache_key_prefix(employer_id, PolicyType.DENTAL)
+    ]
+
+
+async def test_invalidate_version_cache_with_no_policy_type_only_targets_untyped_queries() -> None:
+    cache = FakeCache()
+    service = _service(FakeLLM(), cache, FakeVectorStore(), FakeEnrollmentRepository())
+    employer_id = uuid4()
+    dental_key = service._cache_key(employer_id, "dental query", PolicyType.DENTAL)
+    untyped_key = service._cache_key(employer_id, "generic query", None)
+    await cache.set(dental_key, "dental answer")
+    await cache.set(untyped_key, "generic answer")
+
+    await service.invalidate_version_cache(employer_id, None)
+
+    assert await cache.get(dental_key) == "dental answer"
+    assert await cache.get(untyped_key) is None
+
+
+async def test_query_caches_using_the_detected_policy_types_key() -> None:
+    employer_id, employee_id = uuid4(), uuid4()
+    llm = FakeLLM(stream_tokens=["dental answer"])
+    cache = FakeCache()
+    service = _service(llm, cache, FakeVectorStore(), FakeEnrollmentRepository())
+    expected_key = service._cache_key(
+        employer_id, "What's my dental deductible?", PolicyType.DENTAL
+    )
+
+    stream = await service.query("What's my dental deductible?", employee_id, employer_id)
+    await _consume(stream)
+
+    assert len(cache.set_calls) == 1
+    key, _value, _ttl = cache.set_calls[0]
+    assert key == expected_key
 
 
 def _match(

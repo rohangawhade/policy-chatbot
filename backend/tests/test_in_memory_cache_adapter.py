@@ -101,3 +101,27 @@ async def test_exists_reflects_ttl_expiration_too(monkeypatch: pytest.MonkeyPatc
     clock += 61
 
     assert await cache.exists("some-key") is False
+
+
+async def test_delete_by_prefix_removes_only_matching_keys() -> None:
+    cache = InMemoryCacheAdapter()
+    await cache.set("rag_response:emp-1:dental:abc", "answer-1")
+    await cache.set("rag_response:emp-1:dental:def", "answer-2")
+    await cache.set("rag_response:emp-1:vision:ghi", "answer-3")
+    await cache.set("rag_response:emp-2:dental:jkl", "answer-4")
+
+    await cache.delete_by_prefix("rag_response:emp-1:dental:")
+
+    assert await cache.get("rag_response:emp-1:dental:abc") is None
+    assert await cache.get("rag_response:emp-1:dental:def") is None
+    assert await cache.get("rag_response:emp-1:vision:ghi") == "answer-3"
+    assert await cache.get("rag_response:emp-2:dental:jkl") == "answer-4"
+
+
+async def test_delete_by_prefix_on_no_matching_keys_does_not_raise() -> None:
+    cache = InMemoryCacheAdapter()
+    await cache.set("unrelated-key", "value")
+
+    await cache.delete_by_prefix("no-match:")
+
+    assert await cache.get("unrelated-key") == "value"
