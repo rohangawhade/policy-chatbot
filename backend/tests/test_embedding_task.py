@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 from typing import Any
 from uuid import uuid4
 
@@ -141,6 +143,20 @@ def test_task_deserializes_json_args_and_delegates_to_embed_and_index(
         calls.append((document, chunks))
 
     monkeypatch.setattr(embedding_task, "_embed_and_index", fake_embed_and_index)
+
+    # Drive the (no-await) fake coroutine directly rather than through a real
+    # `asyncio.run()` — this test only cares that JSON args are deserialized
+    # and delegated correctly, not that `asyncio.run()` itself works.
+    # Spinning up a real extra event loop mid-suite (alongside
+    # pytest-asyncio's own per-test loops) reproducibly segfaulted the
+    # interpreter at shutdown on CI's Linux runner, well after every test —
+    # including this one — had already passed; see
+    # IMPLEMENTATION_STATUS.md's Step 4.4 entry.
+    def run_without_a_real_event_loop(coro: Any) -> None:
+        with contextlib.suppress(StopIteration):
+            coro.send(None)
+
+    monkeypatch.setattr(asyncio, "run", run_without_a_real_event_loop)
 
     embedding_task.embed_and_index_document(
         document.model_dump(mode="json"), [c.model_dump(mode="json") for c in chunks]

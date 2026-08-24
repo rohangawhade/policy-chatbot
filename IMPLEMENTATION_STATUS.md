@@ -1123,6 +1123,22 @@ periodically, not just when explicitly asked.
   redis, backend, celery-worker, frontend) to catch the task
   registration bug above — all five containers came up healthy/running,
   torn down after (`docker compose down`, no `-v`).
+- **Second real bug, found by CI only — not reproducible on this Windows
+  dev machine**: `backend-quality`'s CI run passed all 286 tests with
+  100% coverage, then the `pytest` process itself segfaulted (exit code
+  139) ~4 seconds later, during interpreter shutdown, on the Linux CI
+  runner only. The one genuinely new risky pattern in this PR: a test
+  called the real `asyncio.run()` (this task's own bridge from Celery's
+  sync world into `EmbeddingService`'s async code) mid-suite, spinning
+  up and tearing down an extra OS-level event loop alongside
+  pytest-asyncio's own per-test loops — a known class of native/GC
+  shutdown crash. Fixed by not exercising a real `asyncio.run()` in
+  `tests/test_embedding_task.py`'s task-level test at all: monkeypatch
+  `asyncio.run` with a function that drives the (no-await) fake
+  coroutine directly via `.send(None)`, since the test only needs to
+  verify JSON deserialization and delegation, not that `asyncio.run()`
+  itself works. Re-verified green on the actual CI runner (this
+  environment can't reproduce a Linux segfault) before merging.
 
 **Phase 4 — Chunking & Embedding Pipeline: COMPLETE.**
 
