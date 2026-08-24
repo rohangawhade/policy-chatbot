@@ -10,7 +10,7 @@ adapter get stable, reproducible results without a real embedding model.
 import hashlib
 from collections.abc import AsyncIterator
 
-from core.ports.llm_port import LLMPort
+from core.ports.llm_port import LLMPort, UsageCost
 
 _CANNED_RESPONSE = (
     "This is a canned response from PolicyPal's MockLLMAdapter — no real LLM call was made."
@@ -42,6 +42,16 @@ class MockLLMAdapter(LLMPort):
 
     async def embed(self, texts: list[str], *, model: str) -> list[list[float]]:
         return [self._deterministic_vector(text) for text in texts]
+
+    async def estimate_cost(self, model: str, prompt: str, completion: str) -> UsageCost:
+        # No real provider pricing in dev/testing — a deterministic,
+        # word-count-based estimate with zero cost, so callers exercise
+        # the same code path without a real LiteLLM/network dependency.
+        return UsageCost(
+            input_tokens=len(prompt.split()),
+            output_tokens=len(completion.split()),
+            estimated_cost_usd=0.0,
+        )
 
     @staticmethod
     def _deterministic_vector(text: str, dimensions: int = _EMBEDDING_DIMENSIONS) -> list[float]:

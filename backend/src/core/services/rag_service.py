@@ -5,22 +5,28 @@ structure listing this as "Retrieval + generation orchestration").
 
 Step 6.3 added retrieval: a cache check that can skip retrieval
 entirely, query embedding, tenant-scoped Pinecone search, and enrollment
-lookup for personal-sounding questions. This step (6.4) adds prompt
-assembly. Steps 6.5/6.6 will extend this same class with streaming
-generation and conversation memory.
+lookup for personal-sounding questions. Step 6.4 added prompt assembly.
+This step (6.5) adds streaming generation. Step 6.6 will extend this
+same class with conversation memory.
 """
 
 import hashlib
+import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from uuid import UUID
 
+from core.domain.analytics import LLMCostLog, RequestLatencyLog
 from core.domain.policy import Enrollment, PolicyType
 from core.ports.cache_port import CachePort
 from core.ports.llm_port import LLMPort
-from core.ports.repository_ports import EnrollmentRepository
+from core.ports.repository_ports import AnalyticsRepository, EnrollmentRepository
 from core.ports.vector_store_port import VectorMatch, VectorStorePort
+from core.services.query_router import QueryRouter
 
 _DEFAULT_TOP_K = 5
+_DEFAULT_CACHE_TTL_SECONDS = 3600
+_DEFAULT_LOW_CONFIDENCE_THRESHOLD = 0.5
 _PERSONAL_PRONOUNS = frozenset({"my", "i", "me", "i'm", "i've", "mine", "myself"})
 
 _ROLE_DEFINITION = (
@@ -119,20 +125,159 @@ class PromptTemplate:
         return f"- Policy {enrollment.policy_id} — {status}, enrolled {enrolled_date}"
 
 
+@dataclass(frozen=True, kw_only=True)
+class GenerationMetrics:
+    """Everything about a completed generation a caller can act on —
+    available via `GenerationStream.metrics` only after its tokens are
+    fully consumed (`LLMPort.generate_stream()` only becomes fully known
+    — total tokens, full text — once exhausted, not as it streams).
+
+    Attributes:
+        full_text: The complete response, including any appended source
+            citations — exactly what was cached.
+        model: The model actually used (`""` on a cache hit).
+        model_tier: `"cheap"` or `"powerful"` (`""` on a cache hit).
+        complexity_score: `QueryRouter.score_complexity()`'s result
+            (`0.0` on a cache hit — routing never ran).
+        top_similarity_score: The highest-scoring retrieved chunk's
+            score, or `None` if no chunks were retrieved (including on
+            a cache hit).
+        is_low_confidence: True if `top_similarity_score` is below the
+            configured threshold. **Not acted on by this class** — Step
+            6.6 will use this to persist a `FlaggedResponse` once it has
+            a `message_id` to attach it to; `FlaggedResponse` requires
+            `conversation_id`/`message_id`, which don't exist until
+            Step 6.6 builds conversation memory, so this step can only
+            compute and expose the signal, not act on it.
+        from_cache: True if this was a cache hit — no LLM call was made,
+            nothing was logged to `LLMCostLog`/`RequestLatencyLog`.
+    """
+
+    full_text: str
+    model: str
+    model_tier: str
+    complexity_score: float
+    top_similarity_score: float | None
+    is_low_confidence: bool
+    from_cache: bool
+
+
+class GenerationStream:
+    """An async-iterable stream of response tokens from
+    `RAGService.query()`.
+
+    Iterate with `async for token in stream`. After the stream is fully
+    consumed, `stream.metrics` holds the completed generation's cost/
+    latency/confidence data — `None` before that point, since
+    `generate_stream()` doesn't expose totals until it finishes.
+    """
+
+    def __init__(
+        self,
+        service: "RAGService",
+        query_text: str,
+        employer_id: UUID,
+        retrieval: RetrievalResult,
+        retrieval_ms: int,
+    ) -> None:
+        self._service = service
+        self._query_text = query_text
+        self._employer_id = employer_id
+        self._retrieval = retrieval
+        self._retrieval_ms = retrieval_ms
+        self.metrics: GenerationMetrics | None = None
+
+    async def __aiter__(self) -> AsyncIterator[str]:
+        if self._retrieval.cached_response is not None:
+            async for token in self._stream_cached(self._retrieval.cached_response):
+                yield token
+            return
+        async for token in self._stream_generation():
+            yield token
+
+    async def _stream_cached(self, cached_response: str) -> AsyncIterator[str]:
+        yield cached_response
+        self.metrics = GenerationMetrics(
+            full_text=cached_response,
+            model="",
+            model_tier="",
+            complexity_score=0.0,
+            top_similarity_score=None,
+            is_low_confidence=False,
+            from_cache=True,
+        )
+
+    async def _stream_generation(self) -> AsyncIterator[str]:
+        service = self._service
+        retrieval = self._retrieval
+
+        complexity_score = service._query_router.score_complexity(self._query_text)
+        model = service._query_router.select_model(complexity_score)
+        prompt = service.assemble_prompt(self._query_text, retrieval)
+
+        llm_start = time.monotonic()
+        pieces: list[str] = []
+        async for token in service._llm.generate_stream(prompt, model=model):
+            pieces.append(token)
+            yield token
+        llm_ms = int((time.monotonic() - llm_start) * 1000)
+
+        citations = service._format_citations(retrieval.chunks)
+        if citations:
+            pieces.append(citations)
+            yield citations
+
+        full_text = "".join(pieces)
+        model_tier = service._query_router.tier_for_model(model)
+        await service._cache_response(self._employer_id, self._query_text, full_text)
+        await service._log_generation(
+            employer_id=self._employer_id,
+            model=model,
+            model_tier=model_tier,
+            complexity_score=complexity_score,
+            prompt=prompt,
+            full_text=full_text,
+            retrieval_ms=self._retrieval_ms,
+            llm_ms=llm_ms,
+        )
+
+        top_score = max((chunk.score for chunk in retrieval.chunks), default=None)
+        is_low_confidence = top_score is not None and top_score < service._low_confidence_threshold
+        self.metrics = GenerationMetrics(
+            full_text=full_text,
+            model=model,
+            model_tier=model_tier,
+            complexity_score=complexity_score,
+            top_similarity_score=top_score,
+            is_low_confidence=is_low_confidence,
+            from_cache=False,
+        )
+
+
 class RAGService:
     """Retrieval-augmented generation orchestration.
 
     Attributes:
-        llm: Used for `embed()` in this step; Step 6.5 will also use it
-            for `generate_stream()`.
+        llm: Used for `embed()`/`generate_stream()`/`estimate_cost()`.
         cache: Response cache — checked before any retrieval work, so an
-            identical recent query never re-embeds or re-searches.
+            identical recent query never re-embeds, re-searches, or
+            re-generates; also where a fresh response is cached once
+            generated.
         vector_store: One Pinecone namespace per employer
             (files/plan.md's tenant isolation strategy).
         enrollment_repository: Enrollment lookup for personal questions.
+        analytics_repository: Where `LLMCostLog`/`RequestLatencyLog` are
+            recorded after a generation completes (see `query()`'s
+            docstring for why this happens as a direct write here,
+            unlike Step 6.1's `GuardrailsService`).
+        query_router: Selects the model tier for a fresh generation.
         embedding_model: Passed to every `embed()` call — this class has
             no opinion on which embedding model is configured.
         top_k: Chunks retrieved per query.
+        cache_ttl_seconds: How long a fresh response stays cached.
+        low_confidence_threshold: `GenerationMetrics.is_low_confidence`
+            is True when the top retrieved chunk's score is below this
+            (files/coding-standards.md section 12's stated default: 0.5).
         prompt_template: Defaults to a `PromptTemplate()` with the
             standard wording — override to A/B test or localize prompts
             without touching this class.
@@ -144,16 +289,24 @@ class RAGService:
         cache: CachePort,
         vector_store: VectorStorePort,
         enrollment_repository: EnrollmentRepository,
+        analytics_repository: AnalyticsRepository,
+        query_router: QueryRouter,
         embedding_model: str,
         top_k: int = _DEFAULT_TOP_K,
+        cache_ttl_seconds: int = _DEFAULT_CACHE_TTL_SECONDS,
+        low_confidence_threshold: float = _DEFAULT_LOW_CONFIDENCE_THRESHOLD,
         prompt_template: PromptTemplate | None = None,
     ) -> None:
         self._llm = llm
         self._cache = cache
         self._vector_store = vector_store
         self._enrollment_repository = enrollment_repository
+        self._analytics_repository = analytics_repository
+        self._query_router = query_router
         self._embedding_model = embedding_model
         self._top_k = top_k
+        self._cache_ttl_seconds = cache_ttl_seconds
+        self._low_confidence_threshold = low_confidence_threshold
         self._prompt_template = prompt_template or PromptTemplate()
 
     async def retrieve(
@@ -200,6 +353,91 @@ class RAGService:
         always empty).
         """
         return self._prompt_template.render(query_text, retrieval.chunks, retrieval.enrollment)
+
+    async def query(
+        self, query_text: str, employee_id: UUID, employer_id: UUID
+    ) -> GenerationStream:
+        """Retrieve context, then stream a generated (or cached) response.
+
+        Returns a `GenerationStream` — `async for token in stream` for
+        response tokens as they arrive; once that loop ends,
+        `stream.metrics` holds the completed generation's cost/latency/
+        confidence data.
+
+        **Direct-write exception to files/coding-standards.md section
+        12's fire-and-forget-via-event-bus rule**: `LLMCostLog`/
+        `RequestLatencyLog` are written directly to
+        `analytics_repository` here, not published as events for a
+        subscriber (unlike Step 6.1's `GuardrailsService`, which does
+        follow that rule — no subscriber-registration infrastructure
+        exists anywhere in the app yet, see that step's note). This
+        write happens strictly *after* every token has already reached
+        the caller (the `async for` loop over `generate_stream()` has
+        finished), so it adds zero perceived latency to the user's
+        response — the one case where a direct write doesn't conflict
+        with the rule's actual intent.
+
+        **Known scope boundary**: does not persist a `FlaggedResponse`
+        for a low-confidence response, or publish
+        `ChatResponseGeneratedEvent`/`LowConfidenceResponseEvent` — both
+        require a `conversation_id`/`message_id` that don't exist until
+        Step 6.6 builds conversation memory.
+        `GenerationMetrics.is_low_confidence` is returned so a Step 6.6
+        caller (which will have a `message_id`) can act on it then.
+        """
+        retrieval_start = time.monotonic()
+        retrieval = await self.retrieve(query_text, employee_id, employer_id)
+        retrieval_ms = int((time.monotonic() - retrieval_start) * 1000)
+        return GenerationStream(self, query_text, employer_id, retrieval, retrieval_ms)
+
+    def _format_citations(self, chunks: list[VectorMatch]) -> str:
+        sources: list[str] = []
+        for chunk in chunks:
+            title = chunk.metadata.get("document_title")
+            if not title or title in sources:
+                continue
+            sources.append(str(title))
+        if not sources:
+            return ""
+        return "\n\nSources: " + "; ".join(sources)
+
+    async def _cache_response(self, employer_id: UUID, query_text: str, full_text: str) -> None:
+        cache_key = self._cache_key(employer_id, query_text)
+        await self._cache.set(cache_key, full_text, ttl_seconds=self._cache_ttl_seconds)
+
+    async def _log_generation(
+        self,
+        *,
+        employer_id: UUID,
+        model: str,
+        model_tier: str,
+        complexity_score: float,
+        prompt: str,
+        full_text: str,
+        retrieval_ms: int,
+        llm_ms: int,
+    ) -> None:
+        usage = await self._llm.estimate_cost(model, prompt, full_text)
+        await self._analytics_repository.record_llm_cost(
+            LLMCostLog(
+                employer_id=employer_id,
+                model=model,
+                model_tier=model_tier,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                estimated_cost_usd=usage.estimated_cost_usd,
+                query_complexity_score=complexity_score,
+            )
+        )
+        await self._analytics_repository.record_latency(
+            RequestLatencyLog(
+                employer_id=employer_id,
+                total_ms=retrieval_ms + llm_ms,
+                retrieval_ms=retrieval_ms,
+                llm_ms=llm_ms,
+                model_tier=model_tier,
+            )
+        )
 
     def _cache_key(self, employer_id: UUID, query_text: str) -> str:
         """Hash of `(employer_id, query_text)`.

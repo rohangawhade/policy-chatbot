@@ -87,3 +87,21 @@ def test_fallback_model_always_returns_cheap() -> None:
     router = _router()
 
     assert router.fallback_model() == _CHEAP
+
+
+def test_tier_for_model_identifies_the_powerful_model() -> None:
+    router = _router()
+
+    assert router.tier_for_model(_POWERFUL) == "powerful"
+
+
+def test_tier_for_model_identifies_the_cheap_model() -> None:
+    router = _router()
+
+    assert router.tier_for_model(_CHEAP) == "cheap"
+
+
+def test_tier_for_model_defaults_to_cheap_for_an_unrecognized_model_name() -> None:
+    router = _router()
+
+    assert router.tier_for_model("some-other-model") == "cheap"

@@ -16,14 +16,17 @@ from typing import Any
 
 import litellm
 import structlog
+from litellm.cost_calculator import cost_per_token
 from litellm.exceptions import (
     APIConnectionError,
+    BadRequestError,
     RateLimitError,
     ServiceUnavailableError,
     Timeout,
 )
 from litellm.litellm_core_utils.streaming_handler import CustomStreamWrapper
 from litellm.types.utils import Choices, EmbeddingResponse, ModelResponse
+from litellm.utils import token_counter
 from tenacity import (
     RetryCallState,
     retry,
@@ -32,7 +35,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from core.ports.llm_port import LLMPort
+from core.ports.llm_port import LLMPort, UsageCost
 
 logger = structlog.get_logger(__name__)
 
@@ -145,3 +148,23 @@ class LiteLLMAdapter(LLMPort):
         # loosely-typed external boundary, not a local typing shortcut.
         items: list[Any] = response.data
         return [[float(value) for value in item["embedding"]] for item in items]
+
+    async def estimate_cost(self, model: str, prompt: str, completion: str) -> UsageCost:
+        input_tokens = token_counter(model=model, text=prompt)
+        output_tokens = token_counter(model=model, text=completion)
+        try:
+            input_cost, output_cost = cost_per_token(
+                model=model, prompt_tokens=input_tokens, completion_tokens=output_tokens
+            )
+            estimated_cost_usd = input_cost + output_cost
+        except BadRequestError:
+            # No pricing data for this model (e.g. a provider litellm
+            # doesn't recognize) — best-effort estimate degrades to 0
+            # rather than failing the whole generation over a cost figure.
+            logger.warning("cost_estimation_unavailable", model=model)
+            estimated_cost_usd = 0.0
+        return UsageCost(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            estimated_cost_usd=estimated_cost_usd,
+        )
