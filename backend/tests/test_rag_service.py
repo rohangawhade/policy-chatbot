@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -7,7 +8,7 @@ from core.ports.cache_port import CachePort
 from core.ports.llm_port import LLMPort
 from core.ports.repository_ports import EnrollmentRepository
 from core.ports.vector_store_port import VectorMatch, VectorStorePort
-from core.services.rag_service import RAGService
+from core.services.rag_service import PromptTemplate, RAGService, RetrievalResult
 
 _MODEL = "mock-embedding-model"
 
@@ -220,3 +221,107 @@ async def test_cache_key_differs_across_queries_for_the_same_employer() -> None:
     key_two = service._cache_key(employer_id, "What's my copay?")
 
     assert key_one != key_two
+
+
+def _match(
+    *, document_title: str = "SPD.pdf", section_title: str | None = None, text: str = ""
+) -> VectorMatch:
+    metadata: dict[str, Any] = {"document_title": document_title, "text": text}
+    if section_title is not None:
+        metadata["section_title"] = section_title
+    return VectorMatch(id="chunk-1", score=0.9, metadata=metadata)
+
+
+def _enrollment(**overrides: Any) -> Enrollment:
+    defaults: dict[str, Any] = {
+        "employee_id": uuid4(),
+        "policy_id": uuid4(),
+        "enrolled_at": datetime(2024, 1, 15, tzinfo=UTC),
+        "is_active": True,
+    }
+    defaults.update(overrides)
+    return Enrollment(**defaults)
+
+
+def test_render_with_no_context_includes_the_no_context_notice() -> None:
+    template = PromptTemplate()
+
+    prompt = template.render("What's my deductible?", [], [])
+
+    assert template.role_definition in prompt
+    assert template.domain_restriction in prompt
+    assert template.no_context_notice in prompt
+    assert "Retrieved policy excerpts" not in prompt
+    assert "current enrollments" not in prompt
+    assert "Employee's question: What's my deductible?" in prompt
+
+
+def test_render_includes_each_chunk_with_source_attribution() -> None:
+    template = PromptTemplate()
+    chunk = _match(
+        document_title="SPD.pdf", section_title="Eligibility", text="You must work 30 hours."
+    )
+
+    prompt = template.render("query", [chunk], [])
+
+    assert "Retrieved policy excerpts:" in prompt
+    assert "[Source: SPD.pdf, Eligibility]" in prompt
+    assert "You must work 30 hours." in prompt
+    assert template.no_context_notice not in prompt
+
+
+def test_render_omits_the_section_when_a_chunk_has_none() -> None:
+    template = PromptTemplate()
+    chunk = _match(document_title="SPD.pdf", section_title=None, text="Some body text.")
+
+    prompt = template.render("query", [chunk], [])
+
+    assert "[Source: SPD.pdf]" in prompt
+
+
+def test_render_includes_enrollment_when_present() -> None:
+    template = PromptTemplate()
+    enrollment = _enrollment(is_active=True)
+
+    prompt = template.render("query", [], [enrollment])
+
+    assert "Employee's current enrollments:" in prompt
+    assert str(enrollment.policy_id) in prompt
+    assert "active" in prompt
+    assert "2024-01-15" in prompt
+
+
+def test_render_marks_an_inactive_enrollment() -> None:
+    template = PromptTemplate()
+    enrollment = _enrollment(is_active=False)
+
+    prompt = template.render("query", [], [enrollment])
+
+    assert "inactive" in prompt
+
+
+def test_assemble_prompt_delegates_to_the_prompt_template() -> None:
+    service = _service(FakeLLM(), FakeCache(), FakeVectorStore(), FakeEnrollmentRepository())
+    chunk = _match(text="Chunk body.")
+    retrieval = RetrievalResult(chunks=[chunk], enrollment=[])
+
+    prompt = service.assemble_prompt("What's covered?", retrieval)
+
+    assert "Chunk body." in prompt
+    assert "Employee's question: What's covered?" in prompt
+
+
+def test_assemble_prompt_uses_a_custom_prompt_template() -> None:
+    custom_template = PromptTemplate(role_definition="You are a custom test assistant.")
+    service = RAGService(
+        FakeLLM(),
+        FakeCache(),
+        FakeVectorStore(),
+        FakeEnrollmentRepository(),
+        embedding_model=_MODEL,
+        prompt_template=custom_template,
+    )
+
+    prompt = service.assemble_prompt("query", RetrievalResult())
+
+    assert "You are a custom test assistant." in prompt
