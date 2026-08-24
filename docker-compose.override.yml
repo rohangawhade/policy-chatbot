@@ -10,7 +10,7 @@ services:
       APP_ENV: development
 
   celery-worker:
-    command: celery -A workers.celery_app worker --loglevel=info --concurrency=1
+    command: celery -A workers.celery_app worker --loglevel=info --concurrency=1 -Q default,embedding
     volumes:
       - ./backend/src:/app/src
 

@@ -1873,6 +1873,73 @@ periodically, not just when explicitly asked.
 
 **Phase 7 — Document Versioning: COMPLETE.**
 
+## Phase 8 — Celery Workers & Document Ingestion
+
+### Step 8.1 — Celery + Redis setup — DONE
+
+- `backend/src/workers/celery_app.py` — added on top of Step 1.2's bare
+  app / Step 4.4's first task registration:
+  - **Queue routing**: `task_default_queue = "default"` +
+    `task_routes = {"embedding.*": {"queue": "embedding"}}`, following a
+    `"<family>.<action>"` task-naming convention every task in this app
+    already used (`embedding.embed_and_index_document`). A new task
+    family (Step 8.2's ingestion task) is one more `task_routes` entry —
+    nothing else in this file changes.
+  - **Retries**: deliberately *not* an app-wide default (a task that
+    blindly retries the exact same permanent failure 3 times just
+    delays reaching dead-letter for no benefit). Convention instead:
+    each task declares its own `autoretry_for`/`retry_backoff`/
+    `retry_kwargs` on its own `@app.task(...)` decorator.
+    `workers/embedding_task.py` updated as the first concrete example:
+    `autoretry_for=(Exception,), retry_backoff=True,
+    retry_kwargs={"max_retries": 3}` — a broader, task-attempt-level
+    retry (minutes-scale backoff, e.g. a worker restart mid-run) layered
+    *above*, not replacing, the existing per-call tenacity retries
+    already inside `LiteLLMAdapter`/`PineconeAdapter`/
+    `PostgresDocumentChunkRepository`.
+  - **Dead-letter handling**: Celery + Redis has no built-in DLQ (that's
+    a RabbitMQ concept), so this is the app's own — a `task_failure`
+    signal handler (`_route_to_dead_letter`) that re-publishes the
+    exact failed task (name/args/kwargs) to a `dead_letter` queue
+    nothing consumes automatically. `task_failure` only fires once a
+    task's own retries are fully exhausted (Celery never fires it for
+    an attempt it's still going to retry), so every call already
+    represents a genuine final failure — no extra "is this really the
+    last attempt" logic needed. Failures are also logged via
+    `structlog` before republishing, matching the retry-logging pattern
+    every other adapter already uses (Steps 3.2-3.4).
+- `docker-compose.yml`/`docker-compose.override.yml`'s `celery-worker`
+  command gained `-Q default,embedding` — **a queue routed to in
+  `task_routes` that the worker isn't told to consume via `-Q` just
+  accumulates unprocessed tasks silently, with no error anywhere** (a
+  two-place change, easy to half-do; both files updated together, and
+  called out in README.md's Docker section as a named gotcha).
+  `dead_letter` is deliberately excluded from `-Q` — inspecting/
+  replaying it is a manual, separate `celery -A workers.celery_app
+  worker -Q dead_letter` invocation, not automatic reprocessing.
+- Validation: `ruff check`, `ruff format --check`, `mypy --strict src`
+  all pass with zero new suppressions beyond the existing
+  `@app.task(...)`-style `# type: ignore[misc]` pattern (now also
+  needed for `@task_failure.connect`, same root cause — `celery.*` has
+  no stubs). New tests: `tests/test_celery_app.py` (+5: default queue,
+  embedding-queue routing, the dead-letter handler is actually
+  connected to the `task_failure` signal — not just defined — via
+  `Signal.receivers`, the handler republishes a failed task's exact
+  name/args/kwargs to the `dead_letter` queue, a `sender=None` call is
+  a no-op), `tests/test_embedding_task.py` (+1: the registered task
+  carries the expected `autoretry_for`/`retry_backoff`/`retry_kwargs`).
+  100% coverage on every new/changed file, **100% coverage across the
+  entire `src/` tree** (1888/1888 statements), 420 tests passing across
+  the whole suite (up from 414), zero warnings. Run against a real
+  `docker compose up -d postgres` container for the full suite (`alembic
+  upgrade head`, no drift — no migration needed), torn down after.
+  **Additionally verified against the real stack, not just mocks**:
+  `docker compose up -d --build celery-worker` (real Redis broker/
+  backend) — the worker's own startup banner confirmed both `[queues]`
+  entries (`default`, `embedding`) and the `embedding.embed_and_index_document`
+  task registered under `[tasks]`, then torn down (`docker compose
+  down`).
+
 ## Environment / tooling notes for future steps
 
 - **Celery tasks need `include=` in `celery_app.py`**: a new
@@ -1926,14 +1993,10 @@ periodically, not just when explicitly asked.
 ## Next recommended step
 
 Phases 4 (Chunking & Embedding Pipeline), 5 (Authentication &
-Multi-Tenancy), 6 (RAG Pipeline), and 7 (Document Versioning) are all
-COMPLETE and merged.
+Multi-Tenancy), 6 (RAG Pipeline), 7 (Document Versioning), and Phase
+8's Step 8.1 (Celery + Redis setup) are all COMPLETE and merged.
 
-Continue with **Phase 8 — Celery Workers & Document Ingestion**: Step
-8.1 (`feat/celery-app-configuration` — `workers/celery_app.py` today is
-still Step 1.2's minimal app with no tasks registered at module level
-beyond `include=[...]` for `embedding_task`; this step adds real task
-routing, retries, and dead-letter handling), Step 8.2
+Continue with Step 8.2
 (`feat/celery-document-ingestion` — the actual ingestion task: detect
 file type → `ProcessorFactory` (Step 3.6) → chunk (`ChunkerPipeline`,
 Step 4.2) → embed/index (`EmbeddingService`, Step 4.4) → update
