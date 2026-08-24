@@ -913,6 +913,105 @@ periodically, not just when explicitly asked.
 
 **Phase 3 — Infrastructure Adapters: COMPLETE.**
 
+## Phase 4 — Chunking & Embedding Pipeline
+
+### Step 4.1 — Metadata-aware chunker — DONE
+
+- `backend/src/adapters/chunking/metadata_extractor.py` — `MetadataExtractor`
+  splits a processor's raw extracted text into heading- and page-bounded
+  `ExtractedSection`s (`section_title`, `page_number`, `text`), the
+  structural signal Step 4.2/4.3 will use to enrich each chunk. Heading
+  detection is heuristic (numbered headings like "1.2 Eligibility",
+  ALL-CAPS lines, Title Case lines, and `# `-prefixed sheet markers from
+  `XLSXProcessor`) — a real layout parser isn't available since Step 3.6
+  dropped `unstructured` after a native crash. Table rows (containing `|`,
+  `DOCXProcessor`/`XLSXProcessor`'s cell-join convention) are explicitly
+  excluded from heading detection — an early version false-positived on
+  them via the title-case check (two capitalized cells looks like a
+  title-case heading) before a dedicated test caught it.
+- **Design decision**: plan.md lists `document_title`/`policy_type`/
+  `employer_id` alongside `section_title`/`page_number` as per-chunk
+  metadata. The first two already live on the `Document` domain object
+  before any text is parsed, so `MetadataExtractor` doesn't re-derive
+  them — Step 4.3's `ChunkerPipeline` attaches them directly when
+  building the final `DocumentChunk`.
+- **Small surgical change to already-merged Step 3.6 code**:
+  `PDFProcessor.extract_text()` joined pages with `"\n\n"`, which
+  discards page boundaries — `MetadataExtractor` needs them for
+  `page_number`. Changed the join character to `"\f"` (form feed, the
+  same convention `pdftotext` uses) — additive, one line, covered by a
+  new test. No other processor has a page concept, so this stays
+  PDF-specific.
+- Validation: `ruff check`, `ruff format --check`, `mypy --strict src`
+  all pass with zero suppressions. New `tests/test_metadata_extractor.py`
+  (14 tests: each heading heuristic, the table-row/punctuation
+  false-positive guards, `\f` page splitting, the no-page-marker case,
+  empty-section dropping, immutability) plus one new test in
+  `tests/test_pdf_processor.py` proving the multi-page `\f` join — 100%
+  coverage on the new file, **100% coverage across the entire `src/`
+  tree** (1230/1230 statements), 258 tests passing across the whole
+  suite (up from 243), zero warnings. Run against a real
+  `docker compose up -d postgres` container (migrated with
+  `alembic upgrade head`), torn down after (`docker compose down`, no
+  `-v`).
+
+### Step 4.2 — Semantic chunker — DONE
+
+- `backend/src/adapters/chunking/semantic_chunker.py` — `SemanticChunker`
+  splits each `ExtractedSection`'s text into sentences (regex-based
+  boundary detection — no nltk/spaCy dependency added), embeds them via
+  `LLMPort.embed()`, and groups consecutive sentences into `SemanticChunk`s,
+  breaking either at a detected topic shift (cosine similarity between
+  consecutive sentence embeddings below `similarity_threshold`, default
+  0.5) or once the running token count would exceed `target_tokens`
+  (default 500, plan.md's ~400-600 range). `overlap_tokens` (default 50)
+  controls how many trailing tokens of one chunk are re-included at the
+  start of the next for cross-boundary context; `0` disables overlap.
+  Token counts use `litellm.utils.token_counter()` against a fixed
+  reference model (`gpt-3.5-turbo`) — the project has no tokenizer
+  dependency of its own, and `tiktoken` is already installed transitively
+  via `litellm`; this is an estimate, not an exact count for whatever
+  model the chunks are eventually embedded/generated with, matching
+  plan.md's own "~400-600 token" language.
+- `embedding_model` is a constructor parameter, not read from config
+  internally — same "adapter has no opinion on model tier" pattern as
+  `LiteLLMAdapter` (Step 3.2); Step 4.3's `ChunkerPipeline` will pass
+  `LLMConfig.embedding_model` in.
+- Cosine similarity is computed in pure Python (no numpy dependency) —
+  vectors here are short (embedding dimensionality), so a manual
+  dot-product/norm implementation is simple and avoids adding a new
+  dependency for one small function.
+- **Prerequisite added**: `.github/workflows/rag-eval.yml` — plan.md's
+  CI Pipeline section lists a `rag-eval` job that runs the RAGAS
+  golden-dataset evaluation "only when chunking, prompt, retrieval, or
+  model-routing files change," but it was never added in Phases 0-3 (no
+  chunking files existed yet to trigger it). Added now, guarded the same
+  way every other Phase-0 workflow guards on a file that doesn't exist
+  yet (`ci.yml`'s backend-quality on `backend/pyproject.toml`,
+  `migration-check.yml` on `backend/alembic.ini`): checks for
+  `eval/run_eval.py` and no-ops with a clear message if it's missing.
+  The path-filtering half of plan.md's requirement ("only when relevant
+  files change") is deferred to Phase 12 alongside the actual RAGAS
+  runner — filtering paths for a job that does nothing yet isn't
+  testable or meaningful today.
+- Validation: `ruff check`, `ruff format --check`, `mypy --strict src`
+  all pass with zero suppressions (`litellm.utils.token_counter` needed
+  a direct submodule import — `litellm`'s top-level package doesn't
+  re-export it in its type stubs). New `tests/test_semantic_chunker.py`
+  (14 tests, via a `FakeEmbeddingLLM` test double with caller-controlled
+  vectors — `MockLLMAdapter`'s hash-derived embeddings carry no
+  intentional semantic relationship between texts, so they can't exercise
+  topic-boundary detection deterministically): empty/single-sentence
+  sections, similar sentences staying together, dissimilar sentences
+  splitting, a token-budget-only split, overlap repeating a sentence
+  across a boundary, zero-overlap never repeating, the overlap-tail
+  budget cutoff itself, multi-section title/page propagation, and
+  `_cosine_similarity`'s identical/orthogonal/zero-vector cases — 100%
+  coverage on the new file, **100% coverage across the entire `src/`
+  tree** (1317/1317 statements), 270 tests passing across the whole
+  suite (up from 258), zero warnings. Run against a real
+  `docker compose up -d postgres` container, torn down after.
+
 ## Environment / tooling notes for future steps
 
 - **gh CLI**: installed via `winget install --id GitHub.cli`, authenticated
@@ -924,8 +1023,9 @@ periodically, not just when explicitly asked.
 - **PR merges**: the auto-mode classifier hard-blocks `gh pr merge`/
   `gh pr close` by default and blocks any attempt to self-modify
   `.claude/settings.*` permissions. The user added an explicit allow rule to
-  `.claude/settings.local.json`. Per-PR: I still ask for a go-ahead in chat
-  before merging (user's stated preference), then run `gh pr merge`.
+  `.claude/settings.local.json`. As of 2026-08-24 the user asked for PRs to
+  be merged autonomously (once CI is green) without asking in chat first —
+  updated from the earlier per-PR-confirmation habit.
 - **Python**: 3.12.6 available (`python`/`py`). Project venv created at
   `backend/.venv` per the autopilot instruction to use a project-local env,
   not the global interpreter. All backend commands in the Makefile invoke it
@@ -947,17 +1047,17 @@ periodically, not just when explicitly asked.
 
 ## Next recommended step
 
-Merge the Step 3.6 PR (closes out Phase 3), then start Phase 4 —
-Chunking & Embedding Pipeline: Step 4.1 (`MetadataExtractor` — parses
-document structure into per-chunk metadata: `section_title`,
-`page_number`, `document_title`, `policy_type`, `employer_id`), Step 4.2
-(`SemanticChunker` — sentence-embedding-based topic-boundary splitting,
-~400-600 token chunks with overlap; **note**: plan.md says this step
-triggers a `rag-eval` CI gate, but `.github/workflows/rag-eval.yml`
-doesn't exist yet — it's in plan.md's folder structure but was never a
-concrete step in Phases 0-3, so creating it is likely a small
-prerequisite of Step 4.2 rather than a blocker), Step 4.3
-(`ChunkerPipeline` orchestrating extraction → metadata → semantic
-splitting → enrichment), Step 4.4 (Celery task: chunks → `LLMPort.embed()`
-→ `VectorStorePort.upsert()`, `DocumentChunk` rows for traceability,
-publishes `DocumentEmbeddedEvent`).
+Steps 4.1 and 4.2 are done (Step 4.2's PR not yet opened/merged as of
+this writing — see the branch `feat/semantic-chunker`). Continue Phase 4
+— Chunking & Embedding Pipeline: Step 4.3 (`ChunkerPipeline` in
+`adapters/chunking/chunker_pipeline.py`, orchestrating
+`DocumentProcessorPort.extract_text()` → `MetadataExtractor` →
+`SemanticChunker` → final `DocumentChunk` enrichment, attaching
+`document_title`/`policy_type`/`employer_id` from the `Document` object
+per Step 4.1's design decision), Step 4.4 (Celery task: chunks →
+`LLMPort.embed()` → `VectorStorePort.upsert()`, `DocumentChunk` rows for
+traceability, publishes `DocumentEmbeddedEvent`).
+
+As of 2026-08-24 the user asked to stop pausing for confirmation before
+merges or at phase boundaries — merge once CI is green and keep going,
+only stopping if genuinely blocked.
