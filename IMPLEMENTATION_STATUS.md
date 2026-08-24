@@ -1343,6 +1343,54 @@ periodically, not just when explicitly asked.
 
 **Phase 5 — Authentication & Multi-Tenancy: COMPLETE.**
 
+## Phase 6 — RAG Pipeline (Core Feature)
+
+### Step 6.1 — Guardrails service — DONE
+
+- `backend/src/core/services/guardrails_service.py` — `GuardrailsService.check(query_text,
+  employer_id)`: keyword match against a configurable
+  `allowed_domains` vocabulary (default: health/dental/vision/life/
+  disability/enrollment/coverage/claims, exactly plan.md's list) is the
+  free fast path — any match accepts the query with **zero LLM calls**.
+  No match is "ambiguous" and gets exactly one cheap-model classification
+  call (`temperature=0.0`, `max_tokens=5`, a strict YES/NO prompt) before
+  being rejected — still far cheaper than a full retrieval + powerful-
+  model generation round trip. Returns a `GuardrailResult`
+  (`allowed: bool`, `rejection_message: str | None` — a fixed, non-LLM-
+  generated polite message, since generating the rejection itself via
+  LLM would defeat the whole cost-saving point of this step).
+- **Deliberate scope boundary, matching `coding-standards.md` section
+  12's explicit rule** ("analytics logging must never block the main
+  request — fire-and-forget to the event bus, handled by a subscriber
+  that writes to PostgreSQL"): `GuardrailsService` publishes
+  `GuardrailRejectionEvent` on every rejection and depends only on
+  `LLMPort`/`EventBusPort` — it does **not** write a `GuardrailRejection`
+  row to `AnalyticsRepository` directly, which would mean awaiting a
+  Postgres round trip before returning the rejection to the user,
+  exactly what section 12 rules out. **Known, flagged gap**: nothing yet
+  subscribes to `GuardrailRejectionEvent` to actually persist it — no
+  subscriber-registration infrastructure exists anywhere in the app yet
+  (nowhere subscribers get wired up at startup). The Phase 9 admin
+  dashboard needs real `GuardrailRejection` rows, so that wiring has to
+  land before or alongside whichever step first needs it — likely
+  worth building generically then, not as a one-off for this event type,
+  since Step 6.5's `LLMCostLog`/`RequestLatencyLog`/`FlaggedResponse`
+  will need the identical pattern.
+- Validation: `ruff check`, `ruff format --check`, `mypy --strict src`
+  all pass. New `tests/test_guardrails_service.py` (9 tests, via a
+  `FakeLLM`/`FakeEventBus`): keyword-match fast path (including case
+  insensitivity, zero LLM calls), LLM-classified accept/reject,
+  published-event field correctness, lenient response parsing
+  ("yes"/"Yes."/"YES!"/whitespace all accepted; "no"/"not sure"/"maybe"
+  all rejected), and custom `allowed_domains` overriding the default
+  vocabulary in both directions. 100% coverage on the new file, **100%
+  coverage across the entire `src/` tree** (1572/1572 statements), 330
+  tests passing across the whole suite (up from 321), zero warnings.
+  Run against a real `docker compose up -d postgres` container, torn
+  down after. This PR is also the first real exercise of the `rag-eval`
+  CI job beyond its Step 4.2 no-op path — still no-ops today since
+  `eval/run_eval.py` doesn't exist until Phase 12, exactly as designed.
+
 ## Environment / tooling notes for future steps
 
 - **Celery tasks need `include=` in `celery_app.py`**: a new
@@ -1396,36 +1444,39 @@ periodically, not just when explicitly asked.
 ## Next recommended step
 
 Phases 4 (Chunking & Embedding Pipeline) and 5 (Authentication &
-Multi-Tenancy) are both COMPLETE (Step 5.3's PR not yet opened/merged
-as of this writing — see branch `security/tenant-context-isolation`).
+Multi-Tenancy) are both COMPLETE. Phase 6 (RAG Pipeline) is underway:
+Step 6.1 (`GuardrailsService`) is done (PR not yet opened/merged as of
+this writing — see branch `feat/guardrails-service`).
 
-Continue with **Phase 6 — RAG Pipeline (Core Feature)**, `core/services/`:
-Step 6.1 (`guardrails_service.py` — keyword matching + a cheap-model LLM
-call for ambiguous cases, rejecting off-topic queries before any
-retrieval/expensive generation happens; every rejection persisted as a
-`GuardrailRejection` via `AnalyticsRepository` and published as
-`GuardrailRejectionEvent`; triggers the `rag-eval` CI gate — first real
-exercise of that job beyond its current no-op), Step 6.2
-(`query_router.py` — complexity scoring 0.0-1.0, cheap/powerful model
-selection via `LLMConfig`, fallback to cheap on `ModelUnavailableError`
-per `coding-standards.md` section 6's stated rule), Step 6.3 (retrieval
-— embed the query, check Redis cache first, search Pinecone scoped to
-`get_current_employer_id()`'s value plus detected `policy_type`, fetch
-enrollment data from Postgres if personal), Step 6.4 (prompt assembly —
-a `PromptTemplate` with named slots: role/domain-restriction
-instructions, retrieved chunks with source attribution, enrollment
-info), Step 6.5 (streaming generation via `LLMPort.generate_stream()`,
-source citations appended, response cached, `LLMCostLog`/
-`RequestLatencyLog` recorded, low-confidence responses auto-flagged),
-Step 6.6 (conversation memory — persist message pairs, load the last N
-as context for follow-ups).
+Continue with Step 6.2 (`query_router.py` — complexity scoring 0.0-1.0,
+cheap/powerful model selection via `LLMConfig`, fallback to cheap on
+`ModelUnavailableError` per `coding-standards.md` section 6's stated
+rule), Step 6.3 (retrieval — embed the query, check Redis cache first,
+search Pinecone scoped to `get_current_employer_id()`'s value plus
+detected `policy_type`, fetch enrollment data from Postgres if
+personal), Step 6.4 (prompt assembly — a `PromptTemplate` with named
+slots: role/domain-restriction instructions, retrieved chunks with
+source attribution, enrollment info), Step 6.5 (streaming generation via
+`LLMPort.generate_stream()`, source citations appended, response
+cached, `LLMCostLog`/`RequestLatencyLog` recorded, low-confidence
+responses auto-flagged), Step 6.6 (conversation memory — persist
+message pairs, load the last N as context for follow-ups).
 
-This is the first phase that actually *uses* Phase 3's adapters/Phase 4's
-chunks/Phase 5's tenant scoping together end-to-end — worth re-reading
-`files/plan.md`'s "Query Flow" ASCII diagram before starting Step 6.1,
-since it lays out the exact call order (guardrails → cache → router →
-embed → Pinecone → enrollment → prompt → generate → cache/persist →
-analytics) these six steps implement piece by piece.
+**Standing gap to resolve before or during Step 6.5**: Step 6.1 flagged
+that no event-subscriber-registration infrastructure exists anywhere in
+the app — `GuardrailRejectionEvent` is published but nothing persists
+it. Step 6.5 needs the identical pattern for `LLMCostLog`/
+`RequestLatencyLog`/`FlaggedResponse`. Worth designing this generically
+(where subscribers get registered — likely `main.py`'s app
+startup/lifespan, wiring a shared `EventBusPort` instance) rather than
+solving it three separate times.
+
+This phase actually *uses* Phase 3's adapters/Phase 4's chunks/Phase 5's
+tenant scoping together end-to-end — worth re-reading `files/plan.md`'s
+"Query Flow" ASCII diagram before each remaining step, since it lays
+out the exact call order (guardrails → cache → router → embed →
+Pinecone → enrollment → prompt → generate → cache/persist → analytics)
+these six steps implement piece by piece.
 
 As of 2026-08-24 the user asked to stop pausing for confirmation before
 merges or at phase boundaries — merge once CI is green and keep going,
