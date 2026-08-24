@@ -807,6 +807,112 @@ periodically, not just when explicitly asked.
   mocks — brought up, migrated, exercised, and torn back down
   (`docker compose down`, no `-v`) at the end.
 
+### Step 3.6 — Document processor adapters — DONE
+
+- Four processors in `backend/src/adapters/document_processors/`, each
+  fulfilling `DocumentProcessorPort` (`extract_text`/`extract_metadata`,
+  deliberately synchronous per the port's own docstring — parsing is
+  CPU-bound and belongs in a Celery task, not the async event loop):
+  `pdf_processor.py` (`PDFProcessor`, PyMuPDF/`fitz`), `docx_processor.py`
+  (`DOCXProcessor`, python-docx — paragraphs + table cells, joined with
+  `" | "` per row), `xlsx_processor.py` (`XLSXProcessor`, openpyxl,
+  `read_only=True` streaming mode — one `# SheetName` block per
+  non-empty sheet), `xml_processor.py` (`XMLProcessor`, lxml —
+  `itertext()` for text, root tag + element count for metadata).
+  `processor_factory.py`'s `ProcessorFactory` routes an extension string
+  to the right processor class (`files/coding-standards.md` section 1's
+  Open/Closed example, followed close to verbatim: `register()`/`get()`
+  classmethods, one `register()` call per built-in processor at module
+  bottom — adding a new format is one new class + one line, zero changes
+  elsewhere). Extension matching is case-insensitive and tolerates a
+  leading dot (`"pdf"`, `"PDF"`, `".pdf"` all resolve the same way).
+- `backend/src/core/domain/errors.py` — new file, `PolicyPalError` (base,
+  `message`+`code`) → `DocumentProcessingError` →
+  `UnsupportedFormatError`, per `coding-standards.md` section 6's
+  exception hierarchy and section 1's Open/Closed example (which names
+  `UnsupportedFormatError` directly for exactly this `ProcessorFactory`
+  case). Deliberately minimal — only the three classes an actual caller
+  raises today; the rest of section 6's hierarchy
+  (`AuthorizationError`/`TenantAccessError`/`RateLimitError`/
+  `ModelUnavailableError`) waits for a phase that actually raises one.
+  Lives under `core/domain/` rather than a bare `core/errors.py` so it's
+  covered by the documented adapter-import allowance ("adapters/ imports
+  from core/ports/, core/domain/, and external libraries").
+- **Significant scope change from the plan, decided with the user**:
+  plan.md specifies PyMuPDF **+ unstructured** for PDF ("layout-aware
+  extraction" — distinguishing titles/tables/narrative text, not just
+  raw page text). Implemented that way first, but `unstructured[pdf]`'s
+  import chain (`torch`, `transformers`, `onnxruntime`, `opencv-python`,
+  `effdet`, `unstructured-inference` — a multi-GB ML/CV stack, pulled in
+  unconditionally at module import time even though only the
+  lightweight pdfminer-only `PartitionStrategy.FAST` was ever going to
+  be used at runtime) turned out to be genuinely broken in this
+  environment, not just heavy:
+  1. Installing it first failed outright — pip's resolver backtracked to
+     `onnx==1.10.0` (2021-era, no Python 3.12/Windows wheel, and its
+     legacy `setup.py` can't even build from an isolated sdist without a
+     git checkout). Fixed by pinning `onnx>=1.16,<2` to steer resolution
+     toward a version with prebuilt wheels — also needed `cmake`
+     installed into the venv (`pip install cmake`) and prepended to
+     `PATH` for the build step that got triggered along the way.
+  2. Once installed, `from unstructured.partition.pdf import
+     partition_pdf` reproducibly crashed the process — sometimes an
+     immediate segfault with no Python-level stack trace at all (a raw
+     native access violation), sometimes a 20+ minute CPU-pegged hang
+     that never completed. Bisected methodically: every individual heavy
+     dependency (`torch`, `cv2`, `onnxruntime`, `transformers`,
+     `unstructured_inference`, even its own `inference.layout`/
+     `inference.layoutelement` submodules) imports fine alone and in
+     combination; only `unstructured.partition.pdf`'s own import
+     (pulling in ~15 more submodules, `pdfminer`, `pi_heif`, `pypdf`,
+     etc. on top of what was already loaded) triggers it. The resolved
+     versions (`torch==2.13.0`, `transformers==5.15.1`) are very recent
+     releases likely not yet well-exercised together on Windows/Python
+     3.12 — the `KMP_DUPLICATE_LIB_OK=TRUE` escape hatch for the
+     classic duplicate-OpenMP-DLL Windows issue didn't resolve it
+     either.
+  - Presented this finding to the user directly (not a size/disk-space
+    tradeoff as originally scoped — a real native crash) with two
+    options: keep debugging (open-ended, uncertain payoff) or fall back
+    to PyMuPDF alone for PDFs. **User chose PyMuPDF-only.**
+    `unstructured` dropped from `pyproject.toml` entirely (no `[pdf]`
+    extra, no `onnx` pin, and nothing else in the codebase imports the
+    base package either — dead dependency otherwise); `PDFProcessor` now
+    uses `fitz` for
+    both `extract_text()` (per-page `get_text()`, joined) and
+    `extract_metadata()` — real, working, fast extraction, just without
+    unstructured's title/table/paragraph element typing. DOCX/XLSX/XML
+    processors are unaffected — plan.md specifies python-docx/openpyxl/
+    lxml directly for those, no `unstructured` involvement to begin
+    with.
+- **Second, unrelated real bug found and fixed**: even bare `import
+  fitz` (PyMuPDF) — with none of the above `unstructured[pdf]` machinery
+  involved — reproducibly segfaults the first time it's imported inside
+  pytest's own collection machinery in this environment, though it
+  works fine as a plain `python script.py` in every configuration
+  tried (including replicating conftest.py's exact import sequence
+  standalone). Root cause not fully pinned down (something specific to
+  being pytest's *first* native-extension import during collection, not
+  to `fitz` itself), but reliably fixed the same way as the `litellm`
+  warning issue from Step 3.2: pre-import `fitz` in
+  `backend/tests/conftest.py`, before pytest's collection reaches any
+  test module, so the crash-prone first-import never happens mid-test-run.
+- Validation: `ruff check`, `ruff format --check`, `mypy --strict src`
+  all pass with zero suppressions in the new source files (`fitz`/
+  `openpyxl`/`lxml` already covered by Step 1.1's mypy
+  `ignore_missing_imports` override, extended in this step to include
+  `fitz.*`). New test files — one per processor plus the factory plus
+  `core/domain/errors.py` — build real sample documents at test time via
+  each library itself (PyMuPDF/python-docx/openpyxl generate real
+  `.pdf`/`.docx`/`.xlsx` fixtures in `tmp_path`; XML is inline text) —
+  no binary fixtures committed, matching `coding-standards.md`'s "no
+  generated document corpora committed" rule. 100% coverage on every
+  new file, **100% coverage across the entire `src/` tree** (still, as
+  every step in this phase has held), 243 tests passing across the
+  whole suite (up from 214), zero warnings.
+
+**Phase 3 — Infrastructure Adapters: COMPLETE.**
+
 ## Environment / tooling notes for future steps
 
 - **gh CLI**: installed via `winget install --id GitHub.cli`, authenticated
@@ -841,6 +947,17 @@ periodically, not just when explicitly asked.
 
 ## Next recommended step
 
-Merge the Step 3.5 PR, then finish Phase 3 with Step 3.6 (document
-processor adapters — PDF/DOCX/XLSX/XML — implementing
-`DocumentProcessorPort` via a `ProcessorFactory`).
+Merge the Step 3.6 PR (closes out Phase 3), then start Phase 4 —
+Chunking & Embedding Pipeline: Step 4.1 (`MetadataExtractor` — parses
+document structure into per-chunk metadata: `section_title`,
+`page_number`, `document_title`, `policy_type`, `employer_id`), Step 4.2
+(`SemanticChunker` — sentence-embedding-based topic-boundary splitting,
+~400-600 token chunks with overlap; **note**: plan.md says this step
+triggers a `rag-eval` CI gate, but `.github/workflows/rag-eval.yml`
+doesn't exist yet — it's in plan.md's folder structure but was never a
+concrete step in Phases 0-3, so creating it is likely a small
+prerequisite of Step 4.2 rather than a blocker), Step 4.3
+(`ChunkerPipeline` orchestrating extraction → metadata → semantic
+splitting → enrichment), Step 4.4 (Celery task: chunks → `LLMPort.embed()`
+→ `VectorStorePort.upsert()`, `DocumentChunk` rows for traceability,
+publishes `DocumentEmbeddedEvent`).

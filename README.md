@@ -31,7 +31,7 @@ See `files/plan.md` for the full design (tech stack rationale, data flow diagram
 - [x] Typed configuration (Pydantic Settings)
 - [x] Health/readiness probes
 - [x] Core domain models, ports & events (Phase 2)
-- [ ] Infrastructure adapters: LiteLLM, Pinecone, Redis, Postgres repos, document processors (Phase 3)
+- [x] Infrastructure adapters: LiteLLM, Pinecone, Redis, Postgres repos, document processors (Phase 3)
 - [ ] Chunking & embedding pipeline (Phase 4)
 - [ ] Auth + multi-tenancy (Phase 5)
 - [ ] RAG pipeline: guardrails, query routing, retrieval, streaming generation (Phase 6)
@@ -58,7 +58,7 @@ Track detailed step-by-step progress in `IMPLEMENTATION_STATUS.md`.
 | Authentication       | OAuth2 + JWT                                  |
 | Background Jobs      | Celery + Redis                                |
 | Caching              | Redis                                         |
-| Document Parsing     | unstructured, PyMuPDF, python-docx, openpyxl  |
+| Document Parsing     | PyMuPDF (PDF), python-docx, openpyxl, lxml    |
 | Frontend             | React 18 + TypeScript + Tailwind CSS + Vite   |
 | Streaming            | Server-Sent Events (SSE)                      |
 | Containerization     | Docker Compose                                |
