@@ -1,0 +1,43 @@
+name: RAG Evaluation
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  rag-eval:
+    name: rag-eval
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for the RAGAS eval runner
+        id: check
+        run: |
+          if [ -f "eval/run_eval.py" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-python@v5
+        if: steps.check.outputs.exists == 'true'
+        with:
+          python-version: "3.12"
+
+      - name: Install backend dependencies
+        if: steps.check.outputs.exists == 'true'
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run RAGAS golden-dataset evaluation
+        if: steps.check.outputs.exists == 'true'
+        run: python eval/run_eval.py --config eval/eval_config.yaml
+
+      - name: Eval runner not built yet
+        if: steps.check.outputs.exists == 'false'
+        run: echo "eval/run_eval.py not found yet — skipping (Phase 12 adds the RAGAS runner)."
