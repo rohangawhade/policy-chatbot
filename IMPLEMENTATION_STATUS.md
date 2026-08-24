@@ -1940,6 +1940,91 @@ periodically, not just when explicitly asked.
   task registered under `[tasks]`, then torn down (`docker compose
   down`).
 
+### Step 8.2 — Document ingestion task — DONE
+
+- `backend/src/workers/document_ingestion_task.py` — **new file**,
+  matching plan.md's own `workers/` folder listing exactly. Celery task
+  `ingestion.process_document_upload(document_data, previous_version_data=None)`
+  runs the full pipeline plan.md's Step 8.2 lists: `ProcessorFactory.get()`
+  (Step 3.6) picks the processor from `document.source_type` (used as
+  the extension — `"pdf"`, `"docx"`, etc., matching how every existing
+  test fixture already populates that field), `processor.extract_text()`,
+  `ChunkerPipeline.process()` (Step 4.2/4.3), then
+  `EmbeddingService.embed_and_store(chunks, document, previous_version)`
+  (Step 4.4, extended Step 7.2 — this is also where
+  `DocumentService.register_upload()`'s (Step 7.1) `previous` result
+  finally gets threaded all the way through to a real vector-purge/
+  chunk-deactivate/`DocumentVersionReplacedEvent` call, once a caller
+  supplies it). On success: `document.status = READY`,
+  `error_message` cleared, `DocumentProcessedEvent` published. Thin by
+  design, same as `embedding_task.py` — wires concrete adapters, owns
+  the request-scoped session, delegates all actual logic.
+- **Design choice, explained in the file's own docstring**:
+  `EmbeddingService.embed_and_store()` is called as a *plain method
+  call* inside this task, not by enqueueing `embedding_task`'s own
+  Celery task and blocking on its result — chaining a synchronous
+  cross-task wait risks worker starvation (a worker sits idle holding
+  its single execution slot while waiting on another task that may be
+  queued behind it), and there's no benefit to re-queuing work that's
+  already running in this same worker process. `embedding_task.py`
+  itself is unchanged and remains independently callable (e.g.
+  re-embedding an already-chunked document without redoing
+  extraction) — this task is a fuller pipeline built on the same
+  shared `EmbeddingService`, not a replacement.
+- **Failure handling, per plan.md's "processing → ready / failed"**:
+  extraction/chunking/embedding all run inside one `try` — any
+  exception marks `document.status = FAILED` with
+  `error_message = str(exc)`, commits that state, then re-raises so
+  Step 8.1's `autoretry_for=(Exception,)` (declared on this task too)
+  still gets a chance to retry the whole attempt. A retry that
+  eventually succeeds simply overwrites `FAILED` with `READY` on its
+  own successful run — the intermediate `FAILED` mark during a retry
+  window is a real, honest status (a brief "currently failed, may
+  retry" state), not a bug.
+- **Explicit scope boundary, not a silent gap**: `document.source_path`
+  is treated as a local filesystem path — every `DocumentProcessorPort`
+  implementation opens it directly via its own library (`fitz.open`,
+  `docx.Document`, etc.), and no file-storage port/adapter (S3 or
+  otherwise) exists anywhere in this codebase — plan.md's Step 2.2 port
+  list never included one. Downloading an S3-hosted upload to a local
+  temp path first, if that's ever needed, is Phase 9's upload-route
+  problem, not this task's.
+- `workers/celery_app.py`: `include` gained
+  `"workers.document_ingestion_task"`; `task_routes` gained
+  `"ingestion.*": {"queue": "ingestion"}`. `docker-compose.yml`/
+  `.override.yml`'s `celery-worker` command gained `ingestion` to its
+  `-Q` list (same two-place-change gotcha as Step 8.1 — a queue
+  `task_routes` sends work to that the worker isn't told to consume via
+  `-Q` just accumulates silently).
+- Validation: `ruff check`, `ruff format --check`, `mypy --strict src`
+  all pass with zero new suppressions beyond the existing
+  `@app.task(...)` `# type: ignore[misc]` pattern. New
+  `tests/test_document_ingestion_task.py` (13 tests, via fakes for
+  every collaborator — `ProcessorFactory`/`ChunkerPipeline`/
+  `EmbeddingService`/the Postgres repositories/`LiteLLMAdapter`/
+  `PineconeAdapter`/`InMemoryEventBus`/the session, same pattern
+  `test_embedding_task.py` established): task registration + retry
+  policy, a `Document` JSON round trip, a full successful run
+  (processor called with the right path, chunker called with the
+  extracted text, embedding service called with the resulting chunks
+  and `previous_version`, status/error_message/commit all correct),
+  `DocumentProcessedEvent` published with the right ids on success,
+  `previous_version` threaded through end-to-end, an extraction
+  failure and a chunking failure each mark `FAILED`/set
+  `error_message`/re-raise, a failure never publishes
+  `DocumentProcessedEvent`, and the Celery entry point's JSON
+  deserialization (with and without `previous_version_data`) delegates
+  correctly. 100% coverage on the new file, **100% coverage across the
+  entire `src/` tree** (1935/1935 statements), 431 tests passing across
+  the whole suite (up from 420), zero warnings. Run against a real
+  `docker compose up -d postgres` container for the full suite
+  (`alembic upgrade head`, no drift — no migration needed), torn down
+  after. **Additionally verified against the real stack**: `docker
+  compose up -d --build celery-worker` — the worker's startup banner
+  confirmed all three `[queues]` (`default`/`embedding`/`ingestion`)
+  and both `[tasks]` (`embedding.embed_and_index_document`/
+  `ingestion.process_document_upload`), then torn down.
+
 ## Environment / tooling notes for future steps
 
 - **Celery tasks need `include=` in `celery_app.py`**: a new
@@ -1994,19 +2079,19 @@ periodically, not just when explicitly asked.
 
 Phases 4 (Chunking & Embedding Pipeline), 5 (Authentication &
 Multi-Tenancy), 6 (RAG Pipeline), 7 (Document Versioning), and Phase
-8's Step 8.1 (Celery + Redis setup) are all COMPLETE and merged.
+8's Steps 8.1 (Celery + Redis setup) and 8.2 (Document ingestion task)
+are all COMPLETE and merged.
 
-Continue with Step 8.2
-(`feat/celery-document-ingestion` — the actual ingestion task: detect
-file type → `ProcessorFactory` (Step 3.6) → chunk (`ChunkerPipeline`,
-Step 4.2) → embed/index (`EmbeddingService`, Step 4.4) → update
-`Document.status` → publish `DocumentProcessedEvent`; this is also
-where `DocumentService.register_upload()` (Step 7.1) and
-`EmbeddingService`'s `previous_version` param (Step 7.2) finally get a
-real caller connecting them, and plan.md names `document_service.py`
-for exactly this orchestration), Step 8.3
-(`feat/ingestion-status-tracking` — a status-check endpoint + SSE push,
-which is really Phase 9 API-route work pulled forward a step early).
+Continue with Step 8.3 (`feat/ingestion-status-tracking` — a
+status-check endpoint + SSE push for `Document.status`
+(processing/ready/failed), which is really Phase 9 API-route work
+pulled forward a step early; no `api/routes/document_routes.py` exists
+yet at all, so this step likely creates it, minimally, just for a
+status-check + SSE endpoint — full upload/list/delete routes are
+Phase 9's `POST /api/documents/upload` etc.), then Phase 9 — API
+Routes (where `DocumentService.register_upload()`, Step 7.1, and
+`document_ingestion_task.process_document_upload`, Step 8.2, finally
+get a real HTTP caller connecting them end-to-end).
 
 **Standing gap, still unresolved — now affects six event types across
 three phases**: no event-subscriber-registration infrastructure exists

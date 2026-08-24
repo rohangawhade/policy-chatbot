@@ -32,22 +32,23 @@ app = Celery(
     "policypal",
     broker=celery_config.broker_url,
     backend=celery_config.result_backend,
-    include=["workers.embedding_task"],
+    include=["workers.embedding_task", "workers.document_ingestion_task"],
 )
 app.conf.broker_connection_retry_on_startup = True
 
 # Queue routing: every task name in this app follows a
 # "<family>.<action>" convention (e.g. `embedding.embed_and_index_document`),
-# routed here by family prefix to its own queue. A new task family (Step
-# 8.2's ingestion task) just adds one more `task_routes` entry — nothing
-# else in this file changes. The worker process must also be told to
-# consume the new queue (`-Q` in docker-compose.yml/.override.yml's
-# `celery-worker` command) — a queue with no consumer just accumulates
-# unprocessed tasks silently, so this is a two-place change, easy to
-# half-do; both compose files were updated alongside this.
+# routed here by family prefix to its own queue. A new task family adds
+# one more `task_routes` entry — nothing else in this file changes. The
+# worker process must also be told to consume the new queue (`-Q` in
+# docker-compose.yml/.override.yml's `celery-worker` command) — a queue
+# with no consumer just accumulates unprocessed tasks silently, so this
+# is a two-place change, easy to half-do; both compose files were
+# updated alongside this.
 app.conf.task_default_queue = "default"
 app.conf.task_routes = {
     "embedding.*": {"queue": "embedding"},
+    "ingestion.*": {"queue": "ingestion"},
 }
 
 # Retries: deliberately not a blind app-wide default here (a task that

@@ -72,7 +72,7 @@ services:
     # work to (Step 8.1) — "dead_letter" is deliberately excluded, since
     # nothing should auto-consume it; inspect/replay it manually with a
     # separate one-off `celery -A workers.celery_app worker -Q dead_letter`.
-    command: celery -A workers.celery_app worker --loglevel=info -Q default,embedding
+    command: celery -A workers.celery_app worker --loglevel=info -Q default,embedding,ingestion
     working_dir: /app/src
     env_file:
       - .env
