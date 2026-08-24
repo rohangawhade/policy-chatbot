@@ -34,7 +34,7 @@ See `files/plan.md` for the full design (tech stack rationale, data flow diagram
 - [x] Infrastructure adapters: LiteLLM, Pinecone, Redis, Postgres repos, document processors (Phase 3)
 - [x] Chunking & embedding pipeline: metadata extraction, semantic chunking, embedding + Pinecone indexing (Phase 4)
 - [x] Auth + multi-tenancy: JWT access/refresh tokens, role guards, tenant context middleware (Phase 5)
-- [ ] RAG pipeline: guardrails, query routing, retrieval, streaming generation (Phase 6)
+- [x] RAG pipeline: guardrails, query routing, retrieval, prompt assembly, streaming generation, conversation memory (Phase 6)
 - [ ] Document versioning (Phase 7)
 - [ ] Celery ingestion workers (Phase 8)
 - [ ] API routes (Phase 9)

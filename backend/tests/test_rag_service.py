@@ -10,10 +10,23 @@ from core.domain.analytics import (
     LLMCostLog,
     RequestLatencyLog,
 )
+from core.domain.conversation import Conversation, Message, MessageRole
+from core.domain.events import (
+    ChatMessageReceivedEvent,
+    ChatResponseGeneratedEvent,
+    DomainEvent,
+    LowConfidenceResponseEvent,
+)
 from core.domain.policy import Enrollment
 from core.ports.cache_port import CachePort
+from core.ports.event_bus_port import EventBusPort, EventHandler
 from core.ports.llm_port import LLMPort, UsageCost
-from core.ports.repository_ports import AnalyticsRepository, EnrollmentRepository
+from core.ports.repository_ports import (
+    AnalyticsRepository,
+    ConversationRepository,
+    EnrollmentRepository,
+    MessageRepository,
+)
 from core.ports.vector_store_port import VectorMatch, VectorStorePort
 from core.services.query_router import QueryRouter
 from core.services.rag_service import GenerationStream, PromptTemplate, RAGService, RetrievalResult
@@ -124,6 +137,7 @@ class FakeAnalyticsRepository(AnalyticsRepository):
     def __init__(self) -> None:
         self.llm_cost_logs: list[LLMCostLog] = []
         self.latency_logs: list[RequestLatencyLog] = []
+        self.flagged_responses: list[FlaggedResponse] = []
 
     async def record_llm_cost(self, log: LLMCostLog) -> None:
         self.llm_cost_logs.append(log)
@@ -132,7 +146,7 @@ class FakeAnalyticsRepository(AnalyticsRepository):
         self.latency_logs.append(log)
 
     async def record_flagged_response(self, flagged: FlaggedResponse) -> None:
-        raise NotImplementedError
+        self.flagged_responses.append(flagged)
 
     async def record_guardrail_rejection(self, rejection: GuardrailRejection) -> None:
         raise NotImplementedError
@@ -143,6 +157,67 @@ class FakeAnalyticsRepository(AnalyticsRepository):
         raise NotImplementedError
 
     async def list_guardrail_rejections(self, employer_id: UUID) -> list[GuardrailRejection]:
+        raise NotImplementedError
+
+
+class FakeConversationRepository(ConversationRepository):
+    def __init__(self) -> None:
+        self.created: list[Conversation] = []
+
+    async def get(self, entity_id: UUID) -> Conversation | None:
+        raise NotImplementedError
+
+    async def create(self, entity: Conversation) -> Conversation:
+        self.created.append(entity)
+        return entity
+
+    async def update(self, entity: Conversation) -> Conversation:
+        raise NotImplementedError
+
+    async def delete(self, entity_id: UUID) -> None:
+        raise NotImplementedError
+
+    async def list_by_employee(self, employee_id: UUID) -> list[Conversation]:
+        raise NotImplementedError
+
+
+class FakeMessageRepository(MessageRepository):
+    def __init__(self, history: list[Message] | None = None) -> None:
+        self.created: list[Message] = []
+        self._history = history or []
+        self.list_by_conversation_calls: list[tuple[UUID, int]] = []
+
+    async def get(self, entity_id: UUID) -> Message | None:
+        raise NotImplementedError
+
+    async def create(self, entity: Message) -> Message:
+        self.created.append(entity)
+        return entity
+
+    async def update(self, entity: Message) -> Message:
+        raise NotImplementedError
+
+    async def delete(self, entity_id: UUID) -> None:
+        raise NotImplementedError
+
+    async def list_by_conversation(
+        self, conversation_id: UUID, *, limit: int = 20
+    ) -> list[Message]:
+        self.list_by_conversation_calls.append((conversation_id, limit))
+        return self._history
+
+
+class FakeEventBus(EventBusPort):
+    def __init__(self) -> None:
+        self.published: list[DomainEvent] = []
+
+    async def publish(self, event: DomainEvent) -> None:
+        self.published.append(event)
+
+    def subscribe(self, event_type: str, handler: EventHandler) -> None:
+        raise NotImplementedError
+
+    def unsubscribe(self, event_type: str, handler: EventHandler) -> None:
         raise NotImplementedError
 
 
@@ -157,6 +232,9 @@ def _service(
     enrollment_repository: FakeEnrollmentRepository,
     analytics_repository: FakeAnalyticsRepository | None = None,
     query_router: QueryRouter | None = None,
+    conversation_repository: FakeConversationRepository | None = None,
+    message_repository: FakeMessageRepository | None = None,
+    event_bus: FakeEventBus | None = None,
     top_k: int = 5,
     low_confidence_threshold: float = 0.5,
 ) -> RAGService:
@@ -167,6 +245,9 @@ def _service(
         enrollment_repository,
         analytics_repository or FakeAnalyticsRepository(),
         query_router or _router(),
+        conversation_repository or FakeConversationRepository(),
+        message_repository or FakeMessageRepository(),
+        event_bus or FakeEventBus(),
         embedding_model=_MODEL,
         top_k=top_k,
         low_confidence_threshold=low_confidence_threshold,
@@ -381,6 +462,9 @@ def test_assemble_prompt_uses_a_custom_prompt_template() -> None:
         FakeEnrollmentRepository(),
         FakeAnalyticsRepository(),
         _router(),
+        FakeConversationRepository(),
+        FakeMessageRepository(),
+        FakeEventBus(),
         embedding_model=_MODEL,
         prompt_template=custom_template,
     )
@@ -588,3 +672,255 @@ async def test_metrics_is_none_before_the_stream_is_consumed() -> None:
     stream = await service.query("What's my deductible?", employee_id, employer_id)
 
     assert stream.metrics is None
+
+
+def test_render_includes_conversation_history() -> None:
+    template = PromptTemplate()
+    history = [
+        Message(conversation_id=uuid4(), employer_id=uuid4(), role=MessageRole.USER, content="Hi"),
+        Message(
+            conversation_id=uuid4(),
+            employer_id=uuid4(),
+            role=MessageRole.ASSISTANT,
+            content="Hello, how can I help?",
+        ),
+    ]
+
+    prompt = template.render("follow-up question", [], [], history)
+
+    assert "Conversation so far:" in prompt
+    assert "Employee: Hi" in prompt
+    assert "Assistant: Hello, how can I help?" in prompt
+
+
+def test_render_omits_history_section_when_there_is_none() -> None:
+    template = PromptTemplate()
+
+    prompt = template.render("query", [], [], None)
+
+    assert "Conversation so far:" not in prompt
+
+
+async def test_query_starts_a_new_conversation_when_none_is_given() -> None:
+    employer_id, employee_id = uuid4(), uuid4()
+    llm = FakeLLM(stream_tokens=["answer"])
+    conversation_repo = FakeConversationRepository()
+    service = _service(
+        llm,
+        FakeCache(),
+        FakeVectorStore(),
+        FakeEnrollmentRepository(),
+        conversation_repository=conversation_repo,
+    )
+
+    stream = await service.query("What's my deductible?", employee_id, employer_id)
+    await _consume(stream)
+
+    assert len(conversation_repo.created) == 1
+    new_conversation = conversation_repo.created[0]
+    assert new_conversation.employee_id == employee_id
+    assert new_conversation.employer_id == employer_id
+    assert stream.metrics is not None
+    assert stream.metrics.conversation_id == new_conversation.id
+
+
+async def test_query_continues_an_existing_conversation_without_creating_a_new_one() -> None:
+    employer_id, employee_id = uuid4(), uuid4()
+    existing_conversation_id = uuid4()
+    llm = FakeLLM(stream_tokens=["answer"])
+    conversation_repo = FakeConversationRepository()
+    message_repo = FakeMessageRepository()
+    service = _service(
+        llm,
+        FakeCache(),
+        FakeVectorStore(),
+        FakeEnrollmentRepository(),
+        conversation_repository=conversation_repo,
+        message_repository=message_repo,
+    )
+
+    stream = await service.query(
+        "Follow-up question", employee_id, employer_id, existing_conversation_id
+    )
+    await _consume(stream)
+
+    assert conversation_repo.created == []
+    assert stream.metrics is not None
+    assert stream.metrics.conversation_id == existing_conversation_id
+    assert message_repo.list_by_conversation_calls == [(existing_conversation_id, 20)]
+
+
+async def test_query_persists_the_user_and_assistant_messages() -> None:
+    employer_id, employee_id = uuid4(), uuid4()
+    llm = FakeLLM(stream_tokens=["Your ", "answer."])
+    message_repo = FakeMessageRepository()
+    service = _service(
+        llm,
+        FakeCache(),
+        FakeVectorStore(),
+        FakeEnrollmentRepository(),
+        message_repository=message_repo,
+    )
+
+    stream = await service.query("What's my deductible?", employee_id, employer_id)
+    await _consume(stream)
+
+    assert len(message_repo.created) == 2
+    user_message, assistant_message = message_repo.created
+    assert user_message.role == MessageRole.USER
+    assert user_message.content == "What's my deductible?"
+    assert assistant_message.role == MessageRole.ASSISTANT
+    assert assistant_message.content == "Your answer."
+    assert assistant_message.model_used == _CHEAP_MODEL
+
+
+async def test_query_publishes_chat_message_received_and_response_generated_events() -> None:
+    employer_id, employee_id = uuid4(), uuid4()
+    llm = FakeLLM(stream_tokens=["answer"])
+    event_bus = FakeEventBus()
+    service = _service(
+        llm, FakeCache(), FakeVectorStore(), FakeEnrollmentRepository(), event_bus=event_bus
+    )
+
+    stream = await service.query("What's my deductible?", employee_id, employer_id)
+    await _consume(stream)
+
+    received_events = [e for e in event_bus.published if isinstance(e, ChatMessageReceivedEvent)]
+    generated_events = [e for e in event_bus.published if isinstance(e, ChatResponseGeneratedEvent)]
+    assert len(received_events) == 1
+    assert received_events[0].employee_id == employee_id
+    assert received_events[0].employer_id == employer_id
+    assert len(generated_events) == 1
+    assert generated_events[0].model_used == _CHEAP_MODEL
+    assert generated_events[0].conversation_id == stream.metrics.conversation_id  # type: ignore[union-attr]
+
+
+async def test_query_low_confidence_persists_flagged_response_and_publishes_event() -> None:
+    employer_id, employee_id = uuid4(), uuid4()
+    match = VectorMatch(id="c1", score=0.2, metadata={})
+    llm = FakeLLM(stream_tokens=["answer"])
+    analytics = FakeAnalyticsRepository()
+    event_bus = FakeEventBus()
+    service = _service(
+        llm,
+        FakeCache(),
+        FakeVectorStore([match]),
+        FakeEnrollmentRepository(),
+        analytics_repository=analytics,
+        event_bus=event_bus,
+        low_confidence_threshold=0.5,
+    )
+
+    stream = await service.query("What's my deductible?", employee_id, employer_id)
+    await _consume(stream)
+
+    assert len(analytics.flagged_responses) == 1
+    flagged = analytics.flagged_responses[0]
+    assert flagged.employer_id == employer_id
+    assert flagged.top_similarity_score == 0.2
+    assert flagged.flag_reason == "low_retrieval_confidence"
+    low_confidence_events = [
+        e for e in event_bus.published if isinstance(e, LowConfidenceResponseEvent)
+    ]
+    assert len(low_confidence_events) == 1
+    assert low_confidence_events[0].top_similarity_score == 0.2
+
+
+async def test_query_high_confidence_does_not_flag_or_publish() -> None:
+    employer_id, employee_id = uuid4(), uuid4()
+    match = VectorMatch(id="c1", score=0.9, metadata={})
+    llm = FakeLLM(stream_tokens=["answer"])
+    analytics = FakeAnalyticsRepository()
+    event_bus = FakeEventBus()
+    service = _service(
+        llm,
+        FakeCache(),
+        FakeVectorStore([match]),
+        FakeEnrollmentRepository(),
+        analytics_repository=analytics,
+        event_bus=event_bus,
+        low_confidence_threshold=0.5,
+    )
+
+    stream = await service.query("What's my deductible?", employee_id, employer_id)
+    await _consume(stream)
+
+    assert analytics.flagged_responses == []
+    assert not any(isinstance(e, LowConfidenceResponseEvent) for e in event_bus.published)
+
+
+async def test_query_cache_hit_still_persists_a_conversation_turn() -> None:
+    employer_id, employee_id = uuid4(), uuid4()
+    llm, message_repo = FakeLLM(), FakeMessageRepository()
+    service = _service(
+        llm,
+        FakeCache(),
+        FakeVectorStore(),
+        FakeEnrollmentRepository(),
+        message_repository=message_repo,
+    )
+    cache_key = service._cache_key(employer_id, "What's my deductible?")
+    cache = FakeCache({cache_key: "cached answer"})
+    service = _service(
+        llm, cache, FakeVectorStore(), FakeEnrollmentRepository(), message_repository=message_repo
+    )
+
+    stream = await service.query("What's my deductible?", employee_id, employer_id)
+    await _consume(stream)
+
+    assert len(message_repo.created) == 2
+    assert message_repo.created[1].content == "cached answer"
+    assert message_repo.created[1].model_used is None
+    assert stream.metrics is not None
+    assert stream.metrics.conversation_id is not None
+    assert stream.metrics.message_id is not None
+
+
+async def test_query_cache_hit_does_not_publish_response_generated_event() -> None:
+    employer_id, employee_id = uuid4(), uuid4()
+    llm, event_bus = FakeLLM(), FakeEventBus()
+    service = _service(
+        llm, FakeCache(), FakeVectorStore(), FakeEnrollmentRepository(), event_bus=event_bus
+    )
+    cache_key = service._cache_key(employer_id, "What's my deductible?")
+    cache = FakeCache({cache_key: "cached answer"})
+    service = _service(
+        llm, cache, FakeVectorStore(), FakeEnrollmentRepository(), event_bus=event_bus
+    )
+
+    stream = await service.query("What's my deductible?", employee_id, employer_id)
+    await _consume(stream)
+
+    assert not any(isinstance(e, ChatResponseGeneratedEvent) for e in event_bus.published)
+    # The user's message is still recorded as received, even on a cache hit.
+    assert any(isinstance(e, ChatMessageReceivedEvent) for e in event_bus.published)
+
+
+async def test_query_passes_conversation_history_into_the_prompt() -> None:
+    employer_id, employee_id = uuid4(), uuid4()
+    conversation_id = uuid4()
+    history = [
+        Message(
+            conversation_id=conversation_id,
+            employer_id=employer_id,
+            role=MessageRole.USER,
+            content="What plans are available?",
+        )
+    ]
+    llm = FakeLLM(stream_tokens=["answer"])
+    message_repo = FakeMessageRepository(history=history)
+    service = _service(
+        llm,
+        FakeCache(),
+        FakeVectorStore(),
+        FakeEnrollmentRepository(),
+        message_repository=message_repo,
+    )
+
+    stream = await service.query(
+        "And what about dental?", employee_id, employer_id, conversation_id
+    )
+    await _consume(stream)
+
+    prompt = llm.generate_stream_calls[0][0]
+    assert "What plans are available?" in prompt
