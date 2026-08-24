@@ -164,6 +164,7 @@ async def test_vector_metadata_includes_document_and_chunk_context() -> None:
         "document_title": document.title,
         "document_version": 2,
         "chunk_index": 0,
+        "text": chunk.text,
         "policy_type": "dental",
         "section_title": "Eligibility",
         "page_number": 3,

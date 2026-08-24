@@ -1480,6 +1480,55 @@ periodically, not just when explicitly asked.
   Run against a real `docker compose up -d postgres` container, torn
   down after.
 
+### Step 6.4 — Context assembly + prompt engineering — DONE
+
+- `backend/src/core/services/rag_service.py` — extends `RAGService` (per
+  Step 6.3's note that this file is built up incrementally) with
+  `PromptTemplate` (named slots: `role_definition`, `domain_restriction`,
+  `no_context_notice`) and `RAGService.assemble_prompt(query_text,
+  retrieval)`. `LLMPort.generate`/`generate_stream` take a single
+  `prompt: str` (no separate system/user message split in that port), so
+  `render()` assembles everything — role, restrictions, retrieved
+  excerpts with source attribution, enrollment info, the question — into
+  one string. `RAGService` takes an optional `prompt_template` override
+  (defaults to `PromptTemplate()`) so wording can be A/B tested without
+  touching orchestration code.
+- **Real gap found and fixed in already-merged Step 4.4 code, required
+  for this step to be functional at all**: `VectorMatch` (a Pinecone
+  query result) is `(id, score, metadata)` — no join back to Postgres —
+  but `EmbeddingService._to_vector_record()`'s metadata dict never
+  included the chunk's actual **text**, only bookkeeping fields
+  (`document_id`, `chunk_index`, etc.). A retrieved match had no content
+  to put in a prompt at all. Fixed by adding `"text": chunk.text` to the
+  metadata dict — chunks are ~400-600 tokens, well under Pinecone's
+  per-vector metadata size limit, so storing text directly there (the
+  standard RAG pattern) avoids a second Postgres round trip per
+  retrieved chunk that a `DocumentChunkRepository.get()`-per-match
+  alternative would need. Updated Step 4.4's existing
+  `test_vector_metadata_includes_document_and_chunk_context` assertion
+  to match; no behavior change to anything already using the old
+  metadata shape (purely additive key).
+- Enrollment lines currently show `Policy {policy_id} — {status},
+  enrolled {date}` — `Enrollment` only carries a `policy_id`, not the
+  policy's name/type, so there's no human-readable policy name yet.
+  Flagging as a known limitation rather than adding a `PolicyRepository`
+  dependency to `RAGService` for this step; a join for a friendlier
+  enrollment summary is a reasonable future improvement.
+- Validation: `ruff check`, `ruff format --check`, `mypy --strict src`
+  all pass. New tests in `tests/test_rag_service.py` (7 tests):
+  no-context rendering includes the notice and omits the excerpts/
+  enrollment headings, a chunk renders with `[Source: title, section]`
+  attribution and its text, a chunk with no `section_title` omits it
+  from the source line, enrollment renders with policy id/status/date
+  and correctly marks inactive enrollments, `assemble_prompt` delegates
+  to the template and honors a custom `prompt_template` override. Step
+  4.4's `tests/test_embedding_service.py` updated for the new `"text"`
+  metadata key. 100% coverage on both changed files, **100% coverage
+  across the entire `src/` tree** (1687/1687 statements), 357 tests
+  passing across the whole suite (up from 350), zero warnings. Run
+  against a real `docker compose up -d postgres` container, torn down
+  after.
+
 ## Environment / tooling notes for future steps
 
 - **Celery tasks need `include=` in `celery_app.py`**: a new
@@ -1534,19 +1583,22 @@ periodically, not just when explicitly asked.
 
 Phases 4 (Chunking & Embedding Pipeline) and 5 (Authentication &
 Multi-Tenancy) are both COMPLETE. Phase 6 (RAG Pipeline) is underway:
-Steps 6.1 (`GuardrailsService`), 6.2 (`QueryRouter`), and 6.3
-(`RAGService.retrieve()`) are done (Step 6.3's PR not yet opened/merged
-as of this writing — see branch `feat/rag-retrieval`).
+Steps 6.1 (`GuardrailsService`), 6.2 (`QueryRouter`), 6.3
+(`RAGService.retrieve()`), and 6.4 (`PromptTemplate`/
+`RAGService.assemble_prompt()`) are done (Step 6.4's PR not yet
+opened/merged as of this writing — see branch `feat/prompt-assembly`).
 
-Continue with Step 6.4 (prompt assembly — extends `RAGService`
-in-place, per Step 6.3's note that this whole file is built up
-incrementally rather than one class per step: a `PromptTemplate` with
-named slots for role/domain-restriction instructions, `RetrievalResult`'s
-chunks with source attribution, and enrollment info), Step 6.5 (streaming generation via
-`LLMPort.generate_stream()`, source citations appended, response
-cached, `LLMCostLog`/`RequestLatencyLog` recorded, low-confidence
-responses auto-flagged), Step 6.6 (conversation memory — persist
-message pairs, load the last N as context for follow-ups).
+Continue with Step 6.5 (streaming generation — extends `RAGService`
+in-place: call `LLMPort.generate_stream()` with `QueryRouter`-selected
+model and `assemble_prompt()`'s output, append source citations from
+the retrieved chunks' `document_title`/`section_title` metadata at the
+end, cache the complete response after streaming finishes using
+`_cache_key()` — the same key `retrieve()` reads, so a write here is
+actually visible to a later cache hit — log `LLMCostLog`/
+`RequestLatencyLog`, auto-flag low-confidence responses via
+`FlaggedResponse` when the top chunk's similarity score is below
+threshold), Step 6.6 (conversation memory — persist message pairs, load
+the last N as context for follow-ups).
 
 **Standing gap to resolve before or during Step 6.5**: Step 6.1 flagged
 that no event-subscriber-registration infrastructure exists anywhere in

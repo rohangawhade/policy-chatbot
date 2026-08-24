@@ -91,6 +91,12 @@ class EmbeddingService:
             "document_title": document.title,
             "document_version": document.version,
             "chunk_index": chunk.chunk_index,
+            # Pinecone is the only place a retrieval query gets the chunk's
+            # actual content back — DocumentChunk's Postgres row exists for
+            # traceability, but a query() match is (id, score, metadata)
+            # only, with no join back to Postgres. Chunks are ~400-600
+            # tokens, well under Pinecone's per-vector metadata limit.
+            "text": chunk.text,
         }
         if document.policy_type is not None:
             metadata["policy_type"] = document.policy_type.value
