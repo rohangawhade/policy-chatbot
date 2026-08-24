@@ -21,6 +21,13 @@ dependencies = [
   "alembic>=1.14,<1.15",
   "python-jose[cryptography]>=3.3,<4",
   "passlib[bcrypt]>=1.7,<2",
+  # passlib 1.7.4 (unmaintained since 2020) probes bcrypt's internals via
+  # `bcrypt.__about__.__version__`, removed in bcrypt 4.0 — every 4.x/5.x
+  # bcrypt breaks `AuthService.hash_password`/`verify_password` outright
+  # (ValueError from passlib's own internal self-test, not a real 72-byte
+  # password). Pinned to the last 3.x line, which passlib 1.7.4 actually
+  # supports.
+  "bcrypt>=3.2,<4.0",
   "celery[redis]>=5.4,<5.5",
   "redis>=5.2,<6",
   "pymupdf>=1.24,<1.25",
@@ -66,10 +73,10 @@ mypy_path = "src"
 strict = true
 warn_unused_ignores = true
 
-# Celery, the Pinecone client, PyMuPDF (fitz), openpyxl, and lxml ship
-# no py.typed marker and no reliable upstream stubs.
+# Celery, the Pinecone client, PyMuPDF (fitz), openpyxl, lxml, python-jose,
+# and passlib ship no py.typed marker and no reliable upstream stubs.
 [[tool.mypy.overrides]]
-module = ["celery.*", "pinecone.*", "fitz.*", "openpyxl.*", "lxml.*"]
+module = ["celery.*", "pinecone.*", "fitz.*", "openpyxl.*", "lxml.*", "jose.*", "passlib.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
