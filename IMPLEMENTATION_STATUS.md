@@ -1391,6 +1391,48 @@ periodically, not just when explicitly asked.
   CI job beyond its Step 4.2 no-op path — still no-ops today since
   `eval/run_eval.py` doesn't exist until Phase 12, exactly as designed.
 
+### Step 6.2 — Query router (multi-model) — DONE
+
+- `backend/src/core/services/query_router.py` — `QueryRouter`.
+  `score_complexity(query_text)` averages four independently-normalized
+  [0.0, 1.0] signals per plan.md's named list: a comparison/reasoning
+  keyword present, how many distinct policy types are mentioned (2+ =
+  max signal), query word count (≥20 words = max signal), and a rough
+  entity-count proxy (capitalized words after the first, ÷3). Verified
+  against plan.md's own two worked examples: "What's my deductible?"
+  scores below the default 0.4 threshold, "Compare health vs dental
+  coverage for my family" scores at or above it.
+  `select_model(complexity_score)`/`fallback_model()` implement
+  `coding-standards.md` section 17's Multi-Model Fallback Pattern logic
+  — `powerful_model is None` (not configured) routes every query to
+  `cheap_model` regardless of score, matching plan.md's "no code changes
+  needed" graceful-degradation language.
+- **Deviates from section 17's literal constructor signature**
+  (`__init__(self, config: LLMConfig)`) — that would violate section 3's
+  own import boundary (`core/services/` may only import
+  `core/ports/`/`core/domain/`; `config.py` is neither). Takes
+  `cheap_model`/`powerful_model`/`complexity_threshold` as plain scalars
+  instead, matching every other Phase 3/4/6 service's "caller decides,
+  service has no opinion" pattern (`SemanticChunker`, `EmbeddingService`,
+  `AuthService`, `GuardrailsService` all do the same).
+- Routing decisions aren't logged by this class — `LLMCostLog` already
+  has `query_complexity_score`/`model_tier` fields for exactly that
+  (Step 6.5 writes them once a real call happens); `QueryRouter` stays a
+  pure, stateless scoring/selection utility with no event bus or
+  repository dependency, unlike Step 6.1's `GuardrailsService`.
+- Validation: `ruff check`, `ruff format --check`, `mypy --strict src`
+  all pass. New `tests/test_query_router.py` (11 tests): both of
+  plan.md's worked examples, each signal independently shown to
+  increase the score (comparison keyword, second policy type mentioned,
+  longer query, capitalized entities), score always within [0.0, 1.0]
+  across edge-case inputs (empty string, every signal maxed at once),
+  `select_model`'s threshold boundary (just below vs. exactly at) and
+  its `powerful_model=None` fallback, `fallback_model()`. 100% coverage
+  on the new file, **100% coverage across the entire `src/` tree**
+  (1604/1604 statements), 341 tests passing across the whole suite (up
+  from 330), zero warnings. Run against a real
+  `docker compose up -d postgres` container, torn down after.
+
 ## Environment / tooling notes for future steps
 
 - **Celery tasks need `include=` in `celery_app.py`**: a new
@@ -1445,13 +1487,11 @@ periodically, not just when explicitly asked.
 
 Phases 4 (Chunking & Embedding Pipeline) and 5 (Authentication &
 Multi-Tenancy) are both COMPLETE. Phase 6 (RAG Pipeline) is underway:
-Step 6.1 (`GuardrailsService`) is done (PR not yet opened/merged as of
-this writing — see branch `feat/guardrails-service`).
+Steps 6.1 (`GuardrailsService`) and 6.2 (`QueryRouter`) are done (Step
+6.2's PR not yet opened/merged as of this writing — see branch
+`feat/query-complexity-router`).
 
-Continue with Step 6.2 (`query_router.py` — complexity scoring 0.0-1.0,
-cheap/powerful model selection via `LLMConfig`, fallback to cheap on
-`ModelUnavailableError` per `coding-standards.md` section 6's stated
-rule), Step 6.3 (retrieval — embed the query, check Redis cache first,
+Continue with Step 6.3 (retrieval — embed the query, check Redis cache first,
 search Pinecone scoped to `get_current_employer_id()`'s value plus
 detected `policy_type`, fetch enrollment data from Postgres if
 personal), Step 6.4 (prompt assembly — a `PromptTemplate` with named
