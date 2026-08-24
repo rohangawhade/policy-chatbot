@@ -687,6 +687,126 @@ periodically, not just when explicitly asked.
   on both new files, 142 tests passing across the whole suite (up from
   118), zero warnings.
 
+### Step 3.5 — PostgreSQL repository adapters — DONE
+
+- `backend/src/adapters/persistence/base_repository.py` — generic
+  `PostgresRepository[DomainT, OrmT]` implementing all four
+  `RepositoryPort[T]` methods (get/create/update/delete) once; every
+  concrete repository only supplies `_to_orm`/`_to_domain`/
+  `_apply_update` plus its own extra query methods. Session is
+  constructor-injected, never owned, and this class never calls
+  `session.commit()` — only `session.flush()` — so "a single session per
+  request, committed at the API layer" (plan.md's Unit-of-Work
+  requirement) holds regardless of which repository is used; the actual
+  commit call is Phase 9's job once routes exist. `update()` raises a
+  plain `ValueError` (not a new custom exception type — the full
+  `PolicyPalError` hierarchy from `coding-standards.md` section 6 is API-
+  layer machinery for HTTP-status mapping, out of scope until something
+  actually needs it, likely Phase 9) if the entity doesn't exist;
+  `delete()` on a missing id is a no-op, matching idempotent REST DELETE
+  semantics.
+- Seven concrete-repository files, matching plan.md's Step 3.5 file list
+  exactly (not one file per entity — `policy_repo.py`, `document_repo.py`,
+  and `conversation_repo.py` each hold two repository classes, mirroring
+  how `repository_ports.py` itself groups them):
+  `employer_repo.py` (`PostgresEmployerRepository`), `employee_repo.py`
+  (`PostgresEmployeeRepository`), `policy_repo.py`
+  (`PostgresPolicyRepository` + `PostgresEnrollmentRepository` — the
+  latter maps to the `EmployeePolicy` ORM table, plan.md's Step 1.3 name;
+  "Enrollment" is the domain-language name), `document_repo.py`
+  (`PostgresDocumentRepository` + `PostgresDocumentChunkRepository`),
+  `conversation_repo.py` (`PostgresConversationRepository` +
+  `PostgresMessageRepository`), `feedback_repo.py`
+  (`PostgresFeedbackRepository`), `analytics_repo.py`
+  (`PostgresAnalyticsRepository` — doesn't extend the generic base: it's
+  not a `RepositoryPort[T]`, has no update/delete, and covers four
+  different ORM tables via `record_*`/`list_*` methods instead).
+  `MessageRepository.list_by_conversation(..., limit=20)` returns the
+  most recent `limit` messages in oldest-first order (the order a caller
+  actually wants when replaying them as LLM prompt context for Step
+  6.6's conversation memory) — the port's docstring didn't specify
+  ordering, so this is a documented interpretation, not a literal spec.
+  Tenant scoping (every query auto-filtered to `current_user.employer_id`)
+  is explicitly **not** implemented here — that's Step 5.3's tenant
+  context middleware; these repositories take whatever `employer_id`
+  they're given, same as every other Phase 3 adapter not yet wired into
+  auth.
+- **Real, pre-existing bug found and fixed, spanning back into Step
+  1.3's schema** (caught only because this step does real `INSERT`s
+  against live Postgres for the first time — Steps 1.3/1.4's tests only
+  ever checked schema shape and config values, never round-tripped an
+  actual domain object through the ORM): every domain model's
+  `created_at`/`updated_at`/`enrolled_at` defaults to
+  `datetime.now(UTC)` (timezone-aware, Step 2.1), but `models.py`'s
+  columns were declared as bare `Mapped[datetime]`, which SQLAlchemy
+  maps to Postgres `TIMESTAMP WITHOUT TIME ZONE` by default — asyncpg
+  refuses to bind a tz-aware value into that column type
+  (`DataError: can't subtract offset-naive and offset-aware datetimes`).
+  Fixed by adding `DateTime(timezone=True)` to all 9 column definitions
+  (19 actual columns after expanding `TimestampMixin`'s 2 across every
+  table that uses it) and generating a new, purely-additive migration
+  (`482316749c74_make_timestamp_columns_timezone_aware.py`,
+  `ALTER COLUMN ... TYPE TIMESTAMP WITH TIME ZONE` for each) rather than
+  editing the original Step 1.3 migration file in place — schema
+  evolves forward via new migrations, history is never rewritten.
+  Considered this against autopilot-prompt's "stop if it would require
+  changing an earlier completed phase" rule and judged it in-scope to
+  fix directly rather than a blocker: it's purely additive (no data
+  loss, no rewritten history), and Step 3.5's own deliverable — a
+  repository that can actually create/update a row — cannot function at
+  all without it.
+- **Second real, pre-existing bug found by the same real-DB
+  validation**: ORM and domain enums are separate Python `Enum` classes
+  with identical `.value`s (e.g. both `UserRole.ADMIN` have value
+  `"admin"`) but the Postgres enum type (Step 1.3's `postgresql.ENUM(...)`)
+  stores each member's **`.name`** (`"ADMIN"`), not `.value`. Reads
+  already worked (pydantic's `from_attributes=True` coerces an ORM enum
+  member into the domain enum by matching `.value`), but a naive write —
+  passing a domain enum member straight into an ORM constructor kwarg —
+  would fail, since SQLAlchemy's `Enum(SomeEnumClass)` column type
+  expects an instance of that exact class. Every `_to_orm`/`_apply_update`
+  that touches an enum field converts explicitly by name
+  (`models.UserRole[entity.role.name]`) rather than relying on
+  `model_dump()`'s blind pass-through — this is also why every
+  repository writes fully-explicit field-by-field ORM construction
+  instead of `orm_model(**entity.model_dump())`.
+- **CI updated to actually exercise this**: `ci.yml`'s `backend-quality`
+  job previously ran `pytest` with no database at all (only
+  `migration-check.yml` had a Postgres service, and only for Alembic
+  cycles, never for `pytest`) — every prior step's tests were fully
+  mocked or schema-only. Repository-adapter correctness (the enum and
+  timezone bugs above) can't be caught by mocking SQLAlchemy's
+  `Session`/`Select` internals, so `backend-quality` now also runs a
+  `postgres:16` service (same image/credentials as
+  `migration-check.yml`) and an `alembic upgrade head` step before
+  `pytest`, so the new repository tests run for real in every PR, not
+  just in this validation pass.
+- `backend/tests/conftest.py` gained a `db_session` fixture: binds an
+  `AsyncSession` to a single connection wrapped in an outer transaction
+  that's always rolled back (never committed) at teardown, so tests
+  never persist data or leak between each other — safe because
+  repositories only ever call `flush()`, never `commit()`.
+- Validation: `ruff check`, `ruff format --check`, `mypy --strict src`
+  all pass with zero suppressions across all 8 new source files. Full
+  Alembic cycle re-run against real Postgres for the new migration
+  (`upgrade head` from a clean `c66afd6b3aeb` state, `downgrade base` →
+  `upgrade head`, `alembic check` — no drift). New test files (one per
+  plan.md repo file, 7 total, ~140 tests): create→get round trips
+  including enum coercion in both directions, every custom query method
+  (`get_by_email`, `list_by_employer`/`list_by_employee`/
+  `list_by_policy`/`list_by_document`/`list_by_conversation`,
+  `get_latest_version`, `deactivate_by_document`, the 4 `record_*` +
+  2 `list_*` analytics methods), `update()`'s success path and its
+  not-found `ValueError`, `delete()`'s success path and its
+  missing-id no-op, tenant-boundary checks (`list_by_employer` etc. only
+  return the requested employer's rows, proven with a second employer's
+  data present) — 100% coverage on every new file, **100% coverage on
+  the entire `src/` tree** (1072/1072 statements), 214 tests passing
+  across the whole suite (up from 142), zero warnings. All validation
+  run against a real `docker compose up -d postgres` container, not
+  mocks — brought up, migrated, exercised, and torn back down
+  (`docker compose down`, no `-v`) at the end.
+
 ## Environment / tooling notes for future steps
 
 - **gh CLI**: installed via `winget install --id GitHub.cli`, authenticated
@@ -711,11 +831,16 @@ periodically, not just when explicitly asked.
 - **Docker Desktop**: installed but was not running at the start of Phase 1;
   started via `Docker Desktop.exe` and polled until `docker info` succeeded
   (~1-2 min cold start). Needed before any `docker compose` command works.
+- **Repository-adapter tests need a real Postgres**: `docker compose up -d
+  postgres && cd backend && DATABASE_URL=postgresql+asyncpg://policypal:policypal@localhost:5432/policypal
+  alembic upgrade head`, then run `pytest` with that same `DATABASE_URL`
+  set (any test using the `db_session` fixture needs it — everything in
+  `tests/test_*_repo.py`; every other test file is still fully mocked and
+  needs no live services). `ci.yml`'s `backend-quality` job does this
+  automatically via a `postgres:16` service container (Step 3.5).
 
 ## Next recommended step
 
-Merge the Step 3.4 PR, then continue Phase 3 — Infrastructure Adapters:
-Step 3.5 (PostgreSQL repository adapters implementing every port in
-`repository_ports.py`, Unit of Work pattern), Step 3.6 (document
+Merge the Step 3.5 PR, then finish Phase 3 with Step 3.6 (document
 processor adapters — PDF/DOCX/XLSX/XML — implementing
 `DocumentProcessorPort` via a `ProcessorFactory`).

@@ -26,6 +26,10 @@ since `load_dotenv()` defaults to not overriding existing values.
 
 import os
 import warnings
+from collections.abc import AsyncIterator
+
+import pytest_asyncio
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 _env_before_litellm_import = set(os.environ)
 
@@ -35,3 +39,37 @@ with warnings.catch_warnings():
 
 for _key in set(os.environ) - _env_before_litellm_import:
     del os.environ[_key]
+
+
+@pytest_asyncio.fixture
+async def db_session() -> AsyncIterator[AsyncSession]:
+    """A real Postgres-backed session for repository integration tests
+    (Step 3.5) — bound to a single connection wrapped in an outer
+    transaction that's always rolled back, never committed, so tests
+    never persist data or interfere with each other. Repositories only
+    ever call `session.flush()`, never `session.commit()` (Unit-of-Work:
+    "committed at the API layer" — files/plan.md Step 3.5), so a rollback
+    here always fully undoes everything a test did.
+
+    Requires a live Postgres reachable at `DATABASE_URL` (or its default)
+    with migrations already applied — `docker compose up -d postgres &&
+    alembic upgrade head` locally; `ci.yml`'s `backend-quality` job runs
+    a `postgres:16` service and an `alembic upgrade head` step for
+    exactly this.
+    """
+    from config import database_config
+
+    engine = create_async_engine(database_config.url)
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        session = AsyncSession(bind=connection, expire_on_commit=False)
+        try:
+            yield session
+        finally:
+            await session.close()
+            # A real DBAPI error (e.g. a constraint-violation test)
+            # auto-invalidates the connection's transaction; rolling back
+            # an already-deassociated one just emits a harmless SAWarning.
+            if connection.in_transaction():
+                await transaction.rollback()
+    await engine.dispose()
