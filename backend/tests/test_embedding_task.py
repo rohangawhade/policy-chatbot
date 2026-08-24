@@ -80,11 +80,16 @@ class _FakeEmbeddingService:
         self.chunk_repository = chunk_repository
         self.event_bus = event_bus
         self.embedding_model = embedding_model
-        self.embed_and_store_calls: list[tuple[list[DocumentChunk], Document]] = []
+        self.embed_and_store_calls: list[tuple[list[DocumentChunk], Document, Document | None]] = []
         _FakeEmbeddingService.instances.append(self)
 
-    async def embed_and_store(self, chunks: list[DocumentChunk], document: Document) -> None:
-        self.embed_and_store_calls.append((chunks, document))
+    async def embed_and_store(
+        self,
+        chunks: list[DocumentChunk],
+        document: Document,
+        previous_version: Document | None = None,
+    ) -> None:
+        self.embed_and_store_calls.append((chunks, document, previous_version))
 
 
 def test_task_is_registered_on_the_celery_app() -> None:
@@ -118,8 +123,9 @@ async def test_embed_and_index_wires_adapters_and_commits_the_session(
 
     document = _document()
     chunks = [_chunk(document, 0)]
+    previous_version = _document(employer_id=document.employer_id, version=1)
 
-    await embedding_task._embed_and_index(document, chunks)
+    await embedding_task._embed_and_index(document, chunks, previous_version)
 
     assert fake_session.committed is True
     assert len(_FakeEmbeddingService.instances) == 1
@@ -129,7 +135,30 @@ async def test_embed_and_index_wires_adapters_and_commits_the_session(
     assert isinstance(service.chunk_repository, _FakeChunkRepository)
     assert service.chunk_repository.session is fake_session
     assert service.embedding_model == llm_config.embedding_model
-    assert service.embed_and_store_calls == [(chunks, document)]
+    assert service.embed_and_store_calls == [(chunks, document, previous_version)]
+
+
+async def test_embed_and_index_defaults_previous_version_to_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _FakeEmbeddingService.instances.clear()
+    fake_session = _FakeSession()
+    monkeypatch.setattr(
+        embedding_task, "async_session_factory", lambda: _FakeSessionContext(fake_session)
+    )
+    monkeypatch.setattr(embedding_task, "LiteLLMAdapter", lambda: "fake-llm")
+    monkeypatch.setattr(embedding_task, "PineconeAdapter", _FakePineconeAdapter)
+    monkeypatch.setattr(embedding_task, "PostgresDocumentChunkRepository", _FakeChunkRepository)
+    monkeypatch.setattr(embedding_task, "InMemoryEventBus", lambda: "fake-bus")
+    monkeypatch.setattr(embedding_task, "EmbeddingService", _FakeEmbeddingService)
+
+    document = _document()
+    chunks = [_chunk(document, 0)]
+
+    await embedding_task._embed_and_index(document, chunks, None)
+
+    service = _FakeEmbeddingService.instances[0]
+    assert service.embed_and_store_calls == [(chunks, document, None)]
 
 
 def test_task_deserializes_json_args_and_delegates_to_embed_and_index(
@@ -137,10 +166,12 @@ def test_task_deserializes_json_args_and_delegates_to_embed_and_index(
 ) -> None:
     document = _document()
     chunks = [_chunk(document, 0)]
-    calls: list[tuple[Document, list[DocumentChunk]]] = []
+    calls: list[tuple[Document, list[DocumentChunk], Document | None]] = []
 
-    async def fake_embed_and_index(document: Document, chunks: list[DocumentChunk]) -> None:
-        calls.append((document, chunks))
+    async def fake_embed_and_index(
+        document: Document, chunks: list[DocumentChunk], previous_version: Document | None
+    ) -> None:
+        calls.append((document, chunks, previous_version))
 
     monkeypatch.setattr(embedding_task, "_embed_and_index", fake_embed_and_index)
 
@@ -162,4 +193,31 @@ def test_task_deserializes_json_args_and_delegates_to_embed_and_index(
         document.model_dump(mode="json"), [c.model_dump(mode="json") for c in chunks]
     )
 
-    assert calls == [(document, chunks)]
+    assert calls == [(document, chunks, None)]
+
+
+def test_task_deserializes_a_previous_version_when_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document = _document()
+    previous_version = _document(employer_id=document.employer_id, version=1)
+    calls: list[tuple[Document, list[DocumentChunk], Document | None]] = []
+
+    async def fake_embed_and_index(
+        document: Document, chunks: list[DocumentChunk], previous_version: Document | None
+    ) -> None:
+        calls.append((document, chunks, previous_version))
+
+    monkeypatch.setattr(embedding_task, "_embed_and_index", fake_embed_and_index)
+
+    def run_without_a_real_event_loop(coro: Any) -> None:
+        with contextlib.suppress(StopIteration):
+            coro.send(None)
+
+    monkeypatch.setattr(asyncio, "run", run_without_a_real_event_loop)
+
+    embedding_task.embed_and_index_document(
+        document.model_dump(mode="json"), [], previous_version.model_dump(mode="json")
+    )
+
+    assert calls == [(document, [], previous_version)]
