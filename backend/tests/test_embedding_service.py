@@ -6,7 +6,7 @@ from core.domain.document import Document, DocumentChunk, DocumentStatus
 from core.domain.events import DocumentEmbeddedEvent, DomainEvent
 from core.domain.policy import PolicyType
 from core.ports.event_bus_port import EventBusPort, EventHandler
-from core.ports.llm_port import LLMPort
+from core.ports.llm_port import LLMPort, UsageCost
 from core.ports.repository_ports import DocumentChunkRepository
 from core.ports.vector_store_port import VectorRecord, VectorStorePort
 from core.services.embedding_service import EmbeddingService
@@ -32,6 +32,9 @@ class FakeLLM(LLMPort):
     async def embed(self, texts: list[str], *, model: str) -> list[list[float]]:
         self.embed_calls.append((texts, model))
         return [[float(len(text)), 0.0] for text in texts]
+
+    async def estimate_cost(self, model: str, prompt: str, completion: str) -> UsageCost:
+        raise NotImplementedError
 
 
 class FakeVectorStore(VectorStorePort):

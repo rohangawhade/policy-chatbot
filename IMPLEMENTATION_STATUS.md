@@ -1529,6 +1529,97 @@ periodically, not just when explicitly asked.
   against a real `docker compose up -d postgres` container, torn down
   after.
 
+### Step 6.5 — Streaming generation + analytics logging — DONE
+
+- **Port extension, required before this step could do real cost
+  logging**: `LLMPort` gained `estimate_cost(model, prompt, completion)
+  -> UsageCost` (`UsageCost` = `input_tokens`/`output_tokens`/
+  `estimated_cost_usd`). Token counting and provider pricing are
+  inherently LLM/provider-specific — `core/services/rag_service.py`
+  can't import `litellm` directly (section 3's import boundary), so
+  this capability had to live behind the port, not be improvised in the
+  service. `LiteLLMAdapter.estimate_cost` uses `litellm.utils.token_counter`
+  + `litellm.cost_calculator.cost_per_token` (litellm's own maintained
+  pricing table — `coding-standards.md` section 12's "configurable
+  pricing table... update when provider prices change" is litellm's
+  job, not a hand-rolled one), falling back to `estimated_cost_usd=0.0`
+  for a model litellm doesn't recognize (`BadRequestError`) rather than
+  failing the whole generation over a cost figure.
+  `MockLLMAdapter.estimate_cost` returns a deterministic word-count
+  estimate with zero cost. **Every existing test double implementing
+  `LLMPort` across the whole test suite (6 files) needed a matching
+  `estimate_cost` method added** — a new abstract method on an ABC
+  breaks every concrete subclass at instantiation time, not just at
+  type-check time.
+- `backend/src/core/services/query_router.py` gained
+  `QueryRouter.tier_for_model(model) -> "cheap" | "powerful"` — small,
+  additive; `LLMCostLog`/`RequestLatencyLog`'s `model_tier` field needs
+  it and nothing before this step did.
+- `backend/src/core/services/rag_service.py` — extends `RAGService`
+  (per Step 6.3's incremental-build note) with `RAGService.query()` →
+  `GenerationStream` (an async-iterable: `async for token in stream`
+  for response tokens; `stream.metrics` — a `GenerationMetrics` —
+  becomes available only once the loop ends, since `generate_stream()`
+  itself doesn't expose totals until it's exhausted).
+  `GenerationStream.__aiter__` is itself an **async generator method**
+  (`async def __aiter__(self): yield ...`) — calling it synchronously
+  returns an async-generator-iterator directly (verified with a
+  standalone repro before committing to the pattern), which is what
+  lets one object be both the token stream `async for` needs and the
+  place `.metrics` naturally lives as a side effect of consuming it.
+  On a cache hit: yields the cached text once, sets minimal `from_cache`
+  metrics, no LLM call. On a miss: selects a model via `QueryRouter`,
+  streams `LLMPort.generate_stream()`'s tokens, appends deduplicated
+  `"Sources: ..."` citations from retrieved chunks' `document_title`
+  metadata, caches the full text (reusing `_cache_key()` from Step 6.3
+  — the same key `retrieve()` reads, so a write here is actually
+  visible to a later cache hit), and logs `LLMCostLog`/
+  `RequestLatencyLog`.
+- **Deliberate, documented exception to `coding-standards.md` section
+  12's fire-and-forget-via-event-bus rule**: `LLMCostLog`/
+  `RequestLatencyLog` are written **directly** to `analytics_repository`
+  here, not published as events (unlike Step 6.1's `GuardrailsService`,
+  which does follow the rule). Reasoning: the write happens strictly
+  *after* every token has already reached the caller (the `async for`
+  over `generate_stream()` has finished), so it adds zero perceived
+  latency — the one case where a direct write doesn't conflict with the
+  rule's actual intent (never block what the user is waiting on). The
+  underlying gap the rule exists to work around — no subscriber-
+  registration infrastructure exists anywhere in the app — is unchanged
+  and still flagged for Step 6.1's `GuardrailRejectionEvent`.
+- **Real, structural sequencing conflict in plan.md itself, resolved by
+  deferring two of Step 6.5's five bullets to Step 6.6**: `FlaggedResponse`
+  and both `ChatResponseGeneratedEvent`/`LowConfidenceResponseEvent`
+  *require* `conversation_id`/`message_id` (non-optional fields) —
+  but conversation/message persistence doesn't exist until Step 6.6.
+  Step 6.5 as literally scoped cannot fully "auto-flag as
+  `FlaggedResponse`" or publish those two events; there's nothing to
+  attach them to yet. Computed the signal anyway
+  (`GenerationMetrics.is_low_confidence`/`top_similarity_score`,
+  threshold configurable, default 0.5 per section 12) and exposed it on
+  the stream for Step 6.6's caller — which will have a `message_id` —
+  to act on, rather than silently skipping the requirement or inventing
+  fake IDs.
+- Enrollment/message-linkage limitations from Steps 6.3/6.4 are
+  unchanged by this step.
+- Validation: `ruff check`, `ruff format --check`, `mypy --strict src`
+  all pass. New tests in `tests/test_rag_service.py` (14 tests): cache
+  hit yields cached text with no LLM/cache-write/analytics calls,
+  cache-miss streaming, citation appending (present/absent), the cache
+  write's key/value/ttl, `LLMCostLog`/`RequestLatencyLog` field
+  correctness, model-tier selection for a simple vs. complex query
+  (reusing plan.md's own two worked examples from Step 6.2), low-
+  confidence flagging above/below/without-chunks, and `.metrics` being
+  `None` before the stream is consumed. `tests/test_query_router.py`
+  gained 3 tests for `tier_for_model`. `tests/test_litellm_adapter.py`/
+  `tests/test_mock_llm_adapter.py` gained `estimate_cost` tests
+  (including litellm's real pricing lookup for a known model and the
+  unrecognized-model fallback). 100% coverage on every new/changed
+  file, **100% coverage across the entire `src/` tree** (1793/1793
+  statements), 375 tests passing across the whole suite (up from 357),
+  zero warnings. Run against a real `docker compose up -d postgres`
+  container, torn down after.
+
 ## Environment / tooling notes for future steps
 
 - **Celery tasks need `include=` in `celery_app.py`**: a new
@@ -1583,31 +1674,37 @@ periodically, not just when explicitly asked.
 
 Phases 4 (Chunking & Embedding Pipeline) and 5 (Authentication &
 Multi-Tenancy) are both COMPLETE. Phase 6 (RAG Pipeline) is underway:
-Steps 6.1 (`GuardrailsService`), 6.2 (`QueryRouter`), 6.3
-(`RAGService.retrieve()`), and 6.4 (`PromptTemplate`/
-`RAGService.assemble_prompt()`) are done (Step 6.4's PR not yet
-opened/merged as of this writing — see branch `feat/prompt-assembly`).
+Steps 6.1-6.5 are all done (Step 6.5's PR not yet opened/merged as of
+this writing — see branch `feat/rag-streaming-generation`).
 
-Continue with Step 6.5 (streaming generation — extends `RAGService`
-in-place: call `LLMPort.generate_stream()` with `QueryRouter`-selected
-model and `assemble_prompt()`'s output, append source citations from
-the retrieved chunks' `document_title`/`section_title` metadata at the
-end, cache the complete response after streaming finishes using
-`_cache_key()` — the same key `retrieve()` reads, so a write here is
-actually visible to a later cache hit — log `LLMCostLog`/
-`RequestLatencyLog`, auto-flag low-confidence responses via
-`FlaggedResponse` when the top chunk's similarity score is below
-threshold), Step 6.6 (conversation memory — persist message pairs, load
-the last N as context for follow-ups).
+Continue with Step 6.6, the last step of Phase 6 — conversation memory:
+persist each message pair (user query + assistant response) via
+`ConversationRepository`/`MessageRepository`, load the last N messages
+from the current conversation as context for follow-up questions. This
+is also the step that resolves two things Step 6.5 explicitly deferred
+because they need a `conversation_id`/`message_id` that didn't exist
+yet: persisting a `FlaggedResponse` when
+`GenerationMetrics.is_low_confidence` is True, and publishing
+`ChatResponseGeneratedEvent`/`LowConfidenceResponseEvent` (worth
+reviewing `RAGService.query()`'s docstring for the exact reasoning
+before starting).
 
-**Standing gap to resolve before or during Step 6.5**: Step 6.1 flagged
-that no event-subscriber-registration infrastructure exists anywhere in
-the app — `GuardrailRejectionEvent` is published but nothing persists
-it. Step 6.5 needs the identical pattern for `LLMCostLog`/
-`RequestLatencyLog`/`FlaggedResponse`. Worth designing this generically
-(where subscribers get registered — likely `main.py`'s app
-startup/lifespan, wiring a shared `EventBusPort` instance) rather than
-solving it three separate times.
+**Standing gap, still unresolved — now affects three analytics types**:
+no event-subscriber-registration infrastructure exists anywhere in the
+app. Step 6.1's `GuardrailRejectionEvent` and Step 6.6's
+`ChatResponseGeneratedEvent`/`LowConfidenceResponseEvent` are all
+published into a void. Step 6.5 worked around the equivalent problem
+for `LLMCostLog`/`RequestLatencyLog` with a direct write (safe there
+specifically because it happens after the user-facing stream already
+finished — see that step's note) — the same trick doesn't apply to
+`FlaggedResponse`/the two chat events cleanly. Likely needs to be
+resolved as its own small step (a `main.py` startup/lifespan wiring a
+shared, long-lived `EventBusPort` instance that subscribers register
+against, and that instance's actually used everywhere event bus
+consumers get constructed — including `workers/embedding_task.py`,
+which currently builds a fresh, throwaway `InMemoryEventBus()` per
+Celery task invocation and thus could never see a subscriber even if
+one existed) before or during Phase 9, rather than deferred again.
 
 This phase actually *uses* Phase 3's adapters/Phase 4's chunks/Phase 5's
 tenant scoping together end-to-end — worth re-reading `files/plan.md`'s

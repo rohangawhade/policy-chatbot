@@ -3,19 +3,32 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
+from core.domain.analytics import (
+    FlaggedResponse,
+    FlaggedResponseStatus,
+    GuardrailRejection,
+    LLMCostLog,
+    RequestLatencyLog,
+)
 from core.domain.policy import Enrollment
 from core.ports.cache_port import CachePort
-from core.ports.llm_port import LLMPort
-from core.ports.repository_ports import EnrollmentRepository
+from core.ports.llm_port import LLMPort, UsageCost
+from core.ports.repository_ports import AnalyticsRepository, EnrollmentRepository
 from core.ports.vector_store_port import VectorMatch, VectorStorePort
-from core.services.rag_service import PromptTemplate, RAGService, RetrievalResult
+from core.services.query_router import QueryRouter
+from core.services.rag_service import GenerationStream, PromptTemplate, RAGService, RetrievalResult
 
 _MODEL = "mock-embedding-model"
+_CHEAP_MODEL = "cheap-model"
+_POWERFUL_MODEL = "powerful-model"
 
 
 class FakeLLM(LLMPort):
-    def __init__(self) -> None:
+    def __init__(self, stream_tokens: list[str] | None = None) -> None:
         self.embed_calls: list[tuple[list[str], str]] = []
+        self.generate_stream_calls: list[tuple[str, str]] = []
+        self.estimate_cost_calls: list[tuple[str, str, str]] = []
+        self._stream_tokens = stream_tokens if stream_tokens is not None else ["hello", " world"]
 
     async def generate(
         self, prompt: str, *, model: str, temperature: float = 0.1, max_tokens: int = 2048
@@ -25,25 +38,32 @@ class FakeLLM(LLMPort):
     async def generate_stream(
         self, prompt: str, *, model: str, temperature: float = 0.1, max_tokens: int = 2048
     ) -> AsyncIterator[str]:
-        raise NotImplementedError
-        yield ""  # pragma: no cover
+        self.generate_stream_calls.append((prompt, model))
+        for token in self._stream_tokens:
+            yield token
 
     async def embed(self, texts: list[str], *, model: str) -> list[list[float]]:
         self.embed_calls.append((texts, model))
         return [[1.0, 0.0] for _ in texts]
+
+    async def estimate_cost(self, model: str, prompt: str, completion: str) -> UsageCost:
+        self.estimate_cost_calls.append((model, prompt, completion))
+        return UsageCost(input_tokens=10, output_tokens=5, estimated_cost_usd=0.001)
 
 
 class FakeCache(CachePort):
     def __init__(self, stored: dict[str, str] | None = None) -> None:
         self._stored = stored or {}
         self.get_calls: list[str] = []
+        self.set_calls: list[tuple[str, str, int | None]] = []
 
     async def get(self, key: str) -> str | None:
         self.get_calls.append(key)
         return self._stored.get(key)
 
     async def set(self, key: str, value: str, *, ttl_seconds: int | None = None) -> None:
-        raise NotImplementedError
+        self.set_calls.append((key, value, ttl_seconds))
+        self._stored[key] = value
 
     async def delete(self, key: str) -> None:
         raise NotImplementedError
@@ -100,15 +120,56 @@ class FakeEnrollmentRepository(EnrollmentRepository):
         raise NotImplementedError
 
 
+class FakeAnalyticsRepository(AnalyticsRepository):
+    def __init__(self) -> None:
+        self.llm_cost_logs: list[LLMCostLog] = []
+        self.latency_logs: list[RequestLatencyLog] = []
+
+    async def record_llm_cost(self, log: LLMCostLog) -> None:
+        self.llm_cost_logs.append(log)
+
+    async def record_latency(self, log: RequestLatencyLog) -> None:
+        self.latency_logs.append(log)
+
+    async def record_flagged_response(self, flagged: FlaggedResponse) -> None:
+        raise NotImplementedError
+
+    async def record_guardrail_rejection(self, rejection: GuardrailRejection) -> None:
+        raise NotImplementedError
+
+    async def list_flagged_responses(
+        self, employer_id: UUID, *, status: FlaggedResponseStatus | None = None
+    ) -> list[FlaggedResponse]:
+        raise NotImplementedError
+
+    async def list_guardrail_rejections(self, employer_id: UUID) -> list[GuardrailRejection]:
+        raise NotImplementedError
+
+
+def _router(threshold: float = 0.4) -> QueryRouter:
+    return QueryRouter(_CHEAP_MODEL, _POWERFUL_MODEL, threshold)
+
+
 def _service(
     llm: FakeLLM,
     cache: FakeCache,
     vector_store: FakeVectorStore,
     enrollment_repository: FakeEnrollmentRepository,
+    analytics_repository: FakeAnalyticsRepository | None = None,
+    query_router: QueryRouter | None = None,
     top_k: int = 5,
+    low_confidence_threshold: float = 0.5,
 ) -> RAGService:
     return RAGService(
-        llm, cache, vector_store, enrollment_repository, embedding_model=_MODEL, top_k=top_k
+        llm,
+        cache,
+        vector_store,
+        enrollment_repository,
+        analytics_repository or FakeAnalyticsRepository(),
+        query_router or _router(),
+        embedding_model=_MODEL,
+        top_k=top_k,
+        low_confidence_threshold=low_confidence_threshold,
     )
 
 
@@ -318,6 +379,8 @@ def test_assemble_prompt_uses_a_custom_prompt_template() -> None:
         FakeCache(),
         FakeVectorStore(),
         FakeEnrollmentRepository(),
+        FakeAnalyticsRepository(),
+        _router(),
         embedding_model=_MODEL,
         prompt_template=custom_template,
     )
@@ -325,3 +388,203 @@ def test_assemble_prompt_uses_a_custom_prompt_template() -> None:
     prompt = service.assemble_prompt("query", RetrievalResult())
 
     assert "You are a custom test assistant." in prompt
+
+
+async def _consume(stream: GenerationStream) -> list[str]:
+    return [token async for token in stream]
+
+
+async def test_query_cache_hit_yields_cached_text_without_calling_the_llm() -> None:
+    employer_id, employee_id = uuid4(), uuid4()
+    llm, analytics = FakeLLM(), FakeAnalyticsRepository()
+    service = _service(llm, FakeCache(), FakeVectorStore(), FakeEnrollmentRepository(), analytics)
+    cache_key = service._cache_key(employer_id, "What's my deductible?")
+    cache = FakeCache({cache_key: "cached answer"})
+    service = _service(llm, cache, FakeVectorStore(), FakeEnrollmentRepository(), analytics)
+
+    stream = await service.query("What's my deductible?", employee_id, employer_id)
+    tokens = await _consume(stream)
+
+    assert tokens == ["cached answer"]
+    assert stream.metrics is not None
+    assert stream.metrics.from_cache is True
+    assert stream.metrics.full_text == "cached answer"
+    assert stream.metrics.model == ""
+    assert stream.metrics.top_similarity_score is None
+    assert stream.metrics.is_low_confidence is False
+    assert llm.generate_stream_calls == []
+    assert cache.set_calls == []
+    assert analytics.llm_cost_logs == []
+    assert analytics.latency_logs == []
+
+
+async def test_query_streams_tokens_from_the_llm_on_a_cache_miss() -> None:
+    employer_id, employee_id = uuid4(), uuid4()
+    llm = FakeLLM(stream_tokens=["Your ", "deductible ", "is $500."])
+    service = _service(llm, FakeCache(), FakeVectorStore(), FakeEnrollmentRepository())
+
+    stream = await service.query("What's my deductible?", employee_id, employer_id)
+    tokens = await _consume(stream)
+
+    assert "".join(tokens).startswith("Your deductible is $500.")
+    assert len(llm.generate_stream_calls) == 1
+    assert stream.metrics is not None
+    assert stream.metrics.from_cache is False
+
+
+async def test_query_appends_source_citations_when_chunks_have_titles() -> None:
+    employer_id, employee_id = uuid4(), uuid4()
+    match = VectorMatch(id="c1", score=0.9, metadata={"document_title": "SPD.pdf"})
+    llm = FakeLLM(stream_tokens=["answer"])
+    service = _service(llm, FakeCache(), FakeVectorStore([match]), FakeEnrollmentRepository())
+
+    stream = await service.query("What's my dental deductible?", employee_id, employer_id)
+    tokens = await _consume(stream)
+
+    full_text = "".join(tokens)
+    assert "Sources: SPD.pdf" in full_text
+    assert stream.metrics is not None
+    assert stream.metrics.full_text == full_text
+
+
+async def test_query_omits_citations_when_no_chunks_were_retrieved() -> None:
+    employer_id, employee_id = uuid4(), uuid4()
+    llm = FakeLLM(stream_tokens=["answer"])
+    service = _service(llm, FakeCache(), FakeVectorStore([]), FakeEnrollmentRepository())
+
+    stream = await service.query("What's my deductible?", employee_id, employer_id)
+    tokens = await _consume(stream)
+
+    assert "Sources:" not in "".join(tokens)
+
+
+async def test_query_caches_the_full_response_after_streaming() -> None:
+    employer_id, employee_id = uuid4(), uuid4()
+    llm = FakeLLM(stream_tokens=["full answer"])
+    cache = FakeCache()
+    service = _service(llm, cache, FakeVectorStore(), FakeEnrollmentRepository())
+    expected_key = service._cache_key(employer_id, "What's my deductible?")
+
+    stream = await service.query("What's my deductible?", employee_id, employer_id)
+    await _consume(stream)
+
+    assert len(cache.set_calls) == 1
+    key, value, ttl = cache.set_calls[0]
+    assert key == expected_key
+    assert value == "full answer"
+    assert ttl == 3600
+
+
+async def test_query_logs_llm_cost_and_latency_after_streaming() -> None:
+    employer_id, employee_id = uuid4(), uuid4()
+    llm = FakeLLM(stream_tokens=["answer"])
+    analytics = FakeAnalyticsRepository()
+    service = _service(llm, FakeCache(), FakeVectorStore(), FakeEnrollmentRepository(), analytics)
+
+    stream = await service.query("What's my deductible?", employee_id, employer_id)
+    await _consume(stream)
+
+    assert len(analytics.llm_cost_logs) == 1
+    cost_log = analytics.llm_cost_logs[0]
+    assert cost_log.employer_id == employer_id
+    assert cost_log.model == _CHEAP_MODEL
+    assert cost_log.model_tier == "cheap"
+    assert cost_log.input_tokens == 10
+    assert cost_log.output_tokens == 5
+    assert cost_log.estimated_cost_usd == 0.001
+
+    assert len(analytics.latency_logs) == 1
+    latency_log = analytics.latency_logs[0]
+    assert latency_log.employer_id == employer_id
+    assert latency_log.model_tier == "cheap"
+    assert latency_log.total_ms >= 0
+
+
+async def test_query_selects_the_powerful_model_for_a_complex_query() -> None:
+    employer_id, employee_id = uuid4(), uuid4()
+    llm = FakeLLM(stream_tokens=["answer"])
+    service = _service(llm, FakeCache(), FakeVectorStore(), FakeEnrollmentRepository())
+
+    stream = await service.query(
+        "Compare health vs dental coverage for my family", employee_id, employer_id
+    )
+    await _consume(stream)
+
+    assert llm.generate_stream_calls[0][1] == _POWERFUL_MODEL
+    assert stream.metrics is not None
+    assert stream.metrics.model_tier == "powerful"
+
+
+async def test_query_selects_the_cheap_model_for_a_simple_query() -> None:
+    employer_id, employee_id = uuid4(), uuid4()
+    llm = FakeLLM(stream_tokens=["answer"])
+    service = _service(llm, FakeCache(), FakeVectorStore(), FakeEnrollmentRepository())
+
+    stream = await service.query("What's my deductible?", employee_id, employer_id)
+    await _consume(stream)
+
+    assert llm.generate_stream_calls[0][1] == _CHEAP_MODEL
+    assert stream.metrics is not None
+    assert stream.metrics.model_tier == "cheap"
+
+
+async def test_query_flags_low_confidence_below_the_threshold() -> None:
+    employer_id, employee_id = uuid4(), uuid4()
+    match = VectorMatch(id="c1", score=0.2, metadata={})
+    llm = FakeLLM(stream_tokens=["answer"])
+    service = _service(
+        llm,
+        FakeCache(),
+        FakeVectorStore([match]),
+        FakeEnrollmentRepository(),
+        low_confidence_threshold=0.5,
+    )
+
+    stream = await service.query("What's my deductible?", employee_id, employer_id)
+    await _consume(stream)
+
+    assert stream.metrics is not None
+    assert stream.metrics.top_similarity_score == 0.2
+    assert stream.metrics.is_low_confidence is True
+
+
+async def test_query_does_not_flag_confidence_at_or_above_the_threshold() -> None:
+    employer_id, employee_id = uuid4(), uuid4()
+    match = VectorMatch(id="c1", score=0.9, metadata={})
+    llm = FakeLLM(stream_tokens=["answer"])
+    service = _service(
+        llm,
+        FakeCache(),
+        FakeVectorStore([match]),
+        FakeEnrollmentRepository(),
+        low_confidence_threshold=0.5,
+    )
+
+    stream = await service.query("What's my deductible?", employee_id, employer_id)
+    await _consume(stream)
+
+    assert stream.metrics is not None
+    assert stream.metrics.is_low_confidence is False
+
+
+async def test_query_top_similarity_score_is_none_without_retrieved_chunks() -> None:
+    employer_id, employee_id = uuid4(), uuid4()
+    llm = FakeLLM(stream_tokens=["answer"])
+    service = _service(llm, FakeCache(), FakeVectorStore([]), FakeEnrollmentRepository())
+
+    stream = await service.query("What's my deductible?", employee_id, employer_id)
+    await _consume(stream)
+
+    assert stream.metrics is not None
+    assert stream.metrics.top_similarity_score is None
+    assert stream.metrics.is_low_confidence is False
+
+
+async def test_metrics_is_none_before_the_stream_is_consumed() -> None:
+    employer_id, employee_id = uuid4(), uuid4()
+    llm = FakeLLM(stream_tokens=["answer"])
+    service = _service(llm, FakeCache(), FakeVectorStore(), FakeEnrollmentRepository())
+
+    stream = await service.query("What's my deductible?", employee_id, employer_id)
+
+    assert stream.metrics is None

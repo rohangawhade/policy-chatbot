@@ -3,7 +3,7 @@ from uuid import uuid4
 
 from core.domain.events import DomainEvent, GuardrailRejectionEvent
 from core.ports.event_bus_port import EventBusPort, EventHandler
-from core.ports.llm_port import LLMPort
+from core.ports.llm_port import LLMPort, UsageCost
 from core.services.guardrails_service import GuardrailsService
 
 _MODEL = "mock-cheap-model"
@@ -27,6 +27,9 @@ class FakeLLM(LLMPort):
         yield ""  # pragma: no cover
 
     async def embed(self, texts: list[str], *, model: str) -> list[list[float]]:
+        raise NotImplementedError
+
+    async def estimate_cost(self, model: str, prompt: str, completion: str) -> UsageCost:
         raise NotImplementedError
 
 

@@ -2,7 +2,7 @@ from collections.abc import AsyncIterator
 
 from adapters.chunking.metadata_extractor import ExtractedSection
 from adapters.chunking.semantic_chunker import SemanticChunk, SemanticChunker, _cosine_similarity
-from core.ports.llm_port import LLMPort
+from core.ports.llm_port import LLMPort, UsageCost
 
 _MODEL = "mock-embedding-model"
 
@@ -40,6 +40,9 @@ class FakeEmbeddingLLM(LLMPort):
             else:
                 raise KeyError(f"no vector configured for {text!r}")
         return vectors
+
+    async def estimate_cost(self, model: str, prompt: str, completion: str) -> UsageCost:
+        raise NotImplementedError
 
 
 def _section(

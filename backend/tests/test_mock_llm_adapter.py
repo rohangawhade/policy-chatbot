@@ -60,3 +60,13 @@ async def test_embed_vectors_have_the_configured_dimensionality() -> None:
     vectors = await MockLLMAdapter().embed(["text"], model="any-embed-model")
 
     assert len(vectors[0]) == 16
+
+
+async def test_estimate_cost_counts_words_and_reports_zero_cost() -> None:
+    usage = await MockLLMAdapter().estimate_cost(
+        "any-model", "a three word prompt", "a five word completion here"
+    )
+
+    assert usage.input_tokens == 4
+    assert usage.output_tokens == 5
+    assert usage.estimated_cost_usd == 0.0

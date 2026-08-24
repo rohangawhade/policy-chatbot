@@ -88,6 +88,12 @@ class QueryRouter:
         selection fails (e.g. `ModelUnavailableError`)."""
         return self._cheap_model
 
+    def tier_for_model(self, model: str) -> str:
+        """`"powerful"` or `"cheap"` — for `LLMCostLog`/`RequestLatencyLog`'s
+        `model_tier` field (Step 6.5), given a model name this router
+        actually returned from `select_model`/`fallback_model`."""
+        return "powerful" if model == self._powerful_model else "cheap"
+
     def _has_comparison_keyword(self, lowered_query: str) -> bool:
         return any(keyword in lowered_query for keyword in _COMPARISON_KEYWORDS)
 

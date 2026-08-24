@@ -6,7 +6,7 @@ import pytest
 from core.ports.cache_port import CachePort
 from core.ports.document_processor_port import DocumentProcessorPort
 from core.ports.event_bus_port import EventBusPort
-from core.ports.llm_port import LLMPort
+from core.ports.llm_port import LLMPort, UsageCost
 from core.ports.vector_store_port import VectorMatch, VectorRecord, VectorStorePort
 
 
@@ -31,12 +31,18 @@ async def test_llm_port_concrete_implementation_satisfies_the_contract() -> None
         async def embed(self, texts: list[str], *, model: str) -> list[list[float]]:
             return [[0.1, 0.2] for _ in texts]
 
+        async def estimate_cost(self, model: str, prompt: str, completion: str) -> UsageCost:
+            return UsageCost(input_tokens=1, output_tokens=1, estimated_cost_usd=0.0)
+
     llm = _FakeLLM()
 
     assert await llm.generate("hi", model="test-model") == "response to: hi"
     tokens = [t async for t in llm.generate_stream("hi", model="test-model")]
     assert tokens == ["hello", " ", "world"]
     assert await llm.embed(["a", "b"], model="test-embed") == [[0.1, 0.2], [0.1, 0.2]]
+    assert await llm.estimate_cost("test-model", "hi", "hello") == UsageCost(
+        input_tokens=1, output_tokens=1, estimated_cost_usd=0.0
+    )
 
 
 def test_vector_record_and_match_are_frozen() -> None:

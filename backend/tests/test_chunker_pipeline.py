@@ -5,7 +5,7 @@ from adapters.chunking.chunker_pipeline import ChunkerPipeline
 from adapters.chunking.metadata_extractor import MetadataExtractor
 from adapters.chunking.semantic_chunker import SemanticChunker
 from core.domain.document import Document, DocumentStatus
-from core.ports.llm_port import LLMPort
+from core.ports.llm_port import LLMPort, UsageCost
 
 _MODEL = "mock-embedding-model"
 
@@ -29,6 +29,9 @@ class ConstantEmbeddingLLM(LLMPort):
 
     async def embed(self, texts: list[str], *, model: str) -> list[list[float]]:
         return [[1.0, 0.0] for _ in texts]
+
+    async def estimate_cost(self, model: str, prompt: str, completion: str) -> UsageCost:
+        raise NotImplementedError
 
 
 def _pipeline(target_tokens: int = 500) -> ChunkerPipeline:

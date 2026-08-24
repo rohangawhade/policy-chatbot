@@ -198,3 +198,23 @@ async def test_embed_raises_type_error_on_an_unexpected_response_type(
 
     with pytest.raises(TypeError, match="EmbeddingResponse"):
         await LiteLLMAdapter().embed(["a"], model="test-embed-model")
+
+
+async def test_estimate_cost_counts_tokens_and_prices_a_known_model() -> None:
+    usage = await LiteLLMAdapter().estimate_cost(
+        "claude-haiku-4-5-20251001", "a short prompt", "a short completion"
+    )
+
+    assert usage.input_tokens > 0
+    assert usage.output_tokens > 0
+    assert usage.estimated_cost_usd > 0.0
+
+
+async def test_estimate_cost_falls_back_to_zero_for_an_unrecognized_model() -> None:
+    usage = await LiteLLMAdapter().estimate_cost(
+        "totally-unknown-model-xyz", "prompt", "completion"
+    )
+
+    assert usage.estimated_cost_usd == 0.0
+    assert usage.input_tokens > 0
+    assert usage.output_tokens > 0
