@@ -32,6 +32,15 @@ without this machine's local `.env`) for the rest of the session, the
 moment anything imports `litellm`. Undo exactly what it added — any key
 that already existed as a real env var is left untouched either way,
 since `load_dotenv()` defaults to not overriding existing values.
+
+`passlib.utils` (imported transitively by `passlib.context`, which
+Step 5.1's `AuthService` imports) does `from crypt import crypt as
+_crypt` — the stdlib `crypt` module, deprecated for removal in Python
+3.13. Same zero-deprecation-warnings collision as `litellm` above, but
+platform-specific: `crypt` is POSIX-only, so this only ever fires on
+Linux (CI) — on this Windows dev machine the import raises `ImportError`
+instead (caught internally by passlib, no warning), so the bug was
+invisible until CI caught it. Same fix, same reasoning.
 """
 
 import os
@@ -53,6 +62,10 @@ with warnings.catch_warnings():
 
 for _key in set(os.environ) - _env_before_litellm_import:
     del os.environ[_key]
+
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    import passlib.context  # noqa: F401
 
 
 @pytest_asyncio.fixture

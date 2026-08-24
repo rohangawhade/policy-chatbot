@@ -1187,6 +1187,23 @@ periodically, not just when explicitly asked.
   choice itself). Verified with a fresh `pip install -e ".[dev]"` and a
   full `docker compose build backend` — both resolve `bcrypt==3.2.2`
   cleanly.
+- **Second real bug, found by CI only — platform-specific, invisible on
+  this Windows dev machine**: `backend-quality`'s first CI run on this
+  PR failed at test *collection* — `passlib.utils` does `from crypt
+  import crypt as _crypt`, and the stdlib `crypt` module is deprecated
+  for removal in Python 3.13, which `pyproject.toml`'s `filterwarnings`
+  turns into a hard `DeprecationWarning` error (the same class of bug
+  Step 3.2's `conftest.py` fix already handles for `litellm`). `crypt` is
+  POSIX-only — on Windows the import raises `ImportError` instead
+  (silently caught by passlib), so this only ever fires on Linux (CI).
+  The collection failure was *also* followed by the same
+  segfault-at-shutdown symptom Step 4.4 fixed for a different reason —
+  consistent with "an aborted/errored pytest collection leaves the
+  interpreter in a bad state on this CI runner" being the real common
+  thread, not something specific to `asyncio.run()`. Fixed the same way
+  as `litellm`: `tests/conftest.py` now pre-imports `passlib.context`
+  inside `warnings.catch_warnings()`/`simplefilter("ignore")`, before
+  pytest's per-module warning filters are in effect.
 - Validation: `ruff check`, `ruff format --check`, `mypy --strict src`
   all pass (`jose.*`/`passlib.*` added to `pyproject.toml`'s
   `ignore_missing_imports` override — no stubs, same as
