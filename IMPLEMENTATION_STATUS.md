@@ -1801,6 +1801,78 @@ periodically, not just when explicitly asked.
   container (`alembic upgrade head`, no drift since no migration was
   added), torn down after.
 
+### Step 7.3 — Cache invalidation — DONE
+
+- **Structural gap resolved before writing any code, flagged by this
+  file's own "Next recommended step" note going into this step**: the
+  Step 6.3 cache key was `rag_response:{sha256(employer_id:query_text)}`
+  — a pure hash with no queryable structure, so "invalidate every
+  cached query for this employer + policy type" was literally
+  impossible without enumerating the entire keyspace. Fixed by changing
+  the key format to embed `employer_id`/`policy_type` as literal,
+  prefix-scannable segments ahead of the hash:
+  `rag_response:{employer_id}:{policy_type or "none"}:{query_hash}`.
+  `RAGService._cache_key_prefix(employer_id, policy_type)` is the new
+  shared source of truth for that prefix — both `_cache_key()` (appends
+  the query hash) and this step's `invalidate_version_cache()` (deletes
+  by the bare prefix) derive from it, so a write and a later
+  bulk-invalidate can never drift apart.
+- **A real ordering fix inside `retrieve()`, required for the key
+  format above to work at all**: `policy_type` was previously detected
+  *after* the cache-hit check (it was only ever used for the Pinecone
+  metadata filter on a miss). Moved the detection to happen first —
+  purely a reordering of two independent, side-effect-free operations,
+  not a behavior change — so it's available for the cache key on both
+  the read path and, via the new `RetrievalResult.policy_type` field,
+  the write path (`GenerationStream._stream_generation`'s call to
+  `_cache_response()`, which now threads it through instead of
+  redetecting it a second time).
+- `CachePort` gained `delete_by_prefix(prefix: str) -> None`.
+  `RedisCacheAdapter` implements it with `SCAN` (not `KEYS` — cursor-
+  based, doesn't block the server while iterating a large keyspace)
+  followed by a single batched `DELETE` of every match; `Redis.delete`
+  accepts multiple keys, so match collection + one delete call avoids a
+  round trip per key. `InMemoryCacheAdapter` implements it as a plain
+  `startswith` filter over its dict. Both wired into the existing
+  tenacity-retry (Redis) and lazy-TTL (in-memory) machinery from Step
+  3.4, no new patterns introduced.
+- `RAGService.invalidate_version_cache(employer_id, policy_type)` — the
+  step's actual deliverable: purges every cached response for that
+  `(employer_id, policy_type)` pair via `delete_by_prefix()`.
+  `policy_type=None` invalidates only *untyped* queries (a document
+  with no detected policy type, e.g. a general handbook) — documented
+  explicitly in the method's docstring since "None means everything"
+  would be an easy, dangerous misreading.
+- **No caller yet, same standing situation as Steps 7.1/7.2**: nothing
+  currently invokes `invalidate_version_cache()` — the natural trigger
+  is Step 7.2's `DocumentVersionReplacedEvent`, but no event-subscriber
+  infrastructure exists anywhere in the app yet (see the standing gap
+  note below). The method is fully real and independently tested;
+  wiring it to the event happens once that infrastructure lands.
+- No migration needed — pure cache/service logic, no schema change.
+- Validation: `ruff check`, `ruff format --check`, `mypy --strict src`
+  all pass with zero suppressions. New/changed tests:
+  `tests/test_in_memory_cache_adapter.py` (+2: prefix match/no-match),
+  `tests/test_redis_cache_adapter.py` (+5: scan-and-delete, no-match
+  no-op, retry-then-succeed, retry-exhaustion, non-retryable
+  short-circuit — mirroring the existing `get`/`set` retry test
+  pattern), `tests/test_ports.py` (`CachePort`'s contract test extended
+  to exercise `delete_by_prefix`), `tests/test_rag_service.py` (+7: key
+  differs across policy types, a detected-policy-type key shares its
+  own invalidation prefix, `retrieve()` reads/writes using the detected
+  type's key, `invalidate_version_cache` targets the right prefix, a
+  `None`-policy-type invalidation leaves typed keys alone, `query()`'s
+  cache write uses the same detected-type key `retrieve()` read from —
+  every prior cache test's query text has no detectable policy type, so
+  they all keep passing unchanged with an implicit `None` segment).
+  100% coverage on every new/changed file, **100% coverage across the
+  entire `src/` tree** (1876/1876 statements), 414 tests passing across
+  the whole suite (up from 401), zero warnings. Run against a real
+  `docker compose up -d postgres` container (`alembic upgrade head`, no
+  drift since no migration was added), torn down after.
+
+**Phase 7 — Document Versioning: COMPLETE.**
+
 ## Environment / tooling notes for future steps
 
 - **Celery tasks need `include=` in `celery_app.py`**: a new
@@ -1854,16 +1926,24 @@ periodically, not just when explicitly asked.
 ## Next recommended step
 
 Phases 4 (Chunking & Embedding Pipeline), 5 (Authentication &
-Multi-Tenancy), 6 (RAG Pipeline), and Phase 7's Steps 7.1 (Version
-tracking) and 7.2 (Vector replacement) are all COMPLETE and merged.
+Multi-Tenancy), 6 (RAG Pipeline), and 7 (Document Versioning) are all
+COMPLETE and merged.
 
-Continue with Step 7.3 (`feat/version-cache-invalidation` — invalidate
-cached queries for that employer + policy type on a version change;
-`CachePort` has no "invalidate by prefix/pattern" method yet, only
-`get`/`set`/`delete`/`exists` by exact key, so this step likely needs
-either a new port method or a naming convention change to
-`RAGService._cache_key()` that makes bulk invalidation possible), then
-Phase 8 — Celery Workers & Document Ingestion.
+Continue with **Phase 8 — Celery Workers & Document Ingestion**: Step
+8.1 (`feat/celery-app-configuration` — `workers/celery_app.py` today is
+still Step 1.2's minimal app with no tasks registered at module level
+beyond `include=[...]` for `embedding_task`; this step adds real task
+routing, retries, and dead-letter handling), Step 8.2
+(`feat/celery-document-ingestion` — the actual ingestion task: detect
+file type → `ProcessorFactory` (Step 3.6) → chunk (`ChunkerPipeline`,
+Step 4.2) → embed/index (`EmbeddingService`, Step 4.4) → update
+`Document.status` → publish `DocumentProcessedEvent`; this is also
+where `DocumentService.register_upload()` (Step 7.1) and
+`EmbeddingService`'s `previous_version` param (Step 7.2) finally get a
+real caller connecting them, and plan.md names `document_service.py`
+for exactly this orchestration), Step 8.3
+(`feat/ingestion-status-tracking` — a status-check endpoint + SSE push,
+which is really Phase 9 API-route work pulled forward a step early).
 
 **Standing gap, still unresolved — now affects six event types across
 three phases**: no event-subscriber-registration infrastructure exists

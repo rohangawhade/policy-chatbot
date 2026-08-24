@@ -71,3 +71,14 @@ class RedisCacheAdapter(CachePort):
     async def exists(self, key: str) -> bool:
         count = await self._client.exists(key)
         return bool(count)
+
+    @_redis_retry
+    async def delete_by_prefix(self, prefix: str) -> None:
+        # SCAN (not KEYS) — cursor-based, doesn't block the server while
+        # iterating a large keyspace. A connection failure mid-scan
+        # simply restarts the whole scan on retry; re-deleting an
+        # already-deleted key is a harmless no-op, so this is safe to
+        # retry as a unit rather than needing per-key idempotency tracking.
+        keys = [key async for key in self._client.scan_iter(match=f"{prefix}*")]
+        if keys:
+            await self._client.delete(*keys)

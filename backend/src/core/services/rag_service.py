@@ -77,6 +77,7 @@ class RetrievalResult:
     cached_response: str | None = None
     chunks: list[VectorMatch] = field(default_factory=list)
     enrollment: list[Enrollment] = field(default_factory=list)
+    policy_type: PolicyType | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -276,7 +277,9 @@ class GenerationStream:
 
         full_text = "".join(pieces)
         model_tier = service._query_router.tier_for_model(model)
-        await service._cache_response(self._employer_id, self._query_text, full_text)
+        await service._cache_response(
+            self._employer_id, self._query_text, full_text, retrieval.policy_type
+        )
         await service._log_generation(
             employer_id=self._employer_id,
             model=model,
@@ -408,13 +411,18 @@ class RAGService:
                 value (files/plan.md Step 5.3's `get_current_employer_id`),
                 never a client-supplied value.
         """
-        cache_key = self._cache_key(employer_id, query_text)
+        # Detected before the cache check (not after, as in Steps 6.3-6.6)
+        # so it can be folded into the cache key itself — Step 7.3 needs
+        # "invalidate every cached query for this employer + policy type"
+        # to be a real, prefix-scannable operation, which requires
+        # policy_type to be part of the key at both read and write time.
+        policy_type = self._detect_policy_type(query_text)
+        cache_key = self._cache_key(employer_id, query_text, policy_type)
         cached_response = await self._cache.get(cache_key)
         if cached_response is not None:
-            return RetrievalResult(cached_response=cached_response)
+            return RetrievalResult(cached_response=cached_response, policy_type=policy_type)
 
         embeddings = await self._llm.embed([query_text], model=self._embedding_model)
-        policy_type = self._detect_policy_type(query_text)
         metadata_filter = {"policy_type": policy_type.value} if policy_type else None
         chunks = await self._vector_store.query(
             str(employer_id),
@@ -427,7 +435,7 @@ class RAGService:
         if self._is_personal_query(query_text):
             enrollment = await self._enrollment_repository.list_by_employee(employee_id)
 
-        return RetrievalResult(chunks=chunks, enrollment=enrollment)
+        return RetrievalResult(chunks=chunks, enrollment=enrollment, policy_type=policy_type)
 
     def assemble_prompt(
         self,
@@ -621,9 +629,31 @@ class RAGService:
             return ""
         return "\n\nSources: " + "; ".join(sources)
 
-    async def _cache_response(self, employer_id: UUID, query_text: str, full_text: str) -> None:
-        cache_key = self._cache_key(employer_id, query_text)
+    async def _cache_response(
+        self,
+        employer_id: UUID,
+        query_text: str,
+        full_text: str,
+        policy_type: PolicyType | None,
+    ) -> None:
+        cache_key = self._cache_key(employer_id, query_text, policy_type)
         await self._cache.set(cache_key, full_text, ttl_seconds=self._cache_ttl_seconds)
+
+    async def invalidate_version_cache(
+        self, employer_id: UUID, policy_type: PolicyType | None
+    ) -> None:
+        """Purge every cached response for `employer_id` + `policy_type`
+        (files/plan.md Step 7.3) — call this whenever a document version
+        changes, so a stale cached answer built from the old version
+        can't outlive the document it was generated from.
+
+        `policy_type=None` invalidates only queries that didn't detect a
+        policy type (a document without one, e.g. a general handbook) —
+        it does **not** mean "invalidate everything for this employer".
+        A caller invalidating several policy types calls this once per
+        type.
+        """
+        await self._cache.delete_by_prefix(self._cache_key_prefix(employer_id, policy_type))
 
     async def _log_generation(
         self,
@@ -659,8 +689,22 @@ class RAGService:
             )
         )
 
-    def _cache_key(self, employer_id: UUID, query_text: str) -> str:
-        """Hash of `(employer_id, query_text)`.
+    def _cache_key_prefix(self, employer_id: UUID, policy_type: PolicyType | None) -> str:
+        """The employer + policy-type-scoped portion of a cache key,
+        shared by `_cache_key()` (appends a query hash) and
+        `invalidate_version_cache()` (Step 7.3 — deletes every key
+        starting with this prefix). Deriving both from one method is
+        what guarantees a write and a later bulk-invalidate can never
+        drift apart.
+        """
+        policy_type_segment = policy_type.value if policy_type is not None else "none"
+        return f"rag_response:{employer_id}:{policy_type_segment}:"
+
+    def _cache_key(
+        self, employer_id: UUID, query_text: str, policy_type: PolicyType | None = None
+    ) -> str:
+        """`(employer_id, policy_type)` prefix (see `_cache_key_prefix`)
+        plus a hash of the query text.
 
         Deliberately without a model tier, unlike Step 3.4's original
         "employer_id + query_text + model_tier" cache-key formula:
@@ -668,9 +712,15 @@ class RAGService:
         *before* Step 6.2's `QueryRouter` runs, so the tier isn't known
         yet at this point — and a cached answer is valid regardless of
         which tier originally produced it.
+
+        `policy_type` is embedded as a literal segment rather than
+        folded into the hash (Step 7.3) so that "every cached query for
+        this employer + policy type" is a real, prefix-scannable key
+        space — a pure hash of `(employer_id, query_text)` couldn't be
+        bulk-invalidated without enumerating every key in the store.
         """
         digest = hashlib.sha256(f"{employer_id}:{query_text}".encode()).hexdigest()
-        return f"rag_response:{digest}"
+        return f"{self._cache_key_prefix(employer_id, policy_type)}{digest}"
 
     def _detect_policy_type(self, query_text: str) -> PolicyType | None:
         lowered = query_text.lower()

@@ -34,3 +34,7 @@ class InMemoryCacheAdapter(CachePort):
 
     async def exists(self, key: str) -> bool:
         return await self.get(key) is not None
+
+    async def delete_by_prefix(self, prefix: str) -> None:
+        for key in [key for key in self._store if key.startswith(prefix)]:
+            del self._store[key]
