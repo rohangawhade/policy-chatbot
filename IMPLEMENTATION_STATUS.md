@@ -1620,6 +1620,71 @@ periodically, not just when explicitly asked.
   zero warnings. Run against a real `docker compose up -d postgres`
   container, torn down after.
 
+### Step 6.6 — Conversation memory — DONE
+
+- `backend/src/core/services/rag_service.py` — extends `RAGService`
+  (the last incremental piece of this file, per Step 6.3's note) with
+  conversation persistence, closing both gaps Step 6.5 explicitly
+  deferred:
+  - `PromptTemplate.render()` gained an optional `history: list[Message]`
+    parameter — rendered as a `"Conversation so far:"` transcript
+    (`Employee:`/`Assistant:` lines) before the current question, so
+    follow-up questions have context. `RAGService.query()` now takes an
+    optional `conversation_id`: `None` starts a new `Conversation`
+    (via `ConversationRepository.create()`); given, its last
+    `history_limit` (default 20, matching `MessageRepository
+    .list_by_conversation()`'s own Step 3.5 default) messages are
+    loaded and threaded into the prompt.
+  - Every turn — cache hit or fresh generation — persists a user
+    `Message` + assistant `Message` pair via `MessageRepository` and
+    publishes `ChatMessageReceivedEvent` for the user's message. A
+    fresh generation additionally publishes `ChatResponseGeneratedEvent`
+    (cache hits don't — there's no fresh `model` to report, and the
+    event is specifically about a new generation happening, not just a
+    response being delivered).
+  - When `GenerationMetrics.is_low_confidence` is true (only possible
+    for a fresh generation, never a cache hit), a `FlaggedResponse` is
+    now persisted via `AnalyticsRepository.record_flagged_response()`
+    and `LowConfidenceResponseEvent` published — both now have the
+    `conversation_id`/`message_id` Step 6.5 couldn't provide.
+    `GenerationMetrics` gained `conversation_id`/`message_id` fields,
+    populated on every path (cache hit included).
+- **Persistence-boundary reasoning, spelled out in `query()`'s
+  docstring**: conversation/message rows are written directly (not
+  published as events for a subscriber), same as Step 6.5's
+  `LLMCostLog`/`RequestLatencyLog` exception — but for a different
+  reason. Cost/latency logging's exception was specifically about
+  ordering (the write happens after the user already has every token).
+  Conversation/message rows are core to the turn having actually
+  happened at all — the same class of "this isn't observability data"
+  reasoning that already justified `EmbeddingService` (Step 4.4)
+  persisting `DocumentChunk` rows directly rather than through an
+  event. `ChatMessageReceivedEvent`/`ChatResponseGeneratedEvent`/
+  `LowConfidenceResponseEvent`, by contrast, **are** published via the
+  event bus normally, per section 12's rule — but land in the same
+  documented void as Step 6.1's `GuardrailRejectionEvent`, since no
+  subscriber-registration infrastructure exists yet (see the standing
+  gap note below, now affecting five event types across three phases).
+- Validation: `ruff check`, `ruff format --check`, `mypy --strict src`
+  all pass. New tests in `tests/test_rag_service.py` (11 tests):
+  `PromptTemplate` history rendering (present/absent), starting a new
+  conversation vs. continuing an existing one (verifying
+  `list_by_conversation` is called with the right id/limit and no
+  duplicate `Conversation` is created), both messages persisted with
+  correct role/content/`model_used`, both conversation events published
+  with correct fields, low-confidence flagging persisting a
+  `FlaggedResponse` + publishing its event (and the high-confidence
+  case doing neither), a cache hit still recording a conversation turn
+  (with `model_used=None`) but *not* publishing
+  `ChatResponseGeneratedEvent`, and conversation history actually
+  reaching the LLM prompt end-to-end. 100% coverage on the changed
+  file, **100% coverage across the entire `src/` tree** (1836/1836
+  statements), 386 tests passing across the whole suite (up from 375),
+  zero warnings. Run against a real `docker compose up -d postgres`
+  container, torn down after.
+
+**Phase 6 — RAG Pipeline (Core Feature): COMPLETE.**
+
 ## Environment / tooling notes for future steps
 
 - **Celery tasks need `include=` in `celery_app.py`**: a new
@@ -1672,46 +1737,54 @@ periodically, not just when explicitly asked.
 
 ## Next recommended step
 
-Phases 4 (Chunking & Embedding Pipeline) and 5 (Authentication &
-Multi-Tenancy) are both COMPLETE. Phase 6 (RAG Pipeline) is underway:
-Steps 6.1-6.5 are all done (Step 6.5's PR not yet opened/merged as of
-this writing — see branch `feat/rag-streaming-generation`).
+Phases 4 (Chunking & Embedding Pipeline), 5 (Authentication &
+Multi-Tenancy), and 6 (RAG Pipeline) are all COMPLETE (Phase 6's last
+PR, Step 6.6, not yet opened/merged as of this writing — see branch
+`feat/conversation-memory`).
 
-Continue with Step 6.6, the last step of Phase 6 — conversation memory:
-persist each message pair (user query + assistant response) via
-`ConversationRepository`/`MessageRepository`, load the last N messages
-from the current conversation as context for follow-up questions. This
-is also the step that resolves two things Step 6.5 explicitly deferred
-because they need a `conversation_id`/`message_id` that didn't exist
-yet: persisting a `FlaggedResponse` when
-`GenerationMetrics.is_low_confidence` is True, and publishing
-`ChatResponseGeneratedEvent`/`LowConfidenceResponseEvent` (worth
-reviewing `RAGService.query()`'s docstring for the exact reasoning
-before starting).
+Continue with **Phase 7 — Document Versioning**: Step 7.1
+(`feat/document-version-tracking`, requires two CODEOWNERS approvals —
+migration-touching — largely already built: `Document.version` (Step
+1.3), `DocumentRepository.get_latest_version(employer_id, title)`
+(Steps 2.2/3.5) already exist; this step is mostly about the actual
+"same title under the same employer increments the version" upload
+behavior, which has no caller yet since Phase 9's upload route doesn't
+exist), Step 7.2 (`feat/document-version-replacement` — on re-upload,
+`VectorStorePort.delete_by_metadata(doc_id=old_doc_id)` then re-embed;
+`DocumentChunkRepository.deactivate_by_document()` already exists
+(Step 3.5) for the soft-delete half; publishes
+`DocumentVersionReplacedEvent`), Step 7.3
+(`feat/version-cache-invalidation` — invalidate cached queries for
+that employer + policy type on a version change; `CachePort` has no
+"invalidate by prefix/pattern" method yet, only `get`/`set`/`delete`/
+`exists` by exact key, so this step likely needs either a new port
+method or a naming convention change to `RAGService._cache_key()` that
+makes bulk invalidation possible).
 
-**Standing gap, still unresolved — now affects three analytics types**:
-no event-subscriber-registration infrastructure exists anywhere in the
-app. Step 6.1's `GuardrailRejectionEvent` and Step 6.6's
-`ChatResponseGeneratedEvent`/`LowConfidenceResponseEvent` are all
-published into a void. Step 6.5 worked around the equivalent problem
-for `LLMCostLog`/`RequestLatencyLog` with a direct write (safe there
-specifically because it happens after the user-facing stream already
-finished — see that step's note) — the same trick doesn't apply to
-`FlaggedResponse`/the two chat events cleanly. Likely needs to be
+**Standing gap, still unresolved — now affects five event types across
+three phases**: no event-subscriber-registration infrastructure exists
+anywhere in the app. Step 6.1's `GuardrailRejectionEvent` and Step
+6.6's `ChatMessageReceivedEvent`/`ChatResponseGeneratedEvent`/
+`LowConfidenceResponseEvent` are all published into a void — nothing
+persists them, so the Phase 9 admin dashboard has nothing to read yet
+for guardrail rejections or flagged-response review beyond what Step
+6.6 already writes directly (`FlaggedResponse` itself IS persisted
+directly, per that step's reasoning — it's specifically the *events*
+about it that land nowhere). Step 7.2's new
+`DocumentVersionReplacedEvent` will make it six. Likely needs to be
 resolved as its own small step (a `main.py` startup/lifespan wiring a
 shared, long-lived `EventBusPort` instance that subscribers register
-against, and that instance's actually used everywhere event bus
-consumers get constructed — including `workers/embedding_task.py`,
+against, and that instance actually used everywhere an event bus
+consumer gets constructed — including `workers/embedding_task.py`,
 which currently builds a fresh, throwaway `InMemoryEventBus()` per
 Celery task invocation and thus could never see a subscriber even if
 one existed) before or during Phase 9, rather than deferred again.
 
-This phase actually *uses* Phase 3's adapters/Phase 4's chunks/Phase 5's
-tenant scoping together end-to-end — worth re-reading `files/plan.md`'s
-"Query Flow" ASCII diagram before each remaining step, since it lays
-out the exact call order (guardrails → cache → router → embed →
-Pinecone → enrollment → prompt → generate → cache/persist → analytics)
-these six steps implement piece by piece.
+Phase 6 actually *used* Phase 3's adapters/Phase 4's chunks/Phase 5's
+tenant scoping together end-to-end — `files/plan.md`'s "Query Flow"
+ASCII diagram is now fully implemented (guardrails → cache → router →
+embed → Pinecone → enrollment → prompt → generate → cache/persist →
+analytics), just not yet wired into a real HTTP route (Phase 9).
 
 As of 2026-08-24 the user asked to stop pausing for confirmation before
 merges or at phase boundaries — merge once CI is green and keep going,

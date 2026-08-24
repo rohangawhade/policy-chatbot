@@ -6,8 +6,8 @@ structure listing this as "Retrieval + generation orchestration").
 Step 6.3 added retrieval: a cache check that can skip retrieval
 entirely, query embedding, tenant-scoped Pinecone search, and enrollment
 lookup for personal-sounding questions. Step 6.4 added prompt assembly.
-This step (6.5) adds streaming generation. Step 6.6 will extend this
-same class with conversation memory.
+Step 6.5 added streaming generation. This step (6.6) adds conversation
+memory — the last incremental piece of this file.
 """
 
 import hashlib
@@ -16,17 +16,31 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from uuid import UUID
 
-from core.domain.analytics import LLMCostLog, RequestLatencyLog
+from core.domain.analytics import FlaggedResponse, LLMCostLog, RequestLatencyLog
+from core.domain.conversation import Conversation, Message, MessageRole
+from core.domain.events import (
+    ChatMessageReceivedEvent,
+    ChatResponseGeneratedEvent,
+    LowConfidenceResponseEvent,
+)
 from core.domain.policy import Enrollment, PolicyType
 from core.ports.cache_port import CachePort
+from core.ports.event_bus_port import EventBusPort
 from core.ports.llm_port import LLMPort
-from core.ports.repository_ports import AnalyticsRepository, EnrollmentRepository
+from core.ports.repository_ports import (
+    AnalyticsRepository,
+    ConversationRepository,
+    EnrollmentRepository,
+    MessageRepository,
+)
 from core.ports.vector_store_port import VectorMatch, VectorStorePort
 from core.services.query_router import QueryRouter
 
 _DEFAULT_TOP_K = 5
 _DEFAULT_CACHE_TTL_SECONDS = 3600
 _DEFAULT_LOW_CONFIDENCE_THRESHOLD = 0.5
+_DEFAULT_HISTORY_LIMIT = 20
+_LOW_CONFIDENCE_FLAG_REASON = "low_retrieval_confidence"
 _PERSONAL_PRONOUNS = frozenset({"my", "i", "me", "i'm", "i've", "mine", "myself"})
 
 _ROLE_DEFINITION = (
@@ -88,7 +102,11 @@ class PromptTemplate:
     no_context_notice: str = _NO_CONTEXT_NOTICE
 
     def render(
-        self, query_text: str, chunks: list[VectorMatch], enrollment: list[Enrollment]
+        self,
+        query_text: str,
+        chunks: list[VectorMatch],
+        enrollment: list[Enrollment],
+        history: list[Message] | None = None,
     ) -> str:
         sections = [self.role_definition, "", self.domain_restriction]
 
@@ -103,6 +121,11 @@ class PromptTemplate:
             sections.append("")
             sections.append("Employee's current enrollments:")
             sections.extend(self._format_enrollment(record) for record in enrollment)
+
+        if history:
+            sections.append("")
+            sections.append("Conversation so far:")
+            sections.extend(self._format_history_message(message) for message in history)
 
         sections.append("")
         sections.append(f"Employee's question: {query_text}")
@@ -124,6 +147,10 @@ class PromptTemplate:
         enrolled_date = enrollment.enrolled_at.date()
         return f"- Policy {enrollment.policy_id} — {status}, enrolled {enrolled_date}"
 
+    def _format_history_message(self, message: Message) -> str:
+        speaker = "Employee" if message.role == MessageRole.USER else "Assistant"
+        return f"{speaker}: {message.content}"
+
 
 @dataclass(frozen=True, kw_only=True)
 class GenerationMetrics:
@@ -143,14 +170,16 @@ class GenerationMetrics:
             score, or `None` if no chunks were retrieved (including on
             a cache hit).
         is_low_confidence: True if `top_similarity_score` is below the
-            configured threshold. **Not acted on by this class** — Step
-            6.6 will use this to persist a `FlaggedResponse` once it has
-            a `message_id` to attach it to; `FlaggedResponse` requires
-            `conversation_id`/`message_id`, which don't exist until
-            Step 6.6 builds conversation memory, so this step can only
-            compute and expose the signal, not act on it.
+            configured threshold — when True, a `FlaggedResponse` has
+            already been persisted and a `LowConfidenceResponseEvent`
+            published (Step 6.6; Step 6.5 could only compute this signal,
+            not act on it, since `FlaggedResponse` needs the
+            `conversation_id`/`message_id` this step now provides).
         from_cache: True if this was a cache hit — no LLM call was made,
             nothing was logged to `LLMCostLog`/`RequestLatencyLog`.
+        conversation_id: The conversation this turn was recorded in
+            (newly created if the caller didn't pass one to `query()`).
+        message_id: The persisted assistant `Message`'s id.
     """
 
     full_text: str
@@ -160,6 +189,8 @@ class GenerationMetrics:
     top_similarity_score: float | None
     is_low_confidence: bool
     from_cache: bool
+    conversation_id: UUID
+    message_id: UUID
 
 
 class GenerationStream:
@@ -176,13 +207,19 @@ class GenerationStream:
         self,
         service: "RAGService",
         query_text: str,
+        employee_id: UUID,
         employer_id: UUID,
+        conversation_id: UUID | None,
+        history: list[Message],
         retrieval: RetrievalResult,
         retrieval_ms: int,
     ) -> None:
         self._service = service
         self._query_text = query_text
+        self._employee_id = employee_id
         self._employer_id = employer_id
+        self._conversation_id = conversation_id
+        self._history = history
         self._retrieval = retrieval
         self._retrieval_ms = retrieval_ms
         self.metrics: GenerationMetrics | None = None
@@ -197,6 +234,14 @@ class GenerationStream:
 
     async def _stream_cached(self, cached_response: str) -> AsyncIterator[str]:
         yield cached_response
+        conversation_id, message_id = await self._service._persist_turn(
+            employee_id=self._employee_id,
+            employer_id=self._employer_id,
+            conversation_id=self._conversation_id,
+            query_text=self._query_text,
+            full_text=cached_response,
+            model=None,
+        )
         self.metrics = GenerationMetrics(
             full_text=cached_response,
             model="",
@@ -205,6 +250,8 @@ class GenerationStream:
             top_similarity_score=None,
             is_low_confidence=False,
             from_cache=True,
+            conversation_id=conversation_id,
+            message_id=message_id,
         )
 
     async def _stream_generation(self) -> AsyncIterator[str]:
@@ -213,7 +260,7 @@ class GenerationStream:
 
         complexity_score = service._query_router.score_complexity(self._query_text)
         model = service._query_router.select_model(complexity_score)
-        prompt = service.assemble_prompt(self._query_text, retrieval)
+        prompt = service.assemble_prompt(self._query_text, retrieval, self._history)
 
         llm_start = time.monotonic()
         pieces: list[str] = []
@@ -241,8 +288,27 @@ class GenerationStream:
             llm_ms=llm_ms,
         )
 
+        conversation_id, message_id = await service._persist_turn(
+            employee_id=self._employee_id,
+            employer_id=self._employer_id,
+            conversation_id=self._conversation_id,
+            query_text=self._query_text,
+            full_text=full_text,
+            model=model,
+        )
+
         top_score = max((chunk.score for chunk in retrieval.chunks), default=None)
         is_low_confidence = top_score is not None and top_score < service._low_confidence_threshold
+        await service._finalize_turn(
+            employer_id=self._employer_id,
+            conversation_id=conversation_id,
+            message_id=message_id,
+            model=model,
+            query_text=self._query_text,
+            top_score=top_score,
+            is_low_confidence=is_low_confidence,
+        )
+
         self.metrics = GenerationMetrics(
             full_text=full_text,
             model=model,
@@ -251,6 +317,8 @@ class GenerationStream:
             top_similarity_score=top_score,
             is_low_confidence=is_low_confidence,
             from_cache=False,
+            conversation_id=conversation_id,
+            message_id=message_id,
         )
 
 
@@ -266,11 +334,17 @@ class RAGService:
         vector_store: One Pinecone namespace per employer
             (files/plan.md's tenant isolation strategy).
         enrollment_repository: Enrollment lookup for personal questions.
-        analytics_repository: Where `LLMCostLog`/`RequestLatencyLog` are
-            recorded after a generation completes (see `query()`'s
-            docstring for why this happens as a direct write here,
-            unlike Step 6.1's `GuardrailsService`).
+        analytics_repository: Where `LLMCostLog`/`RequestLatencyLog`/
+            `FlaggedResponse` are recorded (see `query()`'s docstring
+            for why cost/latency happen as a direct write here, unlike
+            Step 6.1's `GuardrailsService`).
         query_router: Selects the model tier for a fresh generation.
+        conversation_repository: Creates a new `Conversation` when
+            `query()` isn't given an existing `conversation_id`.
+        message_repository: Persists each turn's user/assistant
+            `Message` pair and loads history for follow-up questions.
+        event_bus: Publishes `ChatMessageReceivedEvent`/
+            `ChatResponseGeneratedEvent`/`LowConfidenceResponseEvent`.
         embedding_model: Passed to every `embed()` call — this class has
             no opinion on which embedding model is configured.
         top_k: Chunks retrieved per query.
@@ -278,6 +352,9 @@ class RAGService:
         low_confidence_threshold: `GenerationMetrics.is_low_confidence`
             is True when the top retrieved chunk's score is below this
             (files/coding-standards.md section 12's stated default: 0.5).
+        history_limit: Messages loaded from an existing conversation as
+            context (`MessageRepository.list_by_conversation()`'s own
+            default, Step 3.5).
         prompt_template: Defaults to a `PromptTemplate()` with the
             standard wording — override to A/B test or localize prompts
             without touching this class.
@@ -291,10 +368,14 @@ class RAGService:
         enrollment_repository: EnrollmentRepository,
         analytics_repository: AnalyticsRepository,
         query_router: QueryRouter,
+        conversation_repository: ConversationRepository,
+        message_repository: MessageRepository,
+        event_bus: EventBusPort,
         embedding_model: str,
         top_k: int = _DEFAULT_TOP_K,
         cache_ttl_seconds: int = _DEFAULT_CACHE_TTL_SECONDS,
         low_confidence_threshold: float = _DEFAULT_LOW_CONFIDENCE_THRESHOLD,
+        history_limit: int = _DEFAULT_HISTORY_LIMIT,
         prompt_template: PromptTemplate | None = None,
     ) -> None:
         self._llm = llm
@@ -303,10 +384,14 @@ class RAGService:
         self._enrollment_repository = enrollment_repository
         self._analytics_repository = analytics_repository
         self._query_router = query_router
+        self._conversation_repository = conversation_repository
+        self._message_repository = message_repository
+        self._event_bus = event_bus
         self._embedding_model = embedding_model
         self._top_k = top_k
         self._cache_ttl_seconds = cache_ttl_seconds
         self._low_confidence_threshold = low_confidence_threshold
+        self._history_limit = history_limit
         self._prompt_template = prompt_template or PromptTemplate()
 
     async def retrieve(
@@ -344,25 +429,49 @@ class RAGService:
 
         return RetrievalResult(chunks=chunks, enrollment=enrollment)
 
-    def assemble_prompt(self, query_text: str, retrieval: RetrievalResult) -> str:
+    def assemble_prompt(
+        self,
+        query_text: str,
+        retrieval: RetrievalResult,
+        history: list[Message] | None = None,
+    ) -> str:
         """Render the full generation prompt from a `retrieve()` result.
 
         Callers should check `retrieval.cached_response` first — this
         method doesn't guard against a cache hit itself (there's nothing
         to assemble a prompt from on one; `chunks`/`enrollment` are
         always empty).
+
+        Args:
+            history: The conversation's last `history_limit` messages,
+                oldest first (`MessageRepository.list_by_conversation()`'s
+                order) — `None`/empty for a new conversation.
         """
-        return self._prompt_template.render(query_text, retrieval.chunks, retrieval.enrollment)
+        return self._prompt_template.render(
+            query_text, retrieval.chunks, retrieval.enrollment, history
+        )
 
     async def query(
-        self, query_text: str, employee_id: UUID, employer_id: UUID
+        self,
+        query_text: str,
+        employee_id: UUID,
+        employer_id: UUID,
+        conversation_id: UUID | None = None,
     ) -> GenerationStream:
         """Retrieve context, then stream a generated (or cached) response.
 
         Returns a `GenerationStream` — `async for token in stream` for
         response tokens as they arrive; once that loop ends,
         `stream.metrics` holds the completed generation's cost/latency/
-        confidence data.
+        confidence data, including the `conversation_id`/`message_id`
+        this turn was recorded under.
+
+        Args:
+            conversation_id: An existing conversation to continue — its
+                last `history_limit` messages become context, and this
+                turn's message pair is appended to it. `None` starts a
+                new conversation (including on a cache hit — a cached
+                answer is still a real turn in the employee's history).
 
         **Direct-write exception to files/coding-standards.md section
         12's fire-and-forget-via-event-bus rule**: `LLMCostLog`/
@@ -375,20 +484,131 @@ class RAGService:
         the caller (the `async for` loop over `generate_stream()` has
         finished), so it adds zero perceived latency to the user's
         response — the one case where a direct write doesn't conflict
-        with the rule's actual intent.
-
-        **Known scope boundary**: does not persist a `FlaggedResponse`
-        for a low-confidence response, or publish
-        `ChatResponseGeneratedEvent`/`LowConfidenceResponseEvent` — both
-        require a `conversation_id`/`message_id` that don't exist until
-        Step 6.6 builds conversation memory.
-        `GenerationMetrics.is_low_confidence` is returned so a Step 6.6
-        caller (which will have a `message_id`) can act on it then.
+        with the rule's actual intent. Conversation/message persistence
+        and `FlaggedResponse`/event publishing (this step) are not
+        subject to that exception — nothing about them needs the
+        response to have finished streaming first, so they follow
+        section 12's rule normally via the event bus, except for
+        conversation/message rows themselves, which — like
+        `LLMCostLog`/`RequestLatencyLog` — are core to the turn actually
+        having happened, not observability data, so they're persisted
+        directly (matching how `EmbeddingService`, Step 4.4, persists
+        `DocumentChunk` rows directly rather than through an event).
         """
         retrieval_start = time.monotonic()
         retrieval = await self.retrieve(query_text, employee_id, employer_id)
         retrieval_ms = int((time.monotonic() - retrieval_start) * 1000)
-        return GenerationStream(self, query_text, employer_id, retrieval, retrieval_ms)
+        history = await self._load_history(conversation_id)
+        return GenerationStream(
+            self,
+            query_text,
+            employee_id,
+            employer_id,
+            conversation_id,
+            history,
+            retrieval,
+            retrieval_ms,
+        )
+
+    async def _load_history(self, conversation_id: UUID | None) -> list[Message]:
+        if conversation_id is None:
+            return []
+        return await self._message_repository.list_by_conversation(
+            conversation_id, limit=self._history_limit
+        )
+
+    async def _persist_turn(
+        self,
+        *,
+        employee_id: UUID,
+        employer_id: UUID,
+        conversation_id: UUID | None,
+        query_text: str,
+        full_text: str,
+        model: str | None,
+    ) -> tuple[UUID, UUID]:
+        """Ensure a conversation exists, persist the user/assistant
+        message pair, publish `ChatMessageReceivedEvent`, and return
+        `(conversation_id, assistant_message_id)`.
+        """
+        if conversation_id is None:
+            conversation = await self._conversation_repository.create(
+                Conversation(employee_id=employee_id, employer_id=employer_id)
+            )
+            conversation_id = conversation.id
+
+        user_message = await self._message_repository.create(
+            Message(
+                conversation_id=conversation_id,
+                employer_id=employer_id,
+                role=MessageRole.USER,
+                content=query_text,
+            )
+        )
+        await self._event_bus.publish(
+            ChatMessageReceivedEvent(
+                conversation_id=conversation_id,
+                employer_id=employer_id,
+                employee_id=employee_id,
+                message_id=user_message.id,
+            )
+        )
+
+        assistant_message = await self._message_repository.create(
+            Message(
+                conversation_id=conversation_id,
+                employer_id=employer_id,
+                role=MessageRole.ASSISTANT,
+                content=full_text,
+                model_used=model,
+            )
+        )
+        return conversation_id, assistant_message.id
+
+    async def _finalize_turn(
+        self,
+        *,
+        employer_id: UUID,
+        conversation_id: UUID,
+        message_id: UUID,
+        model: str,
+        query_text: str,
+        top_score: float | None,
+        is_low_confidence: bool,
+    ) -> None:
+        """Publish `ChatResponseGeneratedEvent`, and — only when
+        low-confidence — persist a `FlaggedResponse` and publish
+        `LowConfidenceResponseEvent`. Only called for a fresh generation
+        (a cache hit has no new `model` and was never re-scored)."""
+        await self._event_bus.publish(
+            ChatResponseGeneratedEvent(
+                conversation_id=conversation_id,
+                employer_id=employer_id,
+                message_id=message_id,
+                model_used=model,
+            )
+        )
+        if not is_low_confidence:
+            return
+
+        await self._analytics_repository.record_flagged_response(
+            FlaggedResponse(
+                employer_id=employer_id,
+                conversation_id=conversation_id,
+                message_id=message_id,
+                query_text=query_text,
+                top_similarity_score=top_score,
+                flag_reason=_LOW_CONFIDENCE_FLAG_REASON,
+            )
+        )
+        await self._event_bus.publish(
+            LowConfidenceResponseEvent(
+                conversation_id=conversation_id,
+                employer_id=employer_id,
+                message_id=message_id,
+                top_similarity_score=top_score if top_score is not None else 0.0,
+            )
+        )
 
     def _format_citations(self, chunks: list[VectorMatch]) -> str:
         sources: list[str] = []
