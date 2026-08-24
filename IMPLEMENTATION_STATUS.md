@@ -1685,6 +1685,52 @@ periodically, not just when explicitly asked.
 
 **Phase 6 — RAG Pipeline (Core Feature): COMPLETE.**
 
+## Phase 7 — Document Versioning
+
+### Step 7.1 — Version tracking — DONE
+
+- `backend/src/core/services/document_service.py` — **new file**,
+  `DocumentService.register_upload(employer_id, title, source_type,
+  source_path, policy_type=None)`. Matches plan.md's own folder-structure
+  comment naming this file "Ingestion orchestration" — Phase 8's fuller
+  ingestion pipeline is expected to extend it further, the same
+  incremental-build pattern `rag_service.py` used across Steps 6.3-6.6.
+- Version logic: `DocumentRepository.get_latest_version(employer_id,
+  title)` (already existed — Steps 2.2/3.5) returns the highest-versioned
+  existing `Document` for that exact `(employer_id, title)` pair, or
+  `None` for a first-time title. `next_version = previous.version + 1 if
+  previous is not None else 1`. The new `Document` always starts
+  `DocumentStatus.PROCESSING` — Step 7.2's Celery task is what flips it
+  to `READY`/`FAILED` once (re-)processing finishes.
+- Publishes `DocumentUploadedEvent` after `create()` so Phase 8's Celery
+  ingestion task has something to trigger on — matches plan.md's Step
+  8.2 ("Celery task triggered when a document is uploaded").
+- No caller yet — same situation as everything else in Phase 6/7 that
+  isn't wired to an HTTP route: Phase 9's upload endpoint is what will
+  actually invoke `register_upload()` in production. `DocumentService`
+  is fully real and independently testable in the meantime, same as
+  every other `core/services/` class before its route existed.
+- No migration needed: `Document.version` (Step 1.3) and its ORM column
+  already exist; this step only added orchestration logic, no schema
+  change — despite the branch requiring two CODEOWNERS approvals
+  (`adapters/persistence/` is untouched, so this PR doesn't actually
+  trigger that path in practice, but the branch name/PR type follow
+  plan.md's stated requirement for this step regardless).
+- Validation: `ruff check`, `ruff format --check`, `mypy --strict src`
+  all pass. New `tests/test_document_service.py` (7 tests): first upload
+  of a title starts at version 1, re-upload of the same title under the
+  same employer increments from the *previous* row (not just "some"
+  existing row — a 3-version chain proves it takes the max, not the
+  first match), version numbering is isolated per-employer and
+  per-title (two negative cases), optional `policy_type` is carried
+  through, `DocumentUploadedEvent` is published with the created
+  document's real id/employer_id/title. 100% coverage on the new file,
+  **100% coverage across the entire `src/` tree** (1853/1853
+  statements), 393 tests passing across the whole suite (up from 386),
+  zero warnings. Run against a real `docker compose up -d postgres`
+  container (full `alembic upgrade head` cycle, no schema drift since no
+  migration was needed), torn down after.
+
 ## Environment / tooling notes for future steps
 
 - **Celery tasks need `include=` in `celery_app.py`**: a new
@@ -1738,18 +1784,10 @@ periodically, not just when explicitly asked.
 ## Next recommended step
 
 Phases 4 (Chunking & Embedding Pipeline), 5 (Authentication &
-Multi-Tenancy), and 6 (RAG Pipeline) are all COMPLETE (Phase 6's last
-PR, Step 6.6, not yet opened/merged as of this writing — see branch
-`feat/conversation-memory`).
+Multi-Tenancy), 6 (RAG Pipeline), and Phase 7's Step 7.1 (Version
+tracking) are all COMPLETE and merged.
 
-Continue with **Phase 7 — Document Versioning**: Step 7.1
-(`feat/document-version-tracking`, requires two CODEOWNERS approvals —
-migration-touching — largely already built: `Document.version` (Step
-1.3), `DocumentRepository.get_latest_version(employer_id, title)`
-(Steps 2.2/3.5) already exist; this step is mostly about the actual
-"same title under the same employer increments the version" upload
-behavior, which has no caller yet since Phase 9's upload route doesn't
-exist), Step 7.2 (`feat/document-version-replacement` — on re-upload,
+Continue with Step 7.2 (`feat/document-version-replacement` — on re-upload,
 `VectorStorePort.delete_by_metadata(doc_id=old_doc_id)` then re-embed;
 `DocumentChunkRepository.deactivate_by_document()` already exists
 (Step 3.5) for the soft-delete half; publishes
