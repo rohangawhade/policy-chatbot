@@ -1276,6 +1276,73 @@ periodically, not just when explicitly asked.
   zero warnings. Run against a real `docker compose up -d postgres`
   container, torn down after.
 
+### Step 5.3 — Tenant context middleware — DONE
+
+- `backend/src/api/middleware/tenant_context.py` — `TenantContextMiddleware`,
+  a **real ASGI/HTTP middleware** (`app.add_middleware(...)`, registered
+  in `main.py`), not a `Depends()` function. Extracts the bearer token
+  on every request, decodes it (best-effort — a missing/invalid/expired
+  token or an `ADMIN` account with no `employer_id` just leaves the
+  context unset, never blocks the request), and sets a module-level
+  `contextvars.ContextVar[UUID | None]` so `employer_id` is readable
+  anywhere downstream in the same request without threading it through
+  every function signature. Repository/vector-store queries still take
+  `employer_id` as an explicit parameter (Phase 3's established
+  contract, unchanged) — what this adds is a single, trusted source for
+  *which* `employer_id` a request is allowed to pass into those calls:
+  the authenticated JWT, never a client-supplied value in a request body
+  or query param. `get_current_employer_id(current_user)` is a
+  `Depends`-based companion for route handlers that want the value as a
+  typed parameter with enforcement (403 if the account has no
+  `employer_id`); `get_employer_id_from_context()` is the ambient read
+  for anything deeper that isn't itself a FastAPI dependency.
+- **Real, empirically-verified architecture finding, caught before
+  writing the "obvious" implementation, not after**: a plain
+  `Depends()` function that calls `ContextVar.set(...)` does **not**
+  reliably propagate that value to the route handler or to sibling
+  dependencies — confirmed with a minimal standalone repro (a value set
+  inside one `Depends` was invisible via `ContextVar.get()` inside the
+  endpoint it fed into, and inside a second `Depends` in the same
+  chain). FastAPI/Starlette's dependency resolution isolates
+  `contextvars` state between calls in a way that breaks the naive
+  "just set a context var in a dependency" design plan.md's wording
+  suggests. A genuine ASGI middleware doesn't have this problem — it
+  wraps the whole request in one task, so anything it sets is visible
+  everywhere downstream. This is why the file has two different
+  mechanisms (middleware for real propagation, a `Depends` function for
+  typed access + enforcement) instead of one.
+- `TenantContextMiddleware` needs an `AuthService` to decode tokens but
+  runs outside FastAPI's per-route DI (middleware has no request-scoped
+  DB session to build a repository from) — constructs one directly from
+  `auth_config` at startup, with a `_DecodeOnlyEmployeeRepository` stub
+  (every method `raise NotImplementedError`, `# pragma: no cover`) since
+  `decode_token()` never touches the repository at all (only
+  `authenticate()` does, which this middleware never calls).
+- `main.py` gained `app.add_middleware(TenantContextMiddleware)` — the
+  first real middleware registration; `/health`/`/ready` are unaffected
+  (no auth header, middleware just leaves the context unset and
+  proceeds).
+- Validation: `ruff check`, `ruff format --check`, `mypy --strict src`
+  all pass. New `tests/test_tenant_context.py` (10 tests): a
+  `middleware_client` fixture builds a real `FastAPI` app with
+  `TenantContextMiddleware` registered (secret/algorithm monkeypatched
+  to test values) and a route that reads the context var directly —
+  proving the middleware alone (no `Depends` involved) makes
+  `employer_id` visible to the endpoint; covers valid token, no token,
+  garbage token, expired token, `ADMIN`-with-no-`employer_id`, and
+  context not leaking between two sequential requests. Separate tests
+  for `get_current_employer_id` (valid/rejected-admin/no-token) via the
+  established dependency-override `TestClient` pattern. 100% coverage on
+  the new file, **100% coverage across the entire `src/` tree**
+  (1538/1538 statements), 321 tests passing across the whole suite (up
+  from 311), zero warnings. Run against a real `docker compose up -d
+  postgres` container for the test suite, **and** a full
+  `docker compose up -d --build` of every service — confirmed `/health`
+  and `/ready` both still respond correctly through the new middleware
+  — torn down after.
+
+**Phase 5 — Authentication & Multi-Tenancy: COMPLETE.**
+
 ## Environment / tooling notes for future steps
 
 - **Celery tasks need `include=` in `celery_app.py`**: a new
@@ -1328,26 +1395,37 @@ periodically, not just when explicitly asked.
 
 ## Next recommended step
 
-Phase 4 (Chunking & Embedding Pipeline) is COMPLETE. Phase 5
-(Authentication & Multi-Tenancy): Steps 5.1 (`AuthService`) and 5.2
-(auth middleware, `api/dependencies.py`) are done (Step 5.2's PR not yet
-opened/merged as of this writing — see branch
-`security/auth-middleware-role-guards`). Continue with Step 5.3, the
-last step of the phase — tenant context middleware: extract
-`employer_id` from the already-authenticated `TokenPayload` (Step 5.2's
-`get_current_user`) into a `contextvars.ContextVar`, set by a FastAPI
-middleware early in the request lifecycle, so every repository query
-and vector search can read it without threading it through every
-function signature. This is the step that finally *activates* the
-tenant scoping every Phase 3 repository/adapter has been built to
-accept as a parameter but never enforces on its own — worth reviewing
-how `PostgresRepository` subclasses currently take `employer_id` as a
-plain method argument (e.g. `list_by_employer`) before deciding whether
-Step 5.3 should wrap repositories to auto-inject it, or whether
-enforcement is better left to each call site reading the context var
-explicitly. **Requires two CODEOWNERS approvals per `files/plan.md`**,
-though Step 0.2's note applies — solo-maintainer repo currently has
-`required_approving_review_count: 0`.
+Phases 4 (Chunking & Embedding Pipeline) and 5 (Authentication &
+Multi-Tenancy) are both COMPLETE (Step 5.3's PR not yet opened/merged
+as of this writing — see branch `security/tenant-context-isolation`).
+
+Continue with **Phase 6 — RAG Pipeline (Core Feature)**, `core/services/`:
+Step 6.1 (`guardrails_service.py` — keyword matching + a cheap-model LLM
+call for ambiguous cases, rejecting off-topic queries before any
+retrieval/expensive generation happens; every rejection persisted as a
+`GuardrailRejection` via `AnalyticsRepository` and published as
+`GuardrailRejectionEvent`; triggers the `rag-eval` CI gate — first real
+exercise of that job beyond its current no-op), Step 6.2
+(`query_router.py` — complexity scoring 0.0-1.0, cheap/powerful model
+selection via `LLMConfig`, fallback to cheap on `ModelUnavailableError`
+per `coding-standards.md` section 6's stated rule), Step 6.3 (retrieval
+— embed the query, check Redis cache first, search Pinecone scoped to
+`get_current_employer_id()`'s value plus detected `policy_type`, fetch
+enrollment data from Postgres if personal), Step 6.4 (prompt assembly —
+a `PromptTemplate` with named slots: role/domain-restriction
+instructions, retrieved chunks with source attribution, enrollment
+info), Step 6.5 (streaming generation via `LLMPort.generate_stream()`,
+source citations appended, response cached, `LLMCostLog`/
+`RequestLatencyLog` recorded, low-confidence responses auto-flagged),
+Step 6.6 (conversation memory — persist message pairs, load the last N
+as context for follow-ups).
+
+This is the first phase that actually *uses* Phase 3's adapters/Phase 4's
+chunks/Phase 5's tenant scoping together end-to-end — worth re-reading
+`files/plan.md`'s "Query Flow" ASCII diagram before starting Step 6.1,
+since it lays out the exact call order (guardrails → cache → router →
+embed → Pinecone → enrollment → prompt → generate → cache/persist →
+analytics) these six steps implement piece by piece.
 
 As of 2026-08-24 the user asked to stop pausing for confirmation before
 merges or at phase boundaries — merge once CI is green and keep going,
