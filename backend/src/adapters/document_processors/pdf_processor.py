@@ -19,9 +19,13 @@ from core.ports.document_processor_port import DocumentProcessorPort
 
 class PDFProcessor(DocumentProcessorPort):
     def extract_text(self, file_path: str) -> str:
+        # Pages joined with "\f" (form feed) — the same page-break convention
+        # `pdftotext` uses. Step 4.1's MetadataExtractor splits on it to
+        # recover page numbers for chunk metadata; no other format's raw
+        # text needs a page concept, so this stays PDF-specific.
         with fitz.open(file_path) as document:
             pages = [page.get_text().strip() for page in document]
-            return "\n\n".join(page for page in pages if page)
+            return "\f".join(page for page in pages if page)
 
     def extract_metadata(self, file_path: str) -> dict[str, Any]:
         with fitz.open(file_path) as document:
