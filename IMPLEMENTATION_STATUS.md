@@ -933,8 +933,12 @@ periodically, not just when explicitly asked.
   `employer_id` alongside `section_title`/`page_number` as per-chunk
   metadata. The first two already live on the `Document` domain object
   before any text is parsed, so `MetadataExtractor` doesn't re-derive
-  them — Step 4.3's `ChunkerPipeline` attaches them directly when
-  building the final `DocumentChunk`.
+  them. **Revised in Step 4.3**: `DocumentChunk` (the Postgres-backed
+  domain model) has no `document_title`/`policy_type` columns at all —
+  those two only matter as Pinecone vector metadata for retrieval
+  filtering/citation, not as persisted chunk fields — so it's actually
+  Step 4.4's embedding/upsert task (which already holds the `Document`)
+  that attaches them, not `ChunkerPipeline`.
 - **Small surgical change to already-merged Step 3.6 code**:
   `PDFProcessor.extract_text()` joined pages with `"\n\n"`, which
   discards page boundaries — `MetadataExtractor` needs them for
@@ -1012,8 +1016,44 @@ periodically, not just when explicitly asked.
   suite (up from 258), zero warnings. Run against a real
   `docker compose up -d postgres` container, torn down after.
 
+### Step 4.3 — Chunking pipeline orchestration — DONE
+
+- `backend/src/adapters/chunking/chunker_pipeline.py` — `ChunkerPipeline`
+  chains Step 4.1's `MetadataExtractor` and Step 4.2's `SemanticChunker`:
+  `process(text, document)` extracts sections, splits them semantically,
+  then enriches each resulting chunk into a persistable `DocumentChunk`
+  (`document_id`, `employer_id`, sequential 0-based `chunk_index`,
+  `text`, `section_title`, `page_number`). Pure orchestration — no logic
+  of its own beyond sequencing and enrichment, matching
+  `files/coding-standards.md` section 1's `DocumentService` example.
+  `document_title`/`policy_type` are deliberately **not** attached here —
+  see the correction in Step 4.1's entry above; `DocumentChunk` has no
+  columns for them, so Step 4.4's embedding/upsert task builds Pinecone's
+  vector metadata from the `Document` object it already holds.
+- Validation: `ruff check`, `ruff format --check`, `mypy --strict src`
+  all pass with zero suppressions. New `tests/test_chunker_pipeline.py`
+  (5 tests, via a `ConstantEmbeddingLLM` test double that always returns
+  the same vector — isolates these tests from chunking-algorithm nuances,
+  already covered by `test_semantic_chunker.py`, so they focus purely on
+  orchestration/enrichment): empty text produces no chunks, a single
+  section becomes one fully-enriched chunk, chunk indices are sequential
+  and 0-based across multiple sections, `section_title`/`page_number`
+  propagate correctly per section, every chunk shares the source
+  document's `document_id`/`employer_id` — 100% coverage on the new
+  file, **100% coverage across the entire `src/` tree** (1328/1328
+  statements), 275 tests passing across the whole suite (up from 270),
+  zero warnings. Run against a real `docker compose up -d postgres`
+  container, torn down after.
+
 ## Environment / tooling notes for future steps
 
+- **Standing gap**: `rag-eval` (added in Step 4.2) is not yet in `main`'s
+  required status checks — `gh api --method PATCH .../branches/main/
+  protection/required_status_checks` to add it was classifier-blocked
+  (same class of write as the Step 0.4-era release-please permissions
+  fix). Needs the user to either run it themselves or grant it
+  explicitly; PRs still can't merge on a red/missing `rag-eval` run in
+  the meantime since it isn't gating yet.
 - **gh CLI**: installed via `winget install --id GitHub.cli`, authenticated
   as `rohangawhade` (scopes: `repo`, `read:org`, `gist`,
   `admin:ssh_signing_key`). `gh.exe` is copied to `~/bin/gh.exe` (already on
@@ -1047,16 +1087,26 @@ periodically, not just when explicitly asked.
 
 ## Next recommended step
 
-Steps 4.1 and 4.2 are done (Step 4.2's PR not yet opened/merged as of
-this writing — see the branch `feat/semantic-chunker`). Continue Phase 4
-— Chunking & Embedding Pipeline: Step 4.3 (`ChunkerPipeline` in
-`adapters/chunking/chunker_pipeline.py`, orchestrating
-`DocumentProcessorPort.extract_text()` → `MetadataExtractor` →
-`SemanticChunker` → final `DocumentChunk` enrichment, attaching
-`document_title`/`policy_type`/`employer_id` from the `Document` object
-per Step 4.1's design decision), Step 4.4 (Celery task: chunks →
-`LLMPort.embed()` → `VectorStorePort.upsert()`, `DocumentChunk` rows for
-traceability, publishes `DocumentEmbeddedEvent`).
+Steps 4.1-4.3 are done (Step 4.3's PR not yet opened/merged as of this
+writing — see the branch `feat/chunker-pipeline`). Continue Phase 4 —
+Chunking & Embedding Pipeline: Step 4.4, the last step of the phase —
+a Celery task that takes a `Document` + its raw extracted text, runs it
+through `ChunkerPipeline.process()`, embeds each resulting chunk's text
+via `LLMPort.embed()` (a genuinely new embedding call per chunk — not
+reusing `SemanticChunker`'s internal sentence-level embeddings, which
+are only for topic-boundary detection and are discarded), upserts to
+Pinecone via `VectorStorePort.upsert()` with metadata built from the
+`Document` (`employer_id`, `policy_id`, `doc_id`, `chunk_index`,
+`doc_version`, plus `document_title`/`policy_type`/`section_title`/
+`page_number` per plan.md Step 4.1's original metadata list), persists
+`DocumentChunk` rows via `DocumentChunkRepository` for traceability, and
+publishes `DocumentEmbeddedEvent`. This is also the first step that
+needs real Celery task wiring (`celery_app.py` currently has no
+registered tasks) and DI-style construction of `ChunkerPipeline` (needs
+a concrete `LLMPort` and `LLMConfig.embedding_model`) — likely worth
+sanity-checking how `adapters/persistence`'s session-per-request pattern
+translates to a Celery task context (no FastAPI request to hang a
+session off of) before writing it.
 
 As of 2026-08-24 the user asked to stop pausing for confirmation before
 merges or at phase boundaries — merge once CI is green and keep going,
