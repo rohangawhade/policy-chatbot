@@ -39,11 +39,19 @@ def test_document_embedded_event_carries_chunk_count() -> None:
 
 
 def test_document_version_replaced_event_carries_old_and_new_version() -> None:
+    old_document_id = uuid4()
+    new_document_id = uuid4()
     event = DocumentVersionReplacedEvent(
-        document_id=uuid4(), employer_id=uuid4(), old_version=1, new_version=2
+        document_id=new_document_id,
+        old_document_id=old_document_id,
+        employer_id=uuid4(),
+        old_version=1,
+        new_version=2,
     )
 
     assert event.event_type == "document.version_replaced"
+    assert event.document_id == new_document_id
+    assert event.old_document_id == old_document_id
     assert event.old_version == 1
     assert event.new_version == 2
 

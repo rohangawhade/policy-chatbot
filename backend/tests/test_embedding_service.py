@@ -3,7 +3,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from core.domain.document import Document, DocumentChunk, DocumentStatus
-from core.domain.events import DocumentEmbeddedEvent, DomainEvent
+from core.domain.events import DocumentEmbeddedEvent, DocumentVersionReplacedEvent, DomainEvent
 from core.domain.policy import PolicyType
 from core.ports.event_bus_port import EventBusPort, EventHandler
 from core.ports.llm_port import LLMPort, UsageCost
@@ -40,9 +40,12 @@ class FakeLLM(LLMPort):
 class FakeVectorStore(VectorStorePort):
     def __init__(self) -> None:
         self.upsert_calls: list[tuple[str, list[VectorRecord]]] = []
+        self.delete_calls: list[tuple[str, dict[str, Any]]] = []
+        self.call_order: list[str] = []
 
     async def upsert(self, namespace: str, records: list[VectorRecord]) -> None:
         self.upsert_calls.append((namespace, records))
+        self.call_order.append("upsert")
 
     async def query(
         self,
@@ -55,12 +58,14 @@ class FakeVectorStore(VectorStorePort):
         raise NotImplementedError
 
     async def delete_by_metadata(self, namespace: str, metadata_filter: dict[str, Any]) -> None:
-        raise NotImplementedError
+        self.delete_calls.append((namespace, metadata_filter))
+        self.call_order.append("delete_by_metadata")
 
 
 class FakeChunkRepository(DocumentChunkRepository):
     def __init__(self) -> None:
         self.created: list[DocumentChunk] = []
+        self.deactivated: list[UUID] = []
 
     async def get(self, entity_id: UUID) -> DocumentChunk | None:
         raise NotImplementedError
@@ -79,7 +84,7 @@ class FakeChunkRepository(DocumentChunkRepository):
         raise NotImplementedError
 
     async def deactivate_by_document(self, document_id: UUID) -> None:
-        raise NotImplementedError
+        self.deactivated.append(document_id)
 
 
 class FakeEventBus(EventBusPort):
@@ -227,3 +232,89 @@ async def test_empty_chunk_list_skips_embedding_and_indexing_but_still_publishes
     assert event.document_id == document.id
     assert event.employer_id == document.employer_id
     assert event.chunk_count == 0
+
+
+async def test_no_previous_version_skips_purge_and_replacement_event() -> None:
+    fakes = _Fakes()
+    document = _document()
+    chunks = [_chunk(document, 0)]
+
+    await fakes.service.embed_and_store(chunks, document)
+
+    assert fakes.vector_store.delete_calls == []
+    assert fakes.repo.deactivated == []
+    assert [type(e) for e in fakes.bus.published] == [DocumentEmbeddedEvent]
+
+
+async def test_previous_version_purges_old_vectors_by_its_document_id() -> None:
+    fakes = _Fakes()
+    employer_id = uuid4()
+    previous = _document(employer_id=employer_id, version=1)
+    document = _document(employer_id=employer_id, version=2)
+    chunks = [_chunk(document, 0)]
+
+    await fakes.service.embed_and_store(chunks, document, previous_version=previous)
+
+    assert fakes.vector_store.delete_calls == [
+        (str(employer_id), {"document_id": str(previous.id)})
+    ]
+
+
+async def test_previous_version_purge_happens_before_the_new_document_is_indexed() -> None:
+    fakes = _Fakes()
+    previous = _document(version=1)
+    document = _document(employer_id=previous.employer_id, version=2)
+    chunks = [_chunk(document, 0)]
+
+    await fakes.service.embed_and_store(chunks, document, previous_version=previous)
+
+    assert fakes.vector_store.call_order == ["delete_by_metadata", "upsert"]
+
+
+async def test_previous_version_deactivates_its_chunks() -> None:
+    fakes = _Fakes()
+    previous = _document(version=1)
+    document = _document(employer_id=previous.employer_id, version=2)
+    chunks = [_chunk(document, 0)]
+
+    await fakes.service.embed_and_store(chunks, document, previous_version=previous)
+
+    assert fakes.repo.deactivated == [previous.id]
+
+
+async def test_previous_version_publishes_document_version_replaced_event() -> None:
+    fakes = _Fakes()
+    previous = _document(version=1)
+    document = _document(employer_id=previous.employer_id, version=2)
+    chunks = [_chunk(document, 0)]
+
+    await fakes.service.embed_and_store(chunks, document, previous_version=previous)
+
+    assert [type(e) for e in fakes.bus.published] == [
+        DocumentEmbeddedEvent,
+        DocumentVersionReplacedEvent,
+    ]
+    replaced_event = fakes.bus.published[1]
+    assert isinstance(replaced_event, DocumentVersionReplacedEvent)
+    assert replaced_event.document_id == document.id
+    assert replaced_event.old_document_id == previous.id
+    assert replaced_event.employer_id == document.employer_id
+    assert replaced_event.old_version == 1
+    assert replaced_event.new_version == 2
+
+
+async def test_previous_version_with_no_new_chunks_still_purges_and_publishes() -> None:
+    fakes = _Fakes()
+    previous = _document(version=1)
+    document = _document(employer_id=previous.employer_id, version=2)
+
+    await fakes.service.embed_and_store([], document, previous_version=previous)
+
+    assert fakes.vector_store.delete_calls == [
+        (str(document.employer_id), {"document_id": str(previous.id)})
+    ]
+    assert fakes.repo.deactivated == [previous.id]
+    assert [type(e) for e in fakes.bus.published] == [
+        DocumentEmbeddedEvent,
+        DocumentVersionReplacedEvent,
+    ]

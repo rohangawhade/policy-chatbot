@@ -35,7 +35,9 @@ from workers.celery_app import app
 # ignore_missing_imports override) — mypy strict's disallow_untyped_decorators
 # still flags decorating with an Any-typed callable itself.
 def embed_and_index_document(
-    document_data: dict[str, Any], chunk_data: list[dict[str, Any]]
+    document_data: dict[str, Any],
+    chunk_data: list[dict[str, Any]],
+    previous_version_data: dict[str, Any] | None = None,
 ) -> None:
     """Celery entry point.
 
@@ -45,13 +47,24 @@ def embed_and_index_document(
             serializer can't carry `UUID`/`datetime` objects directly.
         chunk_data: `ChunkerPipeline.process()`'s output, each
             `DocumentChunk` serialized the same way.
+        previous_version_data: The document this upload replaces
+            (`DocumentService.register_upload()`'s `previous`, Step 7.1),
+            serialized the same way, or `None` for a title's first-ever
+            upload — files/plan.md Step 7.2.
     """
     document = Document.model_validate(document_data)
     chunks = [DocumentChunk.model_validate(chunk) for chunk in chunk_data]
-    asyncio.run(_embed_and_index(document, chunks))
+    previous_version = (
+        Document.model_validate(previous_version_data)
+        if previous_version_data is not None
+        else None
+    )
+    asyncio.run(_embed_and_index(document, chunks, previous_version))
 
 
-async def _embed_and_index(document: Document, chunks: list[DocumentChunk]) -> None:
+async def _embed_and_index(
+    document: Document, chunks: list[DocumentChunk], previous_version: Document | None
+) -> None:
     async with async_session_factory() as session:
         service = EmbeddingService(
             llm=LiteLLMAdapter(),
@@ -62,5 +75,5 @@ async def _embed_and_index(document: Document, chunks: list[DocumentChunk]) -> N
             event_bus=InMemoryEventBus(),
             embedding_model=llm_config.embedding_model,
         )
-        await service.embed_and_store(chunks, document)
+        await service.embed_and_store(chunks, document, previous_version)
         await session.commit()

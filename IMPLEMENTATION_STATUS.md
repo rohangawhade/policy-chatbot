@@ -1731,6 +1731,76 @@ periodically, not just when explicitly asked.
   container (full `alembic upgrade head` cycle, no schema drift since no
   migration was needed), torn down after.
 
+### Step 7.2 — Vector replacement — DONE
+
+- **Port-contract ambiguity resolved before writing any code**:
+  `DocumentVersionReplacedEvent` (Step 2.3) had a single `document_id`
+  field, but each version is its own `Document` row with its own id
+  (Step 7.1's design — a re-upload creates a *new* row, it doesn't
+  mutate the old one) — there's no shared logical-document identity a
+  single field could refer to. Extended the event (additive, and safe:
+  grepped first and confirmed nothing constructs it yet anywhere) with a
+  second field, `old_document_id`, so the event unambiguously carries
+  both: `document_id` is the new, now-current version; `old_document_id`
+  is the one just purged/deactivated. `tests/test_domain_events.py`
+  updated to cover both.
+- `backend/src/core/services/embedding_service.py` —
+  `EmbeddingService.embed_and_store()` gained an optional
+  `previous_version: Document | None = None` parameter. When given
+  (non-`None`), *before* embedding/indexing the new chunks it: (1) calls
+  `VectorStorePort.delete_by_metadata(namespace=str(document.employer_id),
+  {"document_id": str(previous_version.id)})` to purge the old version's
+  vectors — this is exactly why chunk vector metadata carries
+  `document_id` as the owning `Document` row's id (Step 4.4), so the
+  filter is precise; (2) calls
+  `DocumentChunkRepository.deactivate_by_document(previous_version.id)`
+  to soft-delete its chunk references. After the new document is
+  indexed (existing Step 4.4 logic, unchanged), it publishes the usual
+  `DocumentEmbeddedEvent` **and**, only when `previous_version` was
+  given, `DocumentVersionReplacedEvent` (carrying both documents' ids
+  and both version numbers). `previous_version=None` (a title's first
+  upload) reproduces Step 4.4's exact prior behavior byte-for-byte — no
+  purge call, no deactivate call, no replacement event — verified with a
+  dedicated regression test, not just by inspection.
+- `backend/src/workers/embedding_task.py` — `embed_and_index_document`
+  (the Celery entry point) gained an optional third JSON-serializable
+  arg, `previous_version_data: dict[str, Any] | None = None`, matching
+  plan.md's "Celery task first calls
+  `VectorStorePort.delete_by_metadata(doc_id=old_doc_id)`" framing —
+  deserialized the same way as `document_data`/`chunk_data` and threaded
+  through to `EmbeddingService.embed_and_store()`. `_embed_and_index()`'s
+  signature changed from 2 to 3 required positional args (no default —
+  the caller inside this same module always has an explicit `None` or a
+  real value to pass, so a silent default would only hide a real bug);
+  `tests/test_embedding_task.py`'s existing tests and fakes updated for
+  the new parameter, plus two new tests (a task-level JSON round trip
+  with a real `previous_version_data`, and an explicit
+  `_embed_and_index(..., None)` regression case).
+- **No caller yet, same situation as Step 7.1**: nothing currently
+  invokes `embed_and_index_document` with a non-`None`
+  `previous_version_data` — that requires `DocumentService.register_upload()`
+  (Step 7.1, which already computes `previous`) to actually be wired to
+  the Celery task, which is Phase 8.2's ingestion-orchestration job
+  (plan.md names `document_service.py` for exactly that). Both halves
+  are independently real and independently tested today; Phase 8.2 is
+  what connects them.
+- No migration needed — this step is pure orchestration logic, no schema
+  change (`adapters/persistence/` untouched).
+- Validation: `ruff check`, `ruff format --check`, `mypy --strict src`
+  all pass with zero suppressions. New/changed tests: `test_domain_events.py`
+  (updated), `test_embedding_service.py` (6 new tests: no-previous-version
+  is a no-op for purge/deactivate/replacement-event, purge targets the
+  previous document's id specifically, purge happens *before* the new
+  upsert — call-order assertion, chunks deactivated, both events
+  published with correct old/new ids and versions, an empty new-chunk
+  list still purges/deactivates/publishes), `test_embedding_task.py` (2
+  new tests, existing 2 updated). 100% coverage on every new/changed
+  file, **100% coverage across the entire `src/` tree** (1860/1860
+  statements), 401 tests passing across the whole suite (up from 393),
+  zero warnings. Run against a real `docker compose up -d postgres`
+  container (`alembic upgrade head`, no drift since no migration was
+  added), torn down after.
+
 ## Environment / tooling notes for future steps
 
 - **Celery tasks need `include=` in `celery_app.py`**: a new
@@ -1784,32 +1854,28 @@ periodically, not just when explicitly asked.
 ## Next recommended step
 
 Phases 4 (Chunking & Embedding Pipeline), 5 (Authentication &
-Multi-Tenancy), 6 (RAG Pipeline), and Phase 7's Step 7.1 (Version
-tracking) are all COMPLETE and merged.
+Multi-Tenancy), 6 (RAG Pipeline), and Phase 7's Steps 7.1 (Version
+tracking) and 7.2 (Vector replacement) are all COMPLETE and merged.
 
-Continue with Step 7.2 (`feat/document-version-replacement` — on re-upload,
-`VectorStorePort.delete_by_metadata(doc_id=old_doc_id)` then re-embed;
-`DocumentChunkRepository.deactivate_by_document()` already exists
-(Step 3.5) for the soft-delete half; publishes
-`DocumentVersionReplacedEvent`), Step 7.3
-(`feat/version-cache-invalidation` — invalidate cached queries for
-that employer + policy type on a version change; `CachePort` has no
-"invalidate by prefix/pattern" method yet, only `get`/`set`/`delete`/
-`exists` by exact key, so this step likely needs either a new port
-method or a naming convention change to `RAGService._cache_key()` that
-makes bulk invalidation possible).
+Continue with Step 7.3 (`feat/version-cache-invalidation` — invalidate
+cached queries for that employer + policy type on a version change;
+`CachePort` has no "invalidate by prefix/pattern" method yet, only
+`get`/`set`/`delete`/`exists` by exact key, so this step likely needs
+either a new port method or a naming convention change to
+`RAGService._cache_key()` that makes bulk invalidation possible), then
+Phase 8 — Celery Workers & Document Ingestion.
 
-**Standing gap, still unresolved — now affects five event types across
+**Standing gap, still unresolved — now affects six event types across
 three phases**: no event-subscriber-registration infrastructure exists
-anywhere in the app. Step 6.1's `GuardrailRejectionEvent` and Step
-6.6's `ChatMessageReceivedEvent`/`ChatResponseGeneratedEvent`/
-`LowConfidenceResponseEvent` are all published into a void — nothing
+anywhere in the app. Step 6.1's `GuardrailRejectionEvent`, Step 6.6's
+`ChatMessageReceivedEvent`/`ChatResponseGeneratedEvent`/
+`LowConfidenceResponseEvent`, and Step 7.2's new
+`DocumentVersionReplacedEvent` are all published into a void — nothing
 persists them, so the Phase 9 admin dashboard has nothing to read yet
 for guardrail rejections or flagged-response review beyond what Step
 6.6 already writes directly (`FlaggedResponse` itself IS persisted
 directly, per that step's reasoning — it's specifically the *events*
-about it that land nowhere). Step 7.2's new
-`DocumentVersionReplacedEvent` will make it six. Likely needs to be
+about it that land nowhere). Likely needs to be
 resolved as its own small step (a `main.py` startup/lifespan wiring a
 shared, long-lived `EventBusPort` instance that subscribers register
 against, and that instance actually used everywhere an event bus

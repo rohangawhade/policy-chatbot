@@ -47,10 +47,18 @@ class DocumentEmbeddedEvent(DomainEvent):
 
 @dataclass(frozen=True, kw_only=True)
 class DocumentVersionReplacedEvent(DomainEvent):
-    """Old vectors purged, new ones indexed — Step 7.2."""
+    """Old vectors purged, new ones indexed — Step 7.2.
+
+    Each version is its own `Document` row (Step 7.1) with its own id —
+    there's no shared logical-document identity to report a single
+    `document_id` for, so both are carried explicitly. `document_id` is
+    the new, now-current version; `old_document_id` is the one whose
+    vectors/chunks were just purged/deactivated.
+    """
 
     event_type: str = "document.version_replaced"
     document_id: UUID
+    old_document_id: UUID
     employer_id: UUID
     old_version: int
     new_version: int

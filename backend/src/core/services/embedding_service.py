@@ -8,7 +8,7 @@ this exact class as `ChunkerPipeline`'s sibling collaborator).
 from typing import Any
 
 from core.domain.document import Document, DocumentChunk
-from core.domain.events import DocumentEmbeddedEvent
+from core.domain.events import DocumentEmbeddedEvent, DocumentVersionReplacedEvent
 from core.ports.event_bus_port import EventBusPort
 from core.ports.llm_port import LLMPort
 from core.ports.repository_ports import DocumentChunkRepository
@@ -45,7 +45,12 @@ class EmbeddingService:
         self._event_bus = event_bus
         self._embedding_model = embedding_model
 
-    async def embed_and_store(self, chunks: list[DocumentChunk], document: Document) -> None:
+    async def embed_and_store(
+        self,
+        chunks: list[DocumentChunk],
+        document: Document,
+        previous_version: Document | None = None,
+    ) -> None:
         """Embed, index, and persist `chunks`, then publish completion.
 
         Args:
@@ -58,7 +63,21 @@ class EmbeddingService:
                 vector metadata needs (files/plan.md Step 4.1's original
                 per-chunk metadata list; `DocumentChunk` itself has no
                 columns for them — see Step 4.3's note).
+            previous_version: The `Document` row this upload replaces
+                (`DocumentService.register_upload()`'s `previous`, Step
+                7.1), or `None` for a title's first-ever upload. When
+                given, its vectors are purged and its chunk references
+                soft-deleted *before* the new document is indexed
+                (files/plan.md Step 7.2's ordering), and
+                `DocumentVersionReplacedEvent` is published alongside the
+                usual `DocumentEmbeddedEvent`.
         """
+        if previous_version is not None:
+            await self._vector_store.delete_by_metadata(
+                str(document.employer_id), {"document_id": str(previous_version.id)}
+            )
+            await self._chunk_repository.deactivate_by_document(previous_version.id)
+
         if chunks:
             embeddings = await self._llm.embed(
                 [chunk.text for chunk in chunks], model=self._embedding_model
@@ -79,6 +98,17 @@ class EmbeddingService:
                 chunk_count=len(chunks),
             )
         )
+
+        if previous_version is not None:
+            await self._event_bus.publish(
+                DocumentVersionReplacedEvent(
+                    document_id=document.id,
+                    old_document_id=previous_version.id,
+                    employer_id=document.employer_id,
+                    old_version=previous_version.version,
+                    new_version=document.version,
+                )
+            )
 
     def _to_vector_record(
         self, chunk: DocumentChunk, embedding: list[float], document: Document
