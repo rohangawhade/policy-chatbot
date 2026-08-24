@@ -1433,6 +1433,53 @@ periodically, not just when explicitly asked.
   from 330), zero warnings. Run against a real
   `docker compose up -d postgres` container, torn down after.
 
+### Step 6.3 — Retrieval — DONE
+
+- `backend/src/core/services/rag_service.py` — **new file**, `RAGService`.
+  Per plan.md's own folder-structure comment ("Retrieval + generation
+  orchestration"), this is the single file Steps 6.3-6.6 build up
+  incrementally, not one file per step — this PR adds only
+  `retrieve(query_text, employee_id, employer_id)`: cache check first
+  (a hit returns immediately, no embedding/search/enrollment work at
+  all), then `LLMPort.embed()`, a Pinecone search scoped to
+  `str(employer_id)` (namespace) with a detected `policy_type` as an
+  optional metadata filter, and an `EnrollmentRepository.list_by_employee()`
+  call only for a personal-sounding query (a first-person-pronoun word
+  set — "my"/"i"/"me"/"i'm"/"i've"/"mine"/"myself" — checked as exact
+  word matches, not substrings, avoiding the false-positive "i" inside
+  other words that plain substring matching would hit). `employer_id`
+  is always the caller's authenticated value (Step 5.3's
+  `get_current_employer_id`), never accepted from request input — that's
+  what makes the tenant isolation real.
+- **Resolved a real ordering conflict between two parts of the spec**:
+  Step 3.4 defined the cache key as a hash of `(employer_id, query_text,
+  model_tier)`, but plan.md's own "Query Flow" diagram places the cache
+  check *before* Step 6.2's `QueryRouter` runs — so `model_tier` isn't
+  known yet at the point this cache check happens. Dropped `model_tier`
+  from the key: a cached answer is valid regardless of which tier
+  originally produced it, and the alternative (reordering the pipeline
+  so routing happens before caching) would mean re-scoring complexity on
+  every cache hit for no benefit. `_cache_key()` is a private method
+  Step 6.5 will reuse when it writes the cache after generating a fresh
+  response, so the read/write key format can't drift apart.
+- `policy_type` detection reuses the existing `PolicyType` enum
+  (substring match, same heuristic style as `GuardrailsService`'s
+  keyword matching) rather than a separate classifier — the vocabulary
+  already exists and a 5-value enum needs nothing fancier.
+- Validation: `ruff check`, `ruff format --check`, `mypy --strict src`
+  all pass. New `tests/test_rag_service.py` (9 tests, via fakes for all
+  four ports): cache hit skips every downstream call, cache miss embeds
+  and searches with the right namespace/top_k/no-filter, a detected
+  policy type becomes the metadata filter, a custom `top_k` is honored,
+  personal vs. non-personal queries correctly gate the enrollment fetch,
+  and the cache key is deterministic per-input while differing across
+  employers and across queries (the tenant-isolation property that
+  actually matters here). 100% coverage on the new file, **100%
+  coverage across the entire `src/` tree** (1652/1652 statements), 350
+  tests passing across the whole suite (up from 341), zero warnings.
+  Run against a real `docker compose up -d postgres` container, torn
+  down after.
+
 ## Environment / tooling notes for future steps
 
 - **Celery tasks need `include=` in `celery_app.py`**: a new
@@ -1487,16 +1534,15 @@ periodically, not just when explicitly asked.
 
 Phases 4 (Chunking & Embedding Pipeline) and 5 (Authentication &
 Multi-Tenancy) are both COMPLETE. Phase 6 (RAG Pipeline) is underway:
-Steps 6.1 (`GuardrailsService`) and 6.2 (`QueryRouter`) are done (Step
-6.2's PR not yet opened/merged as of this writing — see branch
-`feat/query-complexity-router`).
+Steps 6.1 (`GuardrailsService`), 6.2 (`QueryRouter`), and 6.3
+(`RAGService.retrieve()`) are done (Step 6.3's PR not yet opened/merged
+as of this writing — see branch `feat/rag-retrieval`).
 
-Continue with Step 6.3 (retrieval — embed the query, check Redis cache first,
-search Pinecone scoped to `get_current_employer_id()`'s value plus
-detected `policy_type`, fetch enrollment data from Postgres if
-personal), Step 6.4 (prompt assembly — a `PromptTemplate` with named
-slots: role/domain-restriction instructions, retrieved chunks with
-source attribution, enrollment info), Step 6.5 (streaming generation via
+Continue with Step 6.4 (prompt assembly — extends `RAGService`
+in-place, per Step 6.3's note that this whole file is built up
+incrementally rather than one class per step: a `PromptTemplate` with
+named slots for role/domain-restriction instructions, `RetrievalResult`'s
+chunks with source attribution, and enrollment info), Step 6.5 (streaming generation via
 `LLMPort.generate_stream()`, source citations appended, response
 cached, `LLMCostLog`/`RequestLatencyLog` recorded, low-confidence
 responses auto-flagged), Step 6.6 (conversation memory — persist
