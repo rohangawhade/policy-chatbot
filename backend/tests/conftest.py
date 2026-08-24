@@ -1,5 +1,15 @@
-"""Pre-import `litellm` with warnings suppressed, and undo its side effect
-on `os.environ`.
+"""Pre-import `fitz` and `litellm`, and undo `litellm`'s side effect on
+`os.environ`.
+
+`import fitz` (PyMuPDF) reproducibly segfaults the first time it's
+imported inside pytest's own collection machinery in this environment —
+not reproducible as a plain `python script.py` (isolated across several
+`_smoke_*` scripts during Step 3.6's debugging: the crash is specific to
+being pytest's *first* native-extension import during collection, not
+to `fitz` itself, which works standalone in every configuration tried).
+Pre-importing it here, before pytest's collection reaches any test
+module, avoids the crash entirely — same "get it into `sys.modules`
+early" fix as `litellm` below, different root cause.
 
 `litellm` 1.63.x's own import chain triggers several third-party
 `DeprecationWarning`s under Python 3.12 (a legacy-`Config`-style pydantic
@@ -30,6 +40,10 @@ from collections.abc import AsyncIterator
 
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    import fitz  # noqa: F401
 
 _env_before_litellm_import = set(os.environ)
 
