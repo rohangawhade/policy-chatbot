@@ -96,6 +96,14 @@ def test_task_is_registered_on_the_celery_app() -> None:
     assert "embedding.embed_and_index_document" in app.tasks
 
 
+def test_task_has_a_retry_policy() -> None:
+    task = app.tasks["embedding.embed_and_index_document"]
+
+    assert task.autoretry_for == (Exception,)
+    assert task.retry_backoff is True
+    assert task.retry_kwargs == {"max_retries": 3}
+
+
 def test_document_and_chunk_survive_a_json_round_trip() -> None:
     document = _document()
     chunk = _chunk(document, 0, section_title="Eligibility", page_number=2)

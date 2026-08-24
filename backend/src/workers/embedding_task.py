@@ -30,7 +30,18 @@ from core.services.embedding_service import EmbeddingService
 from workers.celery_app import app
 
 
-@app.task(name="embedding.embed_and_index_document")  # type: ignore[misc]
+@app.task(
+    name="embedding.embed_and_index_document",
+    # Whole-attempt retry (Step 8.1) — broader in scope than the
+    # per-call tenacity retries already inside LiteLLMAdapter/
+    # PineconeAdapter/PostgresDocumentChunkRepository (those absorb a
+    # single flaky network call; this absorbs the task attempt as a
+    # whole, e.g. a worker restart mid-run) — 3 attempts, exponential
+    # backoff, matching this app's existing retry-ceiling convention.
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_kwargs={"max_retries": 3},
+)  # type: ignore[misc]
 # `app.task` resolves to `Any` (celery.* has no stubs, per pyproject.toml's
 # ignore_missing_imports override) — mypy strict's disallow_untyped_decorators
 # still flags decorating with an Any-typed callable itself.
