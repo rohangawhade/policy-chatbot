@@ -2025,6 +2025,71 @@ periodically, not just when explicitly asked.
   and both `[tasks]` (`embedding.embed_and_index_document`/
   `ingestion.process_document_upload`), then torn down.
 
+### Step 8.3 — Ingestion status tracking — DONE
+
+- `backend/src/api/routes/document_routes.py` — **new file**, the
+  first non-health API route in the app. Deliberately scoped to just
+  what plan.md's Step 8.3 bullet asks for ("API endpoint to check
+  document processing status. SSE push...") — full upload/list/delete
+  routes are Phase 9's `POST /api/documents/upload` etc., not this
+  step's job:
+  - `GET /api/documents/{document_id}/status` → `DocumentStatusResponse`
+    (`id`/`status`/`version`/`error_message`).
+  - `GET /api/documents/{document_id}/status/stream` → a `text/
+    event-stream` `StreamingResponse`.
+  - Both require auth (`get_current_employer_id`, Step 5.2/5.3) and
+    tenant-scope the lookup — a document belonging to a different
+    employer 404s exactly like a nonexistent one (a 403 would leak that
+    the id exists at all across a tenant boundary the caller has no
+    business knowing about).
+- `backend/src/api/dependencies.py` gained `get_document_repository`,
+  following the exact pattern `get_employee_repository` already
+  established.
+- **Deliberate, explicitly-documented scope decision on the SSE
+  endpoint**: implemented as polling (`Document.status` re-read every
+  2s, up to a 300s cap), not a true push. `files/coding-standards.md`
+  section 12's event-bus-first rule doesn't fit here — there is still
+  no event-subscriber-registration infrastructure anywhere in the app
+  (the standing gap tracked since Step 6.1); building a real Redis
+  pub/sub push from `document_ingestion_task.py` is that
+  infrastructure's own future step, not something to improvise
+  prematurely inside a status-check endpoint. Polling at a few-second
+  interval is a real, honestly-scoped `EventSource`-consumable stream —
+  not a placeholder pretending to be a push.
+- `main.py` wired `document_routes.router` in alongside `health_routes.router`.
+- Validation: `ruff check`, `ruff format --check`, `mypy --strict src`
+  all pass. New `tests/test_document_routes.py` (10 tests, a local
+  `FastAPI()` test app with `get_document_repository`/
+  `get_current_employer_id` overridden — same isolation pattern
+  `test_auth_middleware.py` established, so overrides never leak into
+  the shared `main.app` singleton other test files import): status
+  endpoint returns the current snapshot, includes `error_message` when
+  failed, 404s for an unknown id and for another employer's document;
+  stream endpoint 404s the same way before ever opening the stream, a
+  single terminal-status document yields exactly one SSE event, and
+  `_stream_status_events()` tested directly (not through HTTP) for
+  polling-until-terminal, respecting the max-duration cap, and stopping
+  silently (not raising — headers are already sent) if the document
+  disappears or changes ownership mid-stream. One new test in
+  `tests/test_dependencies.py` for `get_document_repository`, matching
+  `get_employee_repository`'s existing test. 100% coverage on every
+  new/changed file, **100% coverage across the entire `src/` tree**
+  (1988/1988 statements), 442 tests passing across the whole suite (up
+  from 431), zero warnings. Run against a real `docker compose up -d
+  postgres` container for the full suite (`alembic upgrade head`, no
+  drift — no migration needed).
+  **Additionally verified against the real stack, not just
+  mocks/TestClient**: brought up `docker compose up -d --build
+  backend` (real Postgres + Redis + FastAPI), inserted a real
+  `Employer`/`Document` row and minted a real JWT via a throwaway
+  script (deleted immediately after use, never committed), then
+  `curl`ed all four cases against the live server: `GET .../status`
+  with a valid token → 200 with the correct body; an unknown document
+  id → 404; no `Authorization` header → 401; `GET .../status/stream` →
+  a real `text/event-stream` response with `data: {...}` lines
+  observed arriving over the wire. Torn down (`docker compose down`)
+  after.
+
 ## Environment / tooling notes for future steps
 
 - **Celery tasks need `include=` in `celery_app.py`**: a new
@@ -2078,20 +2143,24 @@ periodically, not just when explicitly asked.
 ## Next recommended step
 
 Phases 4 (Chunking & Embedding Pipeline), 5 (Authentication &
-Multi-Tenancy), 6 (RAG Pipeline), 7 (Document Versioning), and Phase
-8's Steps 8.1 (Celery + Redis setup) and 8.2 (Document ingestion task)
-are all COMPLETE and merged.
+Multi-Tenancy), 6 (RAG Pipeline), 7 (Document Versioning), and 8
+(Celery Workers & Document Ingestion — Steps 8.1, 8.2, 8.3) are all
+COMPLETE and merged.
 
-Continue with Step 8.3 (`feat/ingestion-status-tracking` — a
-status-check endpoint + SSE push for `Document.status`
-(processing/ready/failed), which is really Phase 9 API-route work
-pulled forward a step early; no `api/routes/document_routes.py` exists
-yet at all, so this step likely creates it, minimally, just for a
-status-check + SSE endpoint — full upload/list/delete routes are
-Phase 9's `POST /api/documents/upload` etc.), then Phase 9 — API
-Routes (where `DocumentService.register_upload()`, Step 7.1, and
-`document_ingestion_task.process_document_upload`, Step 8.2, finally
-get a real HTTP caller connecting them end-to-end).
+Continue with **Phase 9 — API Routes**: Step 9.1 (`feat/auth-routes`,
+requires two CODEOWNERS approvals — `POST /api/auth/register`,
+`POST /api/auth/login`, `POST /api/auth/refresh`, `GET /api/auth/me`;
+`AuthService` (Step 5.1) already has everything these routes need —
+this step is real route wiring, not new service logic), Step 9.2
+(`feat/chat-sse-routes` — conversation CRUD + the actual chat SSE
+endpoint wrapping `RAGService.query()`'s `GenerationStream`, Step
+6.5/6.6 — the first real caller of the whole RAG pipeline end-to-end),
+then the remaining Phase 9 routes plan.md lists (document
+upload/list/employer/employee/policy/feedback/admin) — `document_routes.py`
+(Step 8.3) already exists and just needs `POST /api/documents/upload`
+added to it, calling `DocumentService.register_upload()` (Step 7.1)
+then enqueueing `document_ingestion_task.process_document_upload`
+(Step 8.2), finally connecting that whole chain to a real HTTP caller.
 
 **Standing gap, still unresolved — now affects six event types across
 three phases**: no event-subscriber-registration infrastructure exists
