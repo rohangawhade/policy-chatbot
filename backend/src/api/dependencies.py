@@ -11,13 +11,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from adapters.persistence.database import get_session
 from adapters.persistence.document_repo import PostgresDocumentRepository
 from adapters.persistence.employee_repo import PostgresEmployeeRepository
+from adapters.persistence.employer_repo import PostgresEmployerRepository
 from config import auth_config
-from core.ports.repository_ports import DocumentRepository, EmployeeRepository
+from core.ports.repository_ports import DocumentRepository, EmployeeRepository, EmployerRepository
 from core.services.auth_service import AuthService
 
 
 def get_employee_repository(session: AsyncSession = Depends(get_session)) -> EmployeeRepository:
     return PostgresEmployeeRepository(session)
+
+
+def get_employer_repository(session: AsyncSession = Depends(get_session)) -> EmployerRepository:
+    return PostgresEmployerRepository(session)
 
 
 def get_document_repository(session: AsyncSession = Depends(get_session)) -> DocumentRepository:

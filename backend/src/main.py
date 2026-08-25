@@ -7,7 +7,7 @@ Routes and middleware are registered here as they're built in later phases
 from fastapi import FastAPI
 
 from api.middleware.tenant_context import TenantContextMiddleware
-from api.routes import document_routes, health_routes
+from api.routes import auth_routes, document_routes, health_routes
 
 
 def create_app() -> FastAPI:
@@ -15,6 +15,7 @@ def create_app() -> FastAPI:
     app = FastAPI(title="PolicyPal", version="0.1.0")
     app.add_middleware(TenantContextMiddleware)
     app.include_router(health_routes.router)
+    app.include_router(auth_routes.router)
     app.include_router(document_routes.router)
     return app
 

@@ -13,9 +13,9 @@ from core.domain.employee import UserRole
 from core.domain.errors import InvalidTokenError
 from core.services.auth_service import AuthService, TokenPayload
 
-# tokenUrl is only Swagger UI's "Authorize" button hint — Phase 9 defines
-# the real /auth/token route this eventually points at.
-_oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token")
+# tokenUrl is only Swagger UI's "Authorize" button hint — points at the
+# real login route added by Step 9.1 (files/plan.md).
+_oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
 
 async def get_current_user(
