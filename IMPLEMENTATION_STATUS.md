@@ -3276,16 +3276,101 @@ fix, the same script logs in successfully and lands on `/chat`
   `mypy --strict`, `pytest --cov`, `docker compose ps`/`logs`) any
   contributor running this repo's own tooling would want.
 
+### Step 10.5 — Admin dashboard: overview & cost — DONE
+
+- `src/api/admin.ts` — `getOverview()`, `getCostDashboard(params)`,
+  `getCostAlerts(params)`, all thin wrappers over the Step 9.6 admin
+  analytics routes (`GET /api/admin/overview`, `GET /api/admin/cost-dashboard`,
+  `GET /api/admin/cost-dashboard/alerts`), matching this codebase's
+  established `api/*.ts` shape (DTO interfaces mirroring the backend
+  Pydantic response models, one function per endpoint).
+- `recharts` added as a new frontend dependency — plan.md doesn't name a
+  charting library and none was installed yet; picked as the most
+  established React charting library that composes with hooks/Tailwind
+  directly rather than wrapping a non-React chart engine.
+- `src/components/admin/AnalyticsDashboard.tsx` — the seven summary stat
+  cards plan.md's bullet list names (queries today/week/month, active
+  users, documents indexed, avg. satisfaction as a %, LLM cost this month
+  as currency), backed by `GET /api/admin/overview`.
+- `src/components/admin/CostDashboard.tsx` — daily-spend line chart,
+  breakdown tables by model tier and by employer (plan.md's bullet says
+  "table," not a second chart, for both breakdowns — kept as tables
+  rather than turning them into more charts), an employer filter +
+  date-range inputs (both endpoints already take `employer_id`/`start`/
+  `end` query params; not wiring a picker to them would leave working
+  backend filtering unreachable from the UI), and a "days over threshold"
+  list sourced from `GET /api/admin/cost-dashboard/alerts`.
+  - **Documented interpretation**: "highlight days exceeding cost
+    threshold in red" (plan.md) is ambiguous when the line chart is an
+    aggregate across employers but a threshold breach is always
+    employer+day-scoped (`CostAlert`, Step 9.6) — a day's *total* across
+    every tenant isn't itself compared to any threshold anywhere in the
+    backend. Resolved by lighting up a day's point in red whenever at
+    least one employer breached the threshold that day (cross-referencing
+    the separately-fetched alerts response against the chart's `by_day`
+    dates), rather than inventing a new aggregate-vs-threshold comparison
+    the backend doesn't perform.
+  - Employer names are resolved for both the "by employer" table and the
+    threshold-breach list via `listEmployers()` (Step 10.4's
+    `api/employers.ts`) into `employerStore` — falls back to the raw
+    `employer_id` if that fetch fails, since it's a display nicety, not
+    load-bearing for the numbers being correct.
+  - Color/mark choices followed the project's `dataviz` skill structurally
+    (one axis, thin 2px line with rounded data-points, hover tooltip via
+    Recharts' built-in `Tooltip`, a single series needs no legend, status
+    color reserved for the threshold breach rather than reused as a second
+    series color) but reused this app's own existing Tailwind palette
+    (`blue-600`/`red-600`, already established across every Step 10.1-10.4
+    component) instead of introducing the skill's separate validated hex
+    set — swapping in "the brand's own colors" per the skill's own
+    stated escape hatch, since introducing a second, unrelated color
+    system into a small internal dashboard already consistently styled
+    with Tailwind's defaults would be a net loss for visual consistency.
+- Wired into `AdminDashboard.tsx`'s Analytics tab, replacing the disabled
+  "Coming Soon" placeholder from Step 10.4.
+- **Real bug found and fixed by `tsc`, not by hand-reading recharts'
+  types**: `Tooltip`'s `formatter` prop is typed to receive
+  `ValueType | undefined` (a `recharts` union of `number | string |
+  readonly (number | string)[]`), not a bare `number` — an initial
+  `(value: number) => ...` signature failed `npm run build` (`tsc -b`
+  catches this; `vite build` alone would not have, since esbuild doesn't
+  type-check). Fixed by widening the parameter to the real union and
+  coercing defensively (`Number(Array.isArray(value) ? value[0] : value)`).
+- Validation: `npm run lint` / `npx tsc --noEmit` / `npm run build` all
+  clean (no backend files touched this step — `ruff`/`mypy`/`pytest`
+  unaffected, still green from Step 10.4). **Verified end-to-end against
+  the real stack**: `docker compose up -d postgres redis backend`,
+  `alembic upgrade head`, seeded two employers, an admin account, a
+  handful of conversations/messages/feedback rows, and eleven
+  `llm_cost_logs` rows spanning 5 days across two employers and two
+  models — with one employer/day deliberately over the $50 default
+  alert threshold. Confirmed via direct API calls first that the
+  backend aggregation (`total_cost_usd`, `by_model`, `by_employer`,
+  `by_day`, and the one expected alert row) was correct, then drove the
+  actual UI with headless Chromium (Playwright): logged in as admin,
+  opened the Analytics tab, confirmed all seven stat cards matched the
+  API response exactly, confirmed the line chart rendered with the
+  correct single point highlighted red for the threshold-breach day,
+  confirmed both breakdown tables and the alerts table showed the right
+  numbers with employer names (not raw UUIDs) resolved correctly, then
+  applied the employer filter and confirmed the chart/tables/total all
+  narrowed consistently to that one employer's data
+  ($104.15 total → $82.90 filtered, matching the seed data exactly).
+  2 screenshots captured and reviewed in this session (not embedded in
+  the PR body, same `gh`/GitHub-REST-API limitation as Steps 10.3-10.4).
+  Cleaned up every seeded row via `psql` afterward, `docker compose down`.
+
 ## Next recommended step
 
-Continue with **Step 10.5 — Admin dashboard: overview & cost**
-(`feat/admin-cost-dashboard-ui`, screenshots required in the PR per
-plan.md): `AnalyticsDashboard` (top-level summary cards — total queries
-today/week/month, active users, documents indexed, average satisfaction
-score, total LLM cost this month) and `CostDashboard` (daily-spend line
-chart, breakdown table by model tier and by employer, days over threshold
-highlighted, date range picker) — both backed by the Step 9.6 admin
-analytics routes (`GET /api/admin/overview`, `GET /api/admin/cost-dashboard`,
-`GET /api/admin/cost-dashboard/alerts`). Will need a charting library (none
-installed yet — plan.md doesn't name one) and a new `src/api/admin.ts`.
-Same headless-Chromium/Playwright screenshot workflow as Steps 10.3/10.4.
+Continue with **Step 10.6 — Admin dashboard: quality monitoring**
+(`feat/admin-quality-monitoring-ui`, screenshots required in the PR per
+plan.md): `FlaggedResponses` (table of auto-flagged low-confidence
+responses, each row expandable to show the query/retrieved chunks with
+similarity scores/generated response/model used, with reviewed/dismissed/
+escalated actions — `GET`/`PATCH /api/admin/flagged-responses`),
+`GuardrailsLog` (rejected queries with reason/employer/timestamp —
+`GET /api/admin/guardrail-rejections`), and `UnansweredQueries` (grouped
+by employer and policy type — `GET /api/admin/unanswered-queries`). All
+three routes already exist from Step 9.6. Same headless-Chromium/Playwright
+screenshot workflow as Steps 10.3-10.5; `recharts` is now available if a
+future step wants a chart rather than a table.

@@ -1,4 +1,6 @@
 import { useState } from "react";
+import AnalyticsDashboard from "../components/admin/AnalyticsDashboard";
+import CostDashboard from "../components/admin/CostDashboard";
 import DocumentList from "../components/admin/DocumentList";
 import DocumentUpload from "../components/admin/DocumentUpload";
 import EmployerManagement from "../components/admin/EmployerManagement";
@@ -43,9 +45,8 @@ export default function AdminDashboard() {
                   ? "border-b-2 border-blue-600 text-blue-600"
                   : "text-gray-600 hover:text-gray-900"
               }`}
-              disabled
             >
-              Analytics (Coming Soon)
+              Analytics
             </button>
           </div>
         </div>
@@ -62,8 +63,9 @@ export default function AdminDashboard() {
           {activeTab === "documents" && <DocumentList />}
 
           {activeTab === "analytics" && (
-            <div className="rounded-lg border border-gray-200 bg-white p-6">
-              <p className="text-gray-600">Analytics dashboard coming in Step 10.5</p>
+            <div className="space-y-6">
+              <AnalyticsDashboard />
+              <CostDashboard />
             </div>
           )}
         </div>
