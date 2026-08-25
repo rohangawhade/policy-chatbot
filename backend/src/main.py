@@ -13,6 +13,7 @@ from api.routes import (
     document_routes,
     employee_routes,
     employer_routes,
+    feedback_routes,
     health_routes,
     policy_routes,
 )
@@ -29,6 +30,7 @@ def create_app() -> FastAPI:
     app.include_router(employer_routes.router)
     app.include_router(employee_routes.router)
     app.include_router(policy_routes.router)
+    app.include_router(feedback_routes.router)
     return app
 
 

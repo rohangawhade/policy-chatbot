@@ -2642,7 +2642,65 @@ periodically, not just when explicitly asked.
   bookkeeping). Cleaned up test rows via `psql` afterward, then
   `docker compose down`.
 
-**Phase 9 in progress** — Steps 9.1-9.4 done; Steps 9.5-9.7 remain.
+### Step 9.5 — Feedback routes — DONE
+
+- `backend/src/api/routes/feedback_routes.py` — **new file**,
+  `POST /api/feedback` and `GET /api/feedback/analytics` (files/plan.md
+  Step 9.5). `FeedbackRepository` (Step 3.5) already had everything
+  this needs — HTTP wiring only.
+  - `POST /api/feedback` verifies the message belongs to a conversation
+    owned by the current user before accepting feedback on it (fetches
+    the `Message`, then its `Conversation`, checks
+    `conversation.employee_id == current_user.user_id`) — same
+    not-found-vs-forbidden 404 reasoning as every other ownership check
+    in this codebase (`chat_routes.py`, `document_routes.py`).
+    `employer_id`/`conversation_id` on the created `Feedback` row come
+    from the looked-up conversation, never the client.
+  - `GET /api/feedback/analytics` takes `employer_id` as a **required
+    query parameter**, not derived from the caller — an `ADMIN` has
+    none of its own, and `FeedbackRepository` only offers
+    `list_by_employer` (no cross-tenant aggregate exists or was added;
+    that would be new port surface for a capability nothing else in
+    the app needs yet). Aggregates in-process (total/thumbs-up/
+    thumbs-down/rate) rather than a SQL `GROUP BY` — the per-employer
+    feedback volume this is designed for is small, and no other
+    repository in this codebase does aggregate queries at the SQL
+    level either (`RAGService`'s cost/latency logging is the closest
+    precedent, and that's write-only).
+- `backend/src/api/dependencies.py` gained `get_feedback_repository`,
+  same pattern as every other `get_*_repository`.
+- `main.py` wired `feedback_routes.router` in.
+- **New pre-push habit adopted from Step 9.3/9.4, followed again here
+  and clean this time**: ran the exact CI pytest command inside a
+  `python:3.12-slim` container on the same Docker network as real
+  Postgres before pushing — no segfault, no regressions, first-try
+  green CI.
+- Validation: `ruff check`, `ruff format --check`, `mypy --strict src`
+  all pass with zero suppressions. New `tests/test_feedback_routes.py`
+  (6 tests: submit success, 404 for an unknown message, 404 for a
+  message in someone else's conversation, analytics aggregation
+  correctness, analytics with zero feedback, analytics 403s for a
+  non-admin). One new test in `test_dependencies.py` for
+  `get_feedback_repository`. 100% coverage on every new/changed file,
+  **100% coverage across the entire `src/` tree** (2523/2523
+  statements), 544 tests passing across the whole suite (up from 537),
+  zero warnings. Run against a real `docker compose up -d postgres`
+  container (`alembic upgrade head`, no drift — no migration needed)
+  **and** independently re-verified inside the Linux container before
+  pushing.
+  **Additionally verified against the real stack**: `docker compose up
+  -d --build backend` (real Postgres + Redis + FastAPI), registered a
+  real employee, created a real conversation, inserted a message
+  directly via `psql` (bypassing the RAG pipeline, which needs real LLM
+  credentials this environment doesn't have — Step 3.2's established
+  limitation), then via `curl`: submitted thumbs-up feedback with a
+  comment (201, correct body), submitted feedback for an unknown
+  message (404), fetched analytics as a minted admin JWT (200,
+  `total: 1, thumbs_up: 1, thumbs_up_rate: 1.0` — correct), and
+  confirmed a non-admin gets 403 on the same analytics call. Cleaned up
+  test rows via `psql` afterward, then `docker compose down`.
+
+**Phase 9 in progress** — Steps 9.1-9.5 done; Steps 9.6-9.7 remain.
 
 ## Next recommended step
 
@@ -2650,42 +2708,42 @@ Phases 4 (Chunking & Embedding Pipeline), 5 (Authentication &
 Multi-Tenancy), 6 (RAG Pipeline), 7 (Document Versioning), and 8
 (Celery Workers & Document Ingestion — Steps 8.1, 8.2, 8.3) are all
 COMPLETE and merged. Steps 9.1 (Auth routes), 9.2 (Chat routes), 9.3
-(Document routes), and 9.4 (Employer & employee management routes) are
-also COMPLETE and merged (or pending merge — see this PR).
+(Document routes), 9.4 (Employer & employee management routes), and 9.5
+(Feedback routes) are also COMPLETE and merged (or pending merge — see
+this PR).
 
-Continue with **Step 9.5 — Feedback routes** (`feat/feedback-routes`):
-`POST /api/feedback` (thumbs up/down + optional text for a message —
-`FeedbackRepository` already exists, Step 3.5) and
-`GET /api/feedback/analytics` (aggregated stats, admin only). Then
-**Step 9.6 — Admin analytics routes** (`feat/admin-analytics-routes`,
-ten endpoints per `files/plan.md`'s list — several will want the
-event-subscriber infrastructure below), and **Step 9.7 — Health
-routes** (already exist from Step 1.5 — likely just confirming nothing
-more is needed, per plan.md's own bullet list for this step).
+Continue with **Step 9.6 — Admin analytics routes**
+(`feat/admin-analytics-routes`): ten endpoints per `files/plan.md`'s
+list (`GET /api/admin/overview`, `cost-dashboard` (+`/alerts`),
+`latency`, `flagged-responses` (+`PATCH .../{id}`),
+`guardrail-rejections`, `unanswered-queries`, `topic-heatmap`,
+`document-health`) — `AnalyticsRepository` (Step 3.5) and
+`FlaggedResponse`/`LLMCostLog`/`RequestLatencyLog` (all written
+directly, Step 6.6/`RAGService`) already back most of these directly;
+`guardrail-rejections` is the one endpoint the standing event-bus gap
+below actually blocks, since nothing persists `GuardrailRejectionEvent`
+anywhere yet. Then **Step 9.7 — Health routes** (already exist from
+Step 1.5 — likely just confirming nothing more is needed, per plan.md's
+own bullet list for this step) closes out Phase 9.
 
-**Standing gap, still unresolved — now spans Phases 6-9**: no
-event-subscriber-registration infrastructure exists anywhere in the
-app. `GuardrailRejectionEvent` (Step 6.1), `ChatMessageReceivedEvent`/
-`ChatResponseGeneratedEvent`/`LowConfidenceResponseEvent` (Step 6.6),
-and `DocumentVersionReplacedEvent` (Step 7.2) are all published into a
-void — `get_event_bus()` (Step 9.2) still returns a fresh
-`InMemoryEventBus()` per request/task, matching every existing Celery
-task's pattern, so there is still nowhere a subscriber could even be
-registered. Concretely blocks: `RAGService.invalidate_version_cache()`
-(Step 7.3) having a real caller, and several Step 9.6 admin-analytics
-endpoints (guardrail-rejection review, some flagged-response context)
-having anything to read beyond what's already written directly
-(`FlaggedResponse` rows themselves, Step 6.6). Worth resolving as its
-own small step (a `main.py` startup/lifespan wiring a shared,
-long-lived `EventBusPort` instance subscribers register against, used
-everywhere a consumer is constructed) before Step 9.6 needs it.
+**Standing gap, still unresolved — now spans Phases 6-9, and Step 9.6
+is the first step actually blocked by it (not just a future
+implication)**: no event-subscriber-registration infrastructure exists
+anywhere in the app. `GuardrailRejectionEvent` (Step 6.1),
+`ChatMessageReceivedEvent`/`ChatResponseGeneratedEvent`/
+`LowConfidenceResponseEvent` (Step 6.6), and `DocumentVersionReplacedEvent`
+(Step 7.2) are all published into a void — `get_event_bus()` (Step 9.2)
+still returns a fresh `InMemoryEventBus()` per request/task, matching
+every existing Celery task's pattern, so there is still nowhere a
+subscriber could even be registered. `GET /api/admin/guardrail-rejections`
+(Step 9.6) has nothing to read without this — recommend resolving this
+gap immediately before or during Step 9.6, not deferring it a further
+step, since it's no longer just a hypothetical future need.
 
-**New standing habit, worth keeping for the remaining Phase 9 steps**:
-before pushing a PR, run the exact CI pytest command
+**Standing habit, kept through Step 9.5**: before pushing a PR, run the
+exact CI pytest command
 (`pytest --cov=src --cov-report=term-missing --cov-fail-under=80`)
 inside a `python:3.12-slim` container on the same `docker compose`
-network as the real Postgres service — this is how Step 9.3's
-CI-only segfault was actually root-caused (bisecting shrinking test
-subsets locally is far faster than round-tripping through GitHub
-Actions), and Step 9.4 confirmed doing this preemptively catches
-regressions before they ever reach a CI run.
+network as the real Postgres service. Two steps in a row (9.4, 9.5)
+have now gone first-try-green in CI since adopting this — keep doing it
+for every remaining Phase 9 step.
