@@ -5,6 +5,7 @@ service-layer changes (files/plan.md's Repository Pattern principle).
 """
 
 from abc import ABC, abstractmethod
+from datetime import datetime
 from typing import Generic, TypeVar
 from uuid import UUID
 
@@ -15,7 +16,7 @@ from core.domain.analytics import (
     LLMCostLog,
     RequestLatencyLog,
 )
-from core.domain.conversation import Conversation, Message
+from core.domain.conversation import Conversation, Message, MessageRole
 from core.domain.document import Document, DocumentChunk
 from core.domain.employee import Employee
 from core.domain.employer import Employer
@@ -78,6 +79,22 @@ class DocumentRepository(RepositoryPort[Document]):
         version rather than creating an unrelated new document."""
         ...
 
+    @abstractmethod
+    async def list_all(self, *, employer_id: UUID | None = None) -> list[Document]:
+        """Every document, optionally scoped to one employer. Distinct
+        from `list_by_employer` (which requires one): Step 9.6's
+        admin-wide `document-health` endpoint has no single tenant to
+        scope to unless the caller passes one explicitly."""
+        ...
+
+    @abstractmethod
+    async def mark_queried(self, document_ids: list[UUID]) -> None:
+        """Set `last_queried_at` to now for every id in `document_ids`
+        (Step 9.6's document-health "zero query hits" signal) — called
+        by `RAGService.retrieve()` for every document a retrieval
+        actually matched. A no-op for an empty list."""
+        ...
+
 
 class DocumentChunkRepository(RepositoryPort[DocumentChunk]):
     @abstractmethod
@@ -94,6 +111,16 @@ class ConversationRepository(RepositoryPort[Conversation]):
     @abstractmethod
     async def list_by_employee(self, employee_id: UUID) -> list[Conversation]: ...
 
+    @abstractmethod
+    async def list_active_since(
+        self, since: datetime, *, employer_id: UUID | None = None
+    ) -> list[Conversation]:
+        """Conversations with at least one message created at/after
+        `since` — Step 9.6's admin overview derives "active users" from
+        the distinct `employee_id`s this returns, since `Message` itself
+        carries no `employee_id` (only `Conversation` does)."""
+        ...
+
 
 class MessageRepository(RepositoryPort[Message]):
     @abstractmethod
@@ -103,10 +130,34 @@ class MessageRepository(RepositoryPort[Message]):
         """Most recent `limit` messages, for conversation memory (Step 6.6)."""
         ...
 
+    @abstractmethod
+    async def list_for_analytics(
+        self,
+        *,
+        employer_id: UUID | None = None,
+        role: MessageRole | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> list[Message]:
+        """Every message matching the given filters, unordered — Step
+        9.6's admin overview (query counts) and topic-heatmap (grouped
+        by `policy_type`, which is only ever set on `role=USER`
+        messages) read through this rather than a per-conversation
+        query. `employer_id=None` spans every tenant, matching every
+        other admin-analytics filter in this port."""
+        ...
+
 
 class FeedbackRepository(RepositoryPort[Feedback]):
     @abstractmethod
     async def list_by_employer(self, employer_id: UUID) -> list[Feedback]: ...
+
+    @abstractmethod
+    async def list_all(self, *, employer_id: UUID | None = None) -> list[Feedback]:
+        """Every feedback row, optionally scoped to one employer — Step
+        9.6's admin overview computes an all-tenant satisfaction rate
+        from this; `list_by_employer` alone can't span tenants."""
+        ...
 
 
 class AnalyticsRepository(ABC):
@@ -129,9 +180,55 @@ class AnalyticsRepository(ABC):
     async def record_guardrail_rejection(self, rejection: GuardrailRejection) -> None: ...
 
     @abstractmethod
+    async def list_llm_costs(
+        self,
+        *,
+        employer_id: UUID | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> list[LLMCostLog]:
+        """Raw cost logs matching the given filters — Step 9.6's
+        cost-dashboard aggregates (by model/employer/day) in-process from
+        this, the same "fetch raw, aggregate in Python" convention Step
+        9.5's feedback-analytics endpoint already established (no other
+        repository in this codebase does SQL-level `GROUP BY` either)."""
+        ...
+
+    @abstractmethod
+    async def list_latencies(
+        self,
+        *,
+        employer_id: UUID | None = None,
+        model_tier: str | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> list[RequestLatencyLog]:
+        """Raw latency logs matching the given filters — Step 9.6's
+        latency endpoint computes P50/P95/P99 in-process from this."""
+        ...
+
+    @abstractmethod
     async def list_flagged_responses(
-        self, employer_id: UUID, *, status: FlaggedResponseStatus | None = None
+        self, *, employer_id: UUID | None = None, status: FlaggedResponseStatus | None = None
     ) -> list[FlaggedResponse]: ...
 
     @abstractmethod
-    async def list_guardrail_rejections(self, employer_id: UUID) -> list[GuardrailRejection]: ...
+    async def get_flagged_response(self, flagged_response_id: UUID) -> FlaggedResponse | None: ...
+
+    @abstractmethod
+    async def update_flagged_response_status(
+        self, flagged_response_id: UUID, status: FlaggedResponseStatus
+    ) -> FlaggedResponse:
+        """Raises `ValueError` if no flagged response with this id
+        exists — same not-found contract as `PostgresRepository.update()`
+        (Step 3.5); Step 9.6's `PATCH` route maps that to a 404."""
+        ...
+
+    @abstractmethod
+    async def list_guardrail_rejections(
+        self,
+        *,
+        employer_id: UUID | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> list[GuardrailRejection]: ...

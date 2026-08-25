@@ -41,3 +41,10 @@ class PostgresFeedbackRepository(PostgresRepository[Feedback, models.Feedback], 
             select(models.Feedback).where(models.Feedback.employer_id == employer_id)
         )
         return [self._to_domain(row) for row in result.scalars().all()]
+
+    async def list_all(self, *, employer_id: UUID | None = None) -> list[Feedback]:
+        query = select(models.Feedback)
+        if employer_id is not None:
+            query = query.where(models.Feedback.employer_id == employer_id)
+        result = await self._session.execute(query)
+        return [self._to_domain(row) for row in result.scalars().all()]

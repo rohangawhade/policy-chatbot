@@ -103,6 +103,53 @@ async def test_get_latest_version_returns_none_when_no_document_matches(
     assert result is None
 
 
+async def test_list_all_with_no_filter_spans_every_employer(db_session: AsyncSession) -> None:
+    employer_a = await _make_employer(db_session)
+    employer_b = await PostgresEmployerRepository(db_session).create(Employer(name="Other Co"))
+    await _make_document(db_session, employer_a.id)
+    await _make_document(db_session, employer_b.id)
+
+    result = await PostgresDocumentRepository(db_session).list_all()
+
+    assert len(result) == 2
+
+
+async def test_list_all_filters_by_employer(db_session: AsyncSession) -> None:
+    employer_a = await _make_employer(db_session)
+    employer_b = await PostgresEmployerRepository(db_session).create(Employer(name="Other Co"))
+    document_a = await _make_document(db_session, employer_a.id)
+    await _make_document(db_session, employer_b.id)
+
+    result = await PostgresDocumentRepository(db_session).list_all(employer_id=employer_a.id)
+
+    assert [d.id for d in result] == [document_a.id]
+
+
+async def test_mark_queried_sets_last_queried_at(db_session: AsyncSession) -> None:
+    employer = await _make_employer(db_session)
+    document = await _make_document(db_session, employer.id)
+    repo = PostgresDocumentRepository(db_session)
+    assert document.last_queried_at is None
+
+    await repo.mark_queried([document.id])
+
+    fetched = await repo.get(document.id)
+    assert fetched is not None
+    assert fetched.last_queried_at is not None
+
+
+async def test_mark_queried_with_an_empty_list_is_a_no_op(db_session: AsyncSession) -> None:
+    employer = await _make_employer(db_session)
+    document = await _make_document(db_session, employer.id)
+    repo = PostgresDocumentRepository(db_session)
+
+    await repo.mark_queried([])
+
+    fetched = await repo.get(document.id)
+    assert fetched is not None
+    assert fetched.last_queried_at is None
+
+
 async def test_update_changes_status_and_error_message(db_session: AsyncSession) -> None:
     employer = await _make_employer(db_session)
     repo = PostgresDocumentRepository(db_session)

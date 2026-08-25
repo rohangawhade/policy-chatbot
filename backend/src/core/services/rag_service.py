@@ -30,6 +30,7 @@ from core.ports.llm_port import LLMPort
 from core.ports.repository_ports import (
     AnalyticsRepository,
     ConversationRepository,
+    DocumentRepository,
     EnrollmentRepository,
     MessageRepository,
 )
@@ -242,6 +243,7 @@ class GenerationStream:
             query_text=self._query_text,
             full_text=cached_response,
             model=None,
+            policy_type=self._retrieval.policy_type,
         )
         self.metrics = GenerationMetrics(
             full_text=cached_response,
@@ -298,6 +300,7 @@ class GenerationStream:
             query_text=self._query_text,
             full_text=full_text,
             model=model,
+            policy_type=retrieval.policy_type,
         )
 
         top_score = max((chunk.score for chunk in retrieval.chunks), default=None)
@@ -348,6 +351,10 @@ class RAGService:
             `Message` pair and loads history for follow-up questions.
         event_bus: Publishes `ChatMessageReceivedEvent`/
             `ChatResponseGeneratedEvent`/`LowConfidenceResponseEvent`.
+        document_repository: `mark_queried()` is called on every
+            retrieved chunk's source document (Step 9.6's document-health
+            "zero query hits" signal) — this class never reads a
+            `Document` row, only marks one as having been matched.
         embedding_model: Passed to every `embed()` call — this class has
             no opinion on which embedding model is configured.
         top_k: Chunks retrieved per query.
@@ -374,6 +381,7 @@ class RAGService:
         conversation_repository: ConversationRepository,
         message_repository: MessageRepository,
         event_bus: EventBusPort,
+        document_repository: DocumentRepository,
         embedding_model: str,
         top_k: int = _DEFAULT_TOP_K,
         cache_ttl_seconds: int = _DEFAULT_CACHE_TTL_SECONDS,
@@ -390,6 +398,7 @@ class RAGService:
         self._conversation_repository = conversation_repository
         self._message_repository = message_repository
         self._event_bus = event_bus
+        self._document_repository = document_repository
         self._embedding_model = embedding_model
         self._top_k = top_k
         self._cache_ttl_seconds = cache_ttl_seconds
@@ -435,7 +444,17 @@ class RAGService:
         if self._is_personal_query(query_text):
             enrollment = await self._enrollment_repository.list_by_employee(employee_id)
 
+        await self._mark_matched_documents_queried(chunks)
+
         return RetrievalResult(chunks=chunks, enrollment=enrollment, policy_type=policy_type)
+
+    async def _mark_matched_documents_queried(self, chunks: list[VectorMatch]) -> None:
+        document_ids: set[UUID] = set()
+        for chunk in chunks:
+            raw_id = chunk.metadata.get("document_id")
+            if raw_id:
+                document_ids.add(UUID(str(raw_id)))
+        await self._document_repository.mark_queried(list(document_ids))
 
     def assemble_prompt(
         self,
@@ -534,6 +553,7 @@ class RAGService:
         query_text: str,
         full_text: str,
         model: str | None,
+        policy_type: PolicyType | None,
     ) -> tuple[UUID, UUID]:
         """Ensure a conversation exists, persist the user/assistant
         message pair, publish `ChatMessageReceivedEvent`, and return
@@ -551,6 +571,7 @@ class RAGService:
                 employer_id=employer_id,
                 role=MessageRole.USER,
                 content=query_text,
+                policy_type=policy_type,
             )
         )
         await self._event_bus.publish(

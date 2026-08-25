@@ -8,6 +8,7 @@ from fastapi import FastAPI
 
 from api.middleware.tenant_context import TenantContextMiddleware
 from api.routes import (
+    admin_routes,
     auth_routes,
     chat_routes,
     document_routes,
@@ -31,6 +32,7 @@ def create_app() -> FastAPI:
     app.include_router(employee_routes.router)
     app.include_router(policy_routes.router)
     app.include_router(feedback_routes.router)
+    app.include_router(admin_routes.router)
     return app
 
 

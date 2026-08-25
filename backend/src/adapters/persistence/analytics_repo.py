@@ -6,6 +6,7 @@ records with no `update`/`delete` in the port, and four different ORM
 tables rather than one, so the generic CRUD base doesn't fit.
 """
 
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import select
@@ -86,12 +87,49 @@ class PostgresAnalyticsRepository(AnalyticsRepository):
         )
         await self._session.flush()
 
+    async def list_llm_costs(
+        self,
+        *,
+        employer_id: UUID | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> list[LLMCostLog]:
+        query = select(models.LLMCostLog)
+        if employer_id is not None:
+            query = query.where(models.LLMCostLog.employer_id == employer_id)
+        if start is not None:
+            query = query.where(models.LLMCostLog.created_at >= start)
+        if end is not None:
+            query = query.where(models.LLMCostLog.created_at < end)
+        result = await self._session.execute(query)
+        return [LLMCostLog.model_validate(row) for row in result.scalars().all()]
+
+    async def list_latencies(
+        self,
+        *,
+        employer_id: UUID | None = None,
+        model_tier: str | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> list[RequestLatencyLog]:
+        query = select(models.RequestLatencyLog)
+        if employer_id is not None:
+            query = query.where(models.RequestLatencyLog.employer_id == employer_id)
+        if model_tier is not None:
+            query = query.where(models.RequestLatencyLog.model_tier == model_tier)
+        if start is not None:
+            query = query.where(models.RequestLatencyLog.created_at >= start)
+        if end is not None:
+            query = query.where(models.RequestLatencyLog.created_at < end)
+        result = await self._session.execute(query)
+        return [RequestLatencyLog.model_validate(row) for row in result.scalars().all()]
+
     async def list_flagged_responses(
-        self, employer_id: UUID, *, status: FlaggedResponseStatus | None = None
+        self, *, employer_id: UUID | None = None, status: FlaggedResponseStatus | None = None
     ) -> list[FlaggedResponse]:
-        query = select(models.FlaggedResponse).where(
-            models.FlaggedResponse.employer_id == employer_id
-        )
+        query = select(models.FlaggedResponse)
+        if employer_id is not None:
+            query = query.where(models.FlaggedResponse.employer_id == employer_id)
         if status is not None:
             query = query.where(
                 models.FlaggedResponse.status == models.FlaggedResponseStatus[status.name]
@@ -99,10 +137,34 @@ class PostgresAnalyticsRepository(AnalyticsRepository):
         result = await self._session.execute(query)
         return [FlaggedResponse.model_validate(row) for row in result.scalars().all()]
 
-    async def list_guardrail_rejections(self, employer_id: UUID) -> list[GuardrailRejection]:
-        result = await self._session.execute(
-            select(models.GuardrailRejection).where(
-                models.GuardrailRejection.employer_id == employer_id
-            )
-        )
+    async def get_flagged_response(self, flagged_response_id: UUID) -> FlaggedResponse | None:
+        orm_obj = await self._session.get(models.FlaggedResponse, flagged_response_id)
+        return FlaggedResponse.model_validate(orm_obj) if orm_obj is not None else None
+
+    async def update_flagged_response_status(
+        self, flagged_response_id: UUID, status: FlaggedResponseStatus
+    ) -> FlaggedResponse:
+        orm_obj = await self._session.get(models.FlaggedResponse, flagged_response_id)
+        if orm_obj is None:
+            raise ValueError(f"FlaggedResponse {flagged_response_id} does not exist.")
+        orm_obj.status = models.FlaggedResponseStatus[status.name]
+        await self._session.flush()
+        await self._session.refresh(orm_obj)
+        return FlaggedResponse.model_validate(orm_obj)
+
+    async def list_guardrail_rejections(
+        self,
+        *,
+        employer_id: UUID | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> list[GuardrailRejection]:
+        query = select(models.GuardrailRejection)
+        if employer_id is not None:
+            query = query.where(models.GuardrailRejection.employer_id == employer_id)
+        if start is not None:
+            query = query.where(models.GuardrailRejection.created_at >= start)
+        if end is not None:
+            query = query.where(models.GuardrailRejection.created_at < end)
+        result = await self._session.execute(query)
         return [GuardrailRejection.model_validate(row) for row in result.scalars().all()]

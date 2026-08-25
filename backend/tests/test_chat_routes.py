@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -42,6 +43,11 @@ class _FakeConversationRepository(ConversationRepository):
     async def list_by_employee(self, employee_id: UUID) -> list[Conversation]:
         return [c for c in self._by_id.values() if c.employee_id == employee_id]
 
+    async def list_active_since(
+        self, since: datetime, *, employer_id: UUID | None = None
+    ) -> list[Conversation]:
+        raise NotImplementedError
+
 
 class _FakeMessageRepository(MessageRepository):
     def __init__(self, messages: list[Message] | None = None) -> None:
@@ -65,6 +71,16 @@ class _FakeMessageRepository(MessageRepository):
     ) -> list[Message]:
         matches = [m for m in self._messages if m.conversation_id == conversation_id]
         return matches[-limit:]
+
+    async def list_for_analytics(
+        self,
+        *,
+        employer_id: UUID | None = None,
+        role: MessageRole | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> list[Message]:
+        raise NotImplementedError
 
 
 class _FakeGuardrailsService:

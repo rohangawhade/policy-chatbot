@@ -1,6 +1,7 @@
 """PostgreSQL implementations of `ConversationRepository` and
 `MessageRepository`."""
 
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import select
@@ -8,8 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from adapters.persistence import models
 from adapters.persistence.base_repository import PostgresRepository
-from core.domain.conversation import Conversation, Message
+from core.domain.conversation import Conversation, Message, MessageRole
+from core.domain.policy import PolicyType
 from core.ports.repository_ports import ConversationRepository, MessageRepository
+
+
+def _orm_policy_type(policy_type: PolicyType | None) -> models.PolicyType | None:
+    return models.PolicyType[policy_type.name] if policy_type is not None else None
 
 
 class PostgresConversationRepository(
@@ -42,6 +48,20 @@ class PostgresConversationRepository(
         )
         return [self._to_domain(row) for row in result.scalars().all()]
 
+    async def list_active_since(
+        self, since: datetime, *, employer_id: UUID | None = None
+    ) -> list[Conversation]:
+        query = (
+            select(models.Conversation)
+            .join(models.Message, models.Message.conversation_id == models.Conversation.id)
+            .where(models.Message.created_at >= since)
+            .distinct()
+        )
+        if employer_id is not None:
+            query = query.where(models.Conversation.employer_id == employer_id)
+        result = await self._session.execute(query)
+        return [self._to_domain(row) for row in result.scalars().all()]
+
 
 class PostgresMessageRepository(PostgresRepository[Message, models.Message], MessageRepository):
     def __init__(self, session: AsyncSession) -> None:
@@ -55,6 +75,7 @@ class PostgresMessageRepository(PostgresRepository[Message, models.Message], Mes
             role=models.MessageRole[entity.role.name],
             content=entity.content,
             model_used=entity.model_used,
+            policy_type=_orm_policy_type(entity.policy_type),
             created_at=entity.created_at,
         )
 
@@ -67,6 +88,7 @@ class PostgresMessageRepository(PostgresRepository[Message, models.Message], Mes
         existing.role = models.MessageRole[entity.role.name]
         existing.content = entity.content
         existing.model_used = entity.model_used
+        existing.policy_type = _orm_policy_type(entity.policy_type)
 
     async def list_by_conversation(
         self, conversation_id: UUID, *, limit: int = 20
@@ -81,3 +103,23 @@ class PostgresMessageRepository(PostgresRepository[Message, models.Message], Mes
             .limit(limit)
         )
         return [self._to_domain(row) for row in reversed(result.scalars().all())]
+
+    async def list_for_analytics(
+        self,
+        *,
+        employer_id: UUID | None = None,
+        role: MessageRole | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> list[Message]:
+        query = select(models.Message)
+        if employer_id is not None:
+            query = query.where(models.Message.employer_id == employer_id)
+        if role is not None:
+            query = query.where(models.Message.role == models.MessageRole[role.name])
+        if start is not None:
+            query = query.where(models.Message.created_at >= start)
+        if end is not None:
+            query = query.where(models.Message.created_at < end)
+        result = await self._session.execute(query)
+        return [self._to_domain(row) for row in result.scalars().all()]

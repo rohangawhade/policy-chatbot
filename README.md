@@ -211,8 +211,20 @@ Nothing tracked yet — this section grows as issues are discovered and fixed.
 
 | POST   | `/api/feedback`                           | Access token          | Submit thumbs up/down (+ optional text) for a message.                                           |
 | GET    | `/api/feedback/analytics`                 | Admin only             | Aggregated feedback stats for one employer.                                                       |
+| GET    | `/api/admin/overview`                     | Admin only             | Top-level summary: query volume, active users, document count, avg satisfaction, cost this month. |
+| GET    | `/api/admin/cost-dashboard`               | Admin only             | LLM spend: total, by model, by employer, by day. Filterable by employer/date range.                |
+| GET    | `/api/admin/cost-dashboard/alerts`        | Admin only             | Employer/day pairs where spend exceeded the configured (or a query-param) threshold.               |
+| GET    | `/api/admin/latency`                      | Admin only             | P50/P95/P99 response times, overall and broken down by model tier.                                 |
+| GET    | `/api/admin/flagged-responses`            | Admin only             | Auto-flagged low-confidence responses. Filterable by employer/status.                              |
+| PATCH  | `/api/admin/flagged-responses/{id}`       | Admin only             | Mark a flagged response reviewed, dismissed, or escalated.                                         |
+| GET    | `/api/admin/guardrail-rejections`         | Admin only             | Blocked queries with rejection reasons. Filterable by employer/date range.                         |
+| GET    | `/api/admin/unanswered-queries`           | Admin only             | Low-confidence-flagged queries (the structured proxy for "no answer found").                       |
+| GET    | `/api/admin/topic-heatmap`                | Admin only             | Query volume by policy type, by day. Filterable by employer/date range.                            |
+| GET    | `/api/admin/document-health`              | Admin only             | Documents with failed-ingestion/stale/zero-query-hit status.                                       |
 
-Remaining Phase 9 routes (admin analytics) land next. This table will be kept current as endpoints are added.
+**Standing convention decision**: like every other route file since Step 9.1, these return their Pydantic response model directly — not wrapped in an `APIResponse[T]` envelope (see `auth_routes.py`'s module docstring for the full reasoning).
+
+Phase 9 (API routes) is complete except for a final confirmation pass on the health routes. This table is kept current as endpoints are added.
 
 ## Project Structure
 

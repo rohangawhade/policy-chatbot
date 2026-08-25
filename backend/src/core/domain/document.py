@@ -27,6 +27,11 @@ class Document(BaseModel):
     version: int = 1
     status: DocumentStatus = DocumentStatus.PROCESSING
     error_message: str | None = None
+    # Set by `DocumentRepository.mark_queried()` whenever a retrieval
+    # (RAGService.retrieve()) matches one of this document's chunks —
+    # `None` means "never retrieved". Step 9.6's document-health endpoint
+    # is the only consumer; nothing else reads or writes it.
+    last_queried_at: datetime | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 

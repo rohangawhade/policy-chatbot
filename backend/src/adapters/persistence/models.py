@@ -73,6 +73,7 @@ class FlaggedResponseStatus(PyEnum):
     PENDING_REVIEW = "pending_review"
     REVIEWED = "reviewed"
     DISMISSED = "dismissed"
+    ESCALATED = "escalated"
 
 
 class Employer(Base, TimestampMixin):
@@ -152,6 +153,7 @@ class Document(Base, TimestampMixin):
         Enum(DocumentStatus, name="document_status"), default=DocumentStatus.PROCESSING
     )
     error_message: Mapped[str | None] = mapped_column(Text)
+    last_queried_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     employer: Mapped[Employer] = relationship(back_populates="documents")
     chunks: Mapped[list["DocumentChunk"]] = relationship(back_populates="document")
@@ -194,6 +196,7 @@ class Message(Base):
     role: Mapped[MessageRole] = mapped_column(Enum(MessageRole, name="message_role"))
     content: Mapped[str] = mapped_column(Text, nullable=False)
     model_used: Mapped[str | None] = mapped_column(String(128))
+    policy_type: Mapped[PolicyType | None] = mapped_column(Enum(PolicyType, name="policy_type"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")

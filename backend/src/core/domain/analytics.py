@@ -45,6 +45,7 @@ class FlaggedResponseStatus(str, Enum):
     PENDING_REVIEW = "pending_review"
     REVIEWED = "reviewed"
     DISMISSED = "dismissed"
+    ESCALATED = "escalated"
 
 
 class FlaggedResponse(BaseModel):

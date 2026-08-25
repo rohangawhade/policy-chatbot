@@ -56,14 +56,11 @@ class GuardrailsService:
     Every rejection is published as a `GuardrailRejectionEvent`
     (`files/coding-standards.md` section 12: analytics logging is
     fire-and-forget via the event bus, never a direct blocking write on
-    the request path). **Known gap**: nothing yet subscribes to this
-    event to persist a `GuardrailRejection` row — no subscriber-wiring
-    infrastructure exists in the app yet (there's nowhere subscribers
-    are registered at startup). Persisting rejections for the Phase 9
-    admin dashboard needs that wiring built first; flagging here rather
-    than silently writing directly to `AnalyticsRepository` and blocking
-    the rejection response on a Postgres round trip, which section 12
-    explicitly rules out.
+    the request path). `api/event_subscribers.py`'s
+    `register_default_subscribers()` (wired into `get_event_bus()`)
+    persists it as a `GuardrailRejection` row — this service itself never
+    touches `AnalyticsRepository` directly, keeping the Postgres write
+    out of the guardrail check's own call path.
 
     Attributes:
         llm: Used only for the cheap-model classification call.

@@ -1,3 +1,4 @@
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
@@ -12,6 +13,7 @@ from adapters.persistence.employer_repo import PostgresEmployerRepository
 from core.domain.conversation import Conversation, Message, MessageRole
 from core.domain.employee import Employee, UserRole
 from core.domain.employer import Employer
+from core.domain.policy import PolicyType
 from core.ports.repository_ports import ConversationRepository, MessageRepository
 
 
@@ -100,6 +102,78 @@ async def test_conversation_delete_removes_it(db_session: AsyncSession) -> None:
     await repo.delete(conversation.id)
 
     assert await repo.get(conversation.id) is None
+
+
+async def test_list_active_since_finds_conversations_with_a_recent_message(
+    db_session: AsyncSession,
+) -> None:
+    employer = await _make_employer(db_session)
+    employee = await _make_employee(db_session, employer.id)
+    active_conversation = await _make_conversation(db_session, employee)
+    idle_conversation = await _make_conversation(db_session, employee)
+    message_repo = PostgresMessageRepository(db_session)
+    await message_repo.create(
+        Message(
+            conversation_id=active_conversation.id,
+            employer_id=employer.id,
+            role=MessageRole.USER,
+            content="hi",
+        )
+    )
+
+    since = datetime.now(UTC) - timedelta(minutes=1)
+    result = await PostgresConversationRepository(db_session).list_active_since(since)
+
+    ids = {c.id for c in result}
+    assert active_conversation.id in ids
+    assert idle_conversation.id not in ids
+
+
+async def test_list_active_since_filters_by_employer(db_session: AsyncSession) -> None:
+    employer_a = await _make_employer(db_session)
+    employer_b = await PostgresEmployerRepository(db_session).create(Employer(name="Other Co"))
+    employee_a = await _make_employee(db_session, employer_a.id)
+    employee_b = await PostgresEmployeeRepository(db_session).create(
+        Employee(
+            employer_id=employer_b.id,
+            email="other@other.example",
+            hashed_password="hashed",
+            full_name="Other Employee",
+            role=UserRole.EMPLOYEE,
+        )
+    )
+    conversation_a = await _make_conversation(db_session, employee_a)
+    conversation_b = await _make_conversation(db_session, employee_b)
+    message_repo = PostgresMessageRepository(db_session)
+    for conversation, employer in ((conversation_a, employer_a), (conversation_b, employer_b)):
+        await message_repo.create(
+            Message(
+                conversation_id=conversation.id,
+                employer_id=employer.id,
+                role=MessageRole.USER,
+                content="hi",
+            )
+        )
+
+    since = datetime.now(UTC) - timedelta(minutes=1)
+    result = await PostgresConversationRepository(db_session).list_active_since(
+        since, employer_id=employer_a.id
+    )
+
+    assert [c.id for c in result] == [conversation_a.id]
+
+
+async def test_list_active_since_excludes_a_conversation_with_no_recent_message(
+    db_session: AsyncSession,
+) -> None:
+    employer = await _make_employer(db_session)
+    employee = await _make_employee(db_session, employer.id)
+    await _make_conversation(db_session, employee)
+
+    since = datetime.now(UTC) + timedelta(days=1)
+    result = await PostgresConversationRepository(db_session).list_active_since(since)
+
+    assert result == []
 
 
 async def test_message_create_then_get_round_trips_including_role(
@@ -213,3 +287,106 @@ async def test_message_delete_removes_it(db_session: AsyncSession) -> None:
     await repo.delete(message.id)
 
     assert await repo.get(message.id) is None
+
+
+async def test_message_round_trips_policy_type(db_session: AsyncSession) -> None:
+    employer = await _make_employer(db_session)
+    employee = await _make_employee(db_session, employer.id)
+    conversation = await _make_conversation(db_session, employee)
+    repo = PostgresMessageRepository(db_session)
+    message = await repo.create(
+        Message(
+            conversation_id=conversation.id,
+            employer_id=employer.id,
+            role=MessageRole.USER,
+            content="what's my dental deductible?",
+            policy_type=PolicyType.DENTAL,
+        )
+    )
+
+    fetched = await repo.get(message.id)
+
+    assert fetched is not None
+    assert fetched.policy_type == PolicyType.DENTAL
+
+
+async def test_list_for_analytics_with_no_filters_spans_every_employer_and_role(
+    db_session: AsyncSession,
+) -> None:
+    employer = await _make_employer(db_session)
+    employee = await _make_employee(db_session, employer.id)
+    conversation = await _make_conversation(db_session, employee)
+    repo = PostgresMessageRepository(db_session)
+    await repo.create(
+        Message(
+            conversation_id=conversation.id,
+            employer_id=employer.id,
+            role=MessageRole.USER,
+            content="q",
+        )
+    )
+    await repo.create(
+        Message(
+            conversation_id=conversation.id,
+            employer_id=employer.id,
+            role=MessageRole.ASSISTANT,
+            content="a",
+        )
+    )
+
+    assert len(await repo.list_for_analytics()) == 2
+
+
+async def test_list_for_analytics_filters_by_employer_role_and_date_range(
+    db_session: AsyncSession,
+) -> None:
+    employer_a = await _make_employer(db_session)
+    employer_b = await PostgresEmployerRepository(db_session).create(Employer(name="Other Co"))
+    employee_a = await _make_employee(db_session, employer_a.id)
+    employee_b = await PostgresEmployeeRepository(db_session).create(
+        Employee(
+            employer_id=employer_b.id,
+            email="other2@other.example",
+            hashed_password="hashed",
+            full_name="Other Employee",
+            role=UserRole.EMPLOYEE,
+        )
+    )
+    conversation_a = await _make_conversation(db_session, employee_a)
+    conversation_b = await _make_conversation(db_session, employee_b)
+    repo = PostgresMessageRepository(db_session)
+    await repo.create(
+        Message(
+            conversation_id=conversation_a.id,
+            employer_id=employer_a.id,
+            role=MessageRole.USER,
+            content="user question",
+            policy_type=PolicyType.DENTAL,
+        )
+    )
+    await repo.create(
+        Message(
+            conversation_id=conversation_a.id,
+            employer_id=employer_a.id,
+            role=MessageRole.ASSISTANT,
+            content="assistant answer",
+        )
+    )
+    await repo.create(
+        Message(
+            conversation_id=conversation_b.id,
+            employer_id=employer_b.id,
+            role=MessageRole.USER,
+            content="other employer question",
+        )
+    )
+
+    scoped = await repo.list_for_analytics(employer_id=employer_a.id, role=MessageRole.USER)
+    assert [m.content for m in scoped] == ["user question"]
+    assert scoped[0].policy_type == PolicyType.DENTAL
+
+    future_start = datetime.now(UTC) + timedelta(days=1)
+    assert await repo.list_for_analytics(start=future_start) == []
+
+    past_end = datetime.now(UTC) - timedelta(days=1)
+    assert await repo.list_for_analytics(end=past_end) == []

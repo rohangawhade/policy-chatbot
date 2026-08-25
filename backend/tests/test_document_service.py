@@ -40,6 +40,12 @@ class FakeDocumentRepository(DocumentRepository):
             return None
         return max(matches, key=lambda document: document.version)
 
+    async def list_all(self, *, employer_id: UUID | None = None) -> list[Document]:
+        raise NotImplementedError
+
+    async def mark_queried(self, document_ids: list[UUID]) -> None:
+        raise NotImplementedError
+
 
 class FakeEventBus(EventBusPort):
     def __init__(self) -> None:

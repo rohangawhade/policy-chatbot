@@ -1,6 +1,7 @@
 """PostgreSQL implementations of `DocumentRepository` and
 `DocumentChunkRepository`."""
 
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import select, update
@@ -32,6 +33,7 @@ class PostgresDocumentRepository(PostgresRepository[Document, models.Document], 
             version=entity.version,
             status=models.DocumentStatus[entity.status.name],
             error_message=entity.error_message,
+            last_queried_at=entity.last_queried_at,
             created_at=entity.created_at,
             updated_at=entity.updated_at,
         )
@@ -48,6 +50,7 @@ class PostgresDocumentRepository(PostgresRepository[Document, models.Document], 
         existing.version = entity.version
         existing.status = models.DocumentStatus[entity.status.name]
         existing.error_message = entity.error_message
+        existing.last_queried_at = entity.last_queried_at
 
     async def list_by_employer(self, employer_id: UUID) -> list[Document]:
         result = await self._session.execute(
@@ -64,6 +67,23 @@ class PostgresDocumentRepository(PostgresRepository[Document, models.Document], 
         )
         orm_obj = result.scalar_one_or_none()
         return self._to_domain(orm_obj) if orm_obj is not None else None
+
+    async def list_all(self, *, employer_id: UUID | None = None) -> list[Document]:
+        query = select(models.Document)
+        if employer_id is not None:
+            query = query.where(models.Document.employer_id == employer_id)
+        result = await self._session.execute(query)
+        return [self._to_domain(row) for row in result.scalars().all()]
+
+    async def mark_queried(self, document_ids: list[UUID]) -> None:
+        if not document_ids:
+            return
+        await self._session.execute(
+            update(models.Document)
+            .where(models.Document.id.in_(document_ids))
+            .values(last_queried_at=datetime.now(UTC))
+        )
+        await self._session.flush()
 
 
 class PostgresDocumentChunkRepository(
