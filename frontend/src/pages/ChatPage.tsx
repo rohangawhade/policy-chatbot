@@ -1,10 +1,26 @@
-// Placeholder -- the real chat interface (ChatWindow, StreamingMessage,
-// ChatInput, conversation sidebar) lands in Step 10.3 (files/plan.md).
-// This step only needs a real route target.
+import { ChatInput } from "../components/chat/ChatInput";
+import { ChatWindow } from "../components/chat/ChatWindow";
+import { ConversationSidebar } from "../components/chat/ConversationSidebar";
+import { useSSE } from "../hooks/useSSE";
+import { useChatStore } from "../stores/chatStore";
+
 export default function ChatPage() {
+  const activeConversationId = useChatStore((state) => state.activeConversationId);
+  const isStreaming = useChatStore((state) => state.isStreaming);
+  const { sendMessage } = useSSE();
+
+  function handleSend(content: string) {
+    if (!activeConversationId) return;
+    void sendMessage(activeConversationId, content);
+  }
+
   return (
-    <div className="flex min-h-screen items-center justify-center">
-      <h1 className="text-2xl font-medium">Chat</h1>
+    <div className="flex h-screen">
+      <ConversationSidebar />
+      <div className="flex flex-1 flex-col">
+        <ChatWindow />
+        <ChatInput onSend={handleSend} disabled={!activeConversationId || isStreaming} />
+      </div>
     </div>
   );
 }

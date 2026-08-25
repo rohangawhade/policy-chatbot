@@ -3085,16 +3085,109 @@ the form's own "Couldn't reach the server" error message; after the
 fix, the same script logs in successfully and lands on `/chat`
 (screenshotted). Cleaned up the test rows via `psql` afterward.
 
+### Step 10.3 — Chat interface — DONE
+
+- `src/api/chat.ts` — `createConversation()`/`listConversations()`/
+  `getConversationMessages()` (all via `apiClient`), plus
+  `submitFeedback()` — no dedicated `api/feedback.ts` since
+  `files/plan.md`'s frontend file tree doesn't list one and feedback
+  only ever attaches to a chat message.
+- `src/hooks/useSSE.ts` — the low-level SSE parser (`data: {...}\n\n`
+  event framing matching `chat_routes.py::_format_token_event`/
+  `_format_done_event` exactly) and the `useSSE()` hook itself, which
+  drives `chatStore`: adds an optimistic user message + an empty
+  streaming assistant placeholder (both client-generated ids,
+  `isPersisted: false`), appends tokens as they arrive, and — once the
+  `done` event carries a real `message_id` (i.e. not a guardrail
+  rejection) — reconciles the placeholder to that id and flips
+  `isPersisted: true`. Deliberately uses `fetch()`, not `apiClient`/
+  `axios`: this is a POST request with a streamed response body,
+  which native `EventSource` can't do (GET-only, no custom headers) and
+  which axios's browser adapter doesn't expose as a readable stream the
+  way `fetch()`'s `response.body.getReader()` does. Carries its own
+  401 → refresh → retry logic (mirroring `client.ts`'s Axios
+  interceptor) since a bare `fetch()` call bypasses that interceptor
+  entirely.
+- `src/components/chat/`: `MessageBubble` (role-based styling; parses
+  `RAGService._format_citations`'s `"\n\nSources: A; B"` text suffix
+  back out into a collapsible list — the backend has no separate
+  structured `sources` field, so this is the only way to split it, a
+  documented interpretation matching the project's established pattern
+  for this class of decision), `StreamingMessage` (decides whether a
+  given message is *the* one currently streaming, keeping that logic
+  out of `ChatWindow`), `ChatInput` (Enter-to-send, Shift+Enter for a
+  newline), `FeedbackButtons` (thumbs up/down; **only renders when
+  `message.isPersisted`** — a guardrail-rejected exchange is never
+  persisted server-side at all, so showing feedback buttons on it would
+  404), and `ConversationSidebar` (list/create/switch — not in
+  `files/plan.md`'s file *tree* diagram, but explicitly required by
+  the step's own bullet text, so added as its own file matching the
+  folder's existing granularity, same reasoning as Step 9.3's `#
+  omitted from the tree but required by the text` precedent).
+  `ChatPage.tsx` composes all of them.
+- **Real, novel bug found and fixed by actually running this in a
+  browser — an infinite render loop, not a hypothetical**: `ChatWindow`'s
+  Zustand selector was
+  `state.messagesByConversation[activeConversationId] ?? []` — every
+  selector call that missed the map returned a **new** `[]` array
+  literal, a new reference every time. Zustand/React's
+  `useSyncExternalStore` reads a new reference as "the store changed",
+  which triggers a re-render, which calls the selector again, which
+  returns *another* new `[]`... `React: Maximum update depth exceeded`,
+  reproducible instantly the moment a conversation had zero messages
+  (i.e. immediately after creating one). Fixed with a module-level
+  `EMPTY_MESSAGES: ChatMessage[] = []` constant reused across calls
+  instead of a fresh literal — same fix shape as any "return a stable
+  reference from a selector" rule, just never exercised until a real
+  render loop actually ran. Grepped the rest of the frontend tree for
+  the same `?? []`/`?? {}`-inside-a-selector shape; no other instances.
+- Validation: `npm run lint` / `npx tsc --noEmit` / `npm run build` —
+  clean.
+  **Verified end-to-end against the real stack with headless Chromium**
+  (Playwright, the workflow established fixing the CORS bug above —
+  the Claude-in-Chrome extension never reconnected this session):
+  `docker compose up -d postgres redis backend`, created a real
+  employer + employee. Drove the actual app: logged in, clicked "+ New
+  conversation" (real `201`), typed "What is my dental coverage?" and
+  clicked Send — this is what caught the infinite-loop bug above,
+  before the fix, as a real crash with a real stack trace, not
+  something spotted by reading the code. After the fix: the message
+  sends, the optimistic user bubble renders immediately, and the
+  assistant bubble correctly shows a friendly
+  "Sorry, something went wrong reaching the server" once the stream
+  fails — expected and correct, since this dev environment still has no
+  real LLM provider key (Step 3.2's established limitation; confirmed
+  the failure is specifically the missing-credentials boundary, not a
+  frontend bug, the same way Step 9.2's curl checks did). Since a real
+  generated answer isn't reachable here, separately verified
+  `MessageBubble`'s citation-parsing and `FeedbackButtons` through the
+  **real history-loading path**: seeded one completed assistant message
+  with a `"\n\nSources: A.pdf; B.pdf"` suffix directly via `psql`,
+  reloaded the page, and confirmed via screenshots that the citations
+  render collapsed-then-expandable and clicking 👍 does a real
+  `POST /api/feedback` (`201`, confirmed via response logging) and
+  flips the UI to "Thanks for the feedback!". Screenshots for all of
+  the above were reviewed directly in this session (not embedded in the
+  GitHub PR body — `gh`/the GitHub REST API have no CLI-automatable way
+  to upload a local image into a PR description; available to re-view
+  on request). Cleaned up every seeded row via `psql` afterward,
+  `docker compose down`.
+
 ## Next recommended step
 
-Continue with **Step 10.3 — Chat interface** (`feat/chat-streaming-ui`,
-screenshots required in the PR per plan.md): `ChatWindow`,
-`StreamingMessage` (rendering SSE tokens from
-`POST /api/chat/conversations/{id}/messages` as they arrive — the
-`useSSE` hook from `files/plan.md`'s file tree), `ChatInput`, a
-conversation sidebar wired to `chatStore` (already built, Step 10.1),
-source citations, and `FeedbackButtons`. The headless-Chromium
-screenshot workflow (Playwright, standalone in the scratchpad — see
-above) is now the established way to produce real screenshots for a PR
-without the Claude-in-Chrome extension; keep using it for every
-remaining Phase 10 step unless the extension reconnects.
+Continue with **Step 10.4 — Admin dashboard: management**
+(`feat/admin-management-ui`, screenshots required in the PR per
+plan.md): document upload with drag-and-drop + progress indicator,
+document list with status badges/version numbers
+(`GET /api/documents`, `POST /api/documents/upload`,
+`DELETE /api/documents/{id}` — Step 9.3), and employer management
+(create/edit/deactivate — `POST`/`GET`/`PATCH`/`DELETE /api/employers`,
+Step 9.4). Needs a new `src/api/documents.ts` and `src/api/employers.ts`
+(both named in `files/plan.md`'s file tree, neither built yet) and a
+real `AdminDashboard.tsx` replacing the placeholder. The
+headless-Chromium screenshot workflow (Playwright, standalone in the
+scratchpad, `npm install --no-save playwright` — never touches
+`frontend/package.json`) is now the established way to produce and
+verify real screenshots without the Claude-in-Chrome extension; keep
+using it for every remaining Phase 10 step unless the extension
+reconnects.

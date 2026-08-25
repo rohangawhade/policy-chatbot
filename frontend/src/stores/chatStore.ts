@@ -16,6 +16,17 @@ export interface ChatMessage {
   role: MessageRole;
   content: string;
   modelUsed: string | null;
+  /**
+   * Whether this message actually exists as a row in the backend --
+   * false for an in-flight optimistic message (client-generated id,
+   * still streaming). A guardrail-rejected exchange (`chat_routes.py`'s
+   * `_stream_chat_response`) never calls `RAGService.query()` at all, so
+   * neither the user's nor the assistant's message is ever persisted for
+   * it -- `FeedbackButtons` must not render for a message that stays
+   * `isPersisted: false`, since `POST /api/feedback` 404s on an id the
+   * backend never wrote.
+   */
+  isPersisted: boolean;
 }
 
 interface ChatState {
@@ -31,6 +42,12 @@ interface ChatState {
   addMessage: (conversationId: string, message: ChatMessage) => void;
   /** Append a streamed token to an existing message's content in place -- Step 10.3's SSE hook. */
   appendToMessage: (conversationId: string, messageId: string, tokenText: string) => void;
+  /**
+   * Reconciles a streaming assistant message's client-generated id to the
+   * real, persisted id from the `done` event once streaming finishes, and
+   * marks it `isPersisted: true` -- see `ChatMessage.isPersisted`'s doc.
+   */
+  markMessagePersisted: (conversationId: string, oldId: string, newId: string) => void;
   setIsStreaming: (isStreaming: boolean) => void;
   reset: () => void;
 }
@@ -81,6 +98,22 @@ export const useChatStore = create<ChatState>((set) => ({
             message.id === messageId
               ? { ...message, content: message.content + tokenText }
               : message,
+          ),
+        },
+      };
+    }),
+
+  markMessagePersisted: (conversationId, oldId, newId) =>
+    set((state) => {
+      const messages = state.messagesByConversation[conversationId];
+      if (!messages) {
+        return state;
+      }
+      return {
+        messagesByConversation: {
+          ...state.messagesByConversation,
+          [conversationId]: messages.map((message) =>
+            message.id === oldId ? { ...message, id: newId, isPersisted: true } : message,
           ),
         },
       };
