@@ -7,7 +7,15 @@ Routes and middleware are registered here as they're built in later phases
 from fastapi import FastAPI
 
 from api.middleware.tenant_context import TenantContextMiddleware
-from api.routes import auth_routes, chat_routes, document_routes, health_routes
+from api.routes import (
+    auth_routes,
+    chat_routes,
+    document_routes,
+    employee_routes,
+    employer_routes,
+    health_routes,
+    policy_routes,
+)
 
 
 def create_app() -> FastAPI:
@@ -18,6 +26,9 @@ def create_app() -> FastAPI:
     app.include_router(auth_routes.router)
     app.include_router(chat_routes.router)
     app.include_router(document_routes.router)
+    app.include_router(employer_routes.router)
+    app.include_router(employee_routes.router)
+    app.include_router(policy_routes.router)
     return app
 
 
