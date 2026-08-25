@@ -8,12 +8,14 @@ plays for HTTP requests — files/coding-standards.md's Unit of Work rule;
 `PostgresRepository` never commits on its own, only flushes).
 
 Adapters are constructed fresh per task invocation rather than shared at
-module level: `PineconeAdapter`'s constructor raises immediately if
-`PINECONE_API_KEY` isn't configured (no key at all in dev/CI today, per
-`IMPLEMENTATION_STATUS.md`'s Steps 3.2/3.3 notes) — building it at import
-time would break every environment without real credentials, including
-this one. A shared, worker-startup-scoped instance is a Phase 8/9
-concern once real DI wiring exists.
+module level — a shared, worker-startup-scoped instance is a Phase 8/9
+concern once real DI wiring exists. `PineconeAdapter`'s `api_key` falls
+back to `"unconfigured"`, never `""`: the Pinecone SDK treats an empty
+string as falsy and falls through to reading `PINECONE_API_KEY` from the
+environment itself, raising `PineconeConfigurationError` at
+*construction* if that's unset too (no key at all in dev/CI today, per
+`IMPLEMENTATION_STATUS.md`'s Steps 3.2/3.3 notes) — a real bug an
+earlier version of this fallback had, found via Step 9.2's test suite.
 """
 
 import asyncio
@@ -80,7 +82,8 @@ async def _embed_and_index(
         service = EmbeddingService(
             llm=LiteLLMAdapter(),
             vector_store=PineconeAdapter(
-                api_key=pinecone_config.api_key or "", index_name=pinecone_config.index_name
+                api_key=pinecone_config.api_key or "unconfigured",
+                index_name=pinecone_config.index_name,
             ),
             chunk_repository=PostgresDocumentChunkRepository(session),
             event_bus=InMemoryEventBus(),

@@ -110,7 +110,8 @@ async def _process_document_upload(document: Document, previous_version: Documen
             embedding_service = EmbeddingService(
                 llm=llm,
                 vector_store=PineconeAdapter(
-                    api_key=pinecone_config.api_key or "", index_name=pinecone_config.index_name
+                    api_key=pinecone_config.api_key or "unconfigured",
+                    index_name=pinecone_config.index_name,
                 ),
                 chunk_repository=PostgresDocumentChunkRepository(session),
                 event_bus=event_bus,
