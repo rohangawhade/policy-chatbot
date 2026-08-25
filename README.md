@@ -37,7 +37,7 @@ See `files/plan.md` for the full design (tech stack rationale, data flow diagram
 - [x] RAG pipeline: guardrails, query routing, retrieval, prompt assembly, streaming generation, conversation memory (Phase 6)
 - [x] Document versioning: version tracking, vector/chunk replacement, cache invalidation (Phase 7)
 - [x] Celery ingestion workers: queue routing, retries, dead-letter handling, full ingestion pipeline, status tracking (Phase 8)
-- [ ] API routes (Phase 9)
+- [x] API routes: auth, chat, documents, employers/employees/policies, feedback, admin analytics, health (Phase 9)
 - [ ] React chat UI + admin dashboard (Phase 10)
 - [ ] Data acquisition & seeding (Phase 11)
 - [ ] RAGAS evaluation pipeline (Phase 12)
@@ -224,7 +224,7 @@ Nothing tracked yet — this section grows as issues are discovered and fixed.
 
 **Standing convention decision**: like every other route file since Step 9.1, these return their Pydantic response model directly — not wrapped in an `APIResponse[T]` envelope (see `auth_routes.py`'s module docstring for the full reasoning).
 
-Phase 9 (API routes) is complete except for a final confirmation pass on the health routes. This table is kept current as endpoints are added.
+Phase 9 (API routes) is complete. This table is kept current as endpoints are added.
 
 ## Project Structure
 
