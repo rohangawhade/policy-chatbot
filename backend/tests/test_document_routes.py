@@ -523,7 +523,12 @@ def test_delete_document_purges_vectors_deactivates_chunks_and_removes_the_row()
     assert response.status_code == 204
     assert vector_store.deleted_calls == [(str(employer_id), {"document_id": str(document.id)})]
     assert chunk_repository.deactivated_document_ids == [document.id]
-    assert asyncio.run(repository.get(document.id)) is None
+    # Not `asyncio.run(repository.get(...))`: calling that from a sync
+    # test function while `TestClient` also manages its own event loop
+    # segfaults under coverage.py on Linux CI (found the hard way — see
+    # IMPLEMENTATION_STATUS.md's Step 9.3 entry). The fake's own dict is
+    # already synchronous and just as direct.
+    assert document.id not in repository._documents
 
 
 def test_delete_document_404s_for_an_unknown_document() -> None:
