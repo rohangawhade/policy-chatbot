@@ -96,7 +96,7 @@ module = ["celery.*", "pinecone.*", "fitz.*", "openpyxl.*", "lxml.*", "jose.*", 
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "scripts"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 filterwarnings = [
