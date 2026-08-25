@@ -3720,20 +3720,135 @@ fix, the same script logs in successfully and lands on `/chat`
   `data/gov_pdfs/` (including `manifest.json`) is correctly excluded by
   the pre-existing `.gitignore` entry via `git check-ignore -v`.
 
+## Step 11.2 — Generate synthetic employer policy docs — SKIPPED (blocked)
+
+Not started. This step's entire deliverable is *real* LLM-generated
+content (`LiteLLMAdapter`, health/dental/vision summaries, employee
+handbook sections, enrollment guides, FAQs for 5 fictional employers) —
+a mock/test-double response would defeat its purpose, unlike steps
+where `MockLLMAdapter` is the deliberate, correct stand-in. Checked
+`.env` directly at the start of this step: `ANTHROPIC_API_KEY` and
+`OPENAI_API_KEY` are both still empty — the same missing-credential
+limitation documented since Step 3.2, now confirmed still true through
+Phase 10 and into Phase 11. Raised this to the user directly rather
+than working around it; they chose to skip ahead and revisit once a
+key is available (see `[[policypal_llm_key_blocker]]` memory — check
+this at the start of any future session before assuming 11.2 is still
+blocked). Step 11.3 below was deliberately designed to not depend on
+11.2 having run.
+
+### Step 11.3 — Seed script — DONE
+
+- `backend/scripts/seed_data.py`. DB-only portion (repositories used
+  directly, matching `download_gov_docs.py`'s "standalone script, no
+  HTTP round trips for what doesn't need them" precedent): 1 ADMIN
+  account, 5 employers with realistic placeholder names (Northwind
+  Traders, Globex Corporation, Acme Manufacturing, Initech Solutions,
+  Contoso Health Group — the standard non-trademark-conflicting
+  placeholder-company set), one Policy per `PolicyType` per employer
+  (25 total), 10-20 EMPLOYEE-role accounts per employer (79-85 total
+  across runs, randomized per `--seed`), each enrolled in 1-3 of their
+  employer's policies (randomized).
+- **Documented interpretation, one real account type beyond the literal
+  bullet list**: plan.md's Step 11.3 bullets only name "employees," but
+  added one EMPLOYER-role login account per company too — without it,
+  Step 10.8's employer portal would have no seeded account able to log
+  into it at all, which reads as an oversight in the bullet list rather
+  than an intentional exclusion.
+- **"Triggers Celery ingestion for all seeded documents" implemented by
+  reusing the real upload endpoint, not a bespoke DB/file-copy path**:
+  logs in as each employer's seeded HR contact and calls the actual
+  `POST /api/documents/upload` (Step 9.3) with real files discovered
+  from `data/gov_pdfs/` (Step 11.1) and `data/synthetic/` (Step 11.2 —
+  empty for now, picked up automatically once that step unblocks, no
+  script change needed). This was a deliberate design choice over
+  writing directly into the `document_uploads` Docker volume from a
+  host-run script: that volume isn't a host-reachable bind mount (only
+  `backend`/`celery-worker` can see it), so a host-run script has no
+  path into it *except* by asking the real, already-correct endpoint to
+  do the placement — reusing it also means Celery dispatch, versioning,
+  and `APP_UPLOAD_DIR` placement are exercised exactly as a real upload
+  would, not reimplemented. `--docs-per-employer` (default 3) caps how
+  many of the 69 real documents each employer gets, keeping a full seed
+  run fast rather than pushing every downloaded document through
+  ingestion. `--skip-ingestion` seeds the database only (no backend API
+  needed). Every seeded login shares one fixed dev-only password,
+  printed at the end of the run.
+- **Not idempotent, documented as such rather than engineered around**:
+  company names and every seeded email are fixed, not randomized, so
+  re-running against a database that already has this script's data
+  fails on a real unique-constraint violation rather than silently
+  creating a second batch — acceptable for a script that targets a
+  disposable local/demo database seeded once (or after a reset), not a
+  shared one.
+- Added `backend/tests/test_seed_data.py` (9 tests): `_seed_database`
+  tested against the real `db_session` fixture (Step 3.5's
+  rolled-back-transaction pattern — `_seed_database` deliberately never
+  commits internally, matching this codebase's Unit-of-Work convention,
+  so the real caller (`_main`) commits and a test caller just lets the
+  fixture roll back); `_discover_sample_documents`,
+  `_login`/`_upload_document`/`_trigger_ingestion` via
+  `httpx.MockTransport`, no real network calls.
+- **Real, generalizable process mistake caught by re-running the full
+  suite, not just the new test file**: initially decided to leave the
+  real end-to-end validation's seeded data in the shared local dev
+  Postgres afterward, reasoning it was this step's actual deliverable
+  output rather than throwaway ad-hoc test data (unlike Steps
+  10.4-10.8's validation rows, always cleaned up). That reasoning was
+  wrong: `tests/`'s `db_session` fixture's rollback doesn't protect
+  against unique-constraint checks against *already-committed* rows
+  from a prior manual run, so the leftover fixed-value seed data
+  collided with `test_seed_data.py`'s own inserts on a second run *and*
+  broke an unrelated, pre-existing test
+  (`test_document_repo.py::test_list_all_with_no_filter_spans_every_employer`,
+  which started seeing extra real rows it didn't expect). Corrected:
+  cleaned up every seeded row after each validation run, same as every
+  other step this phase — the local dev DB's correct steady state is
+  clean-migrated-but-unseeded; demo data regenerates on demand via
+  `make seed`. Recorded as a standing rule in the autopilot-workflow
+  memory so it isn't relearned next session.
+- Added a `make seed` target reference confirmation (the Makefile
+  already had this target scaffolded since Step 1.1/wherever the
+  Makefile was created; this step is what actually gave it a real
+  script to run — no Makefile change needed).
+- Validation: `ruff check`/`ruff format --check`/`mypy --strict` (both
+  the script and its test file) all pass. Full backend suite green,
+  622 tests (up from 613 — 9 new). **Ran the real script against the
+  full real stack twice** (`docker compose up -d postgres redis
+  backend celery-worker`, `alembic upgrade head`): confirmed via `psql`
+  the exact expected row counts (5 employers, 85 employees split
+  1/5/79 across admin/employer-contact/employee roles, 25 policies, 165
+  enrollments, 14 of 15 attempted document uploads succeeding — the
+  15th was `manifest.json` itself, correctly skipped as an unsupported
+  extension rather than crashing), and confirmed via `docker logs` on
+  `celery-worker` that ingestion tasks were genuinely picked up and
+  processed through PDF text extraction and into the chunking/embedding
+  step, failing exactly at the documented missing-LLM-credential
+  boundary (`litellm.APIError: ... Missing credentials`) — the same
+  known, pre-existing environment limitation, not a new bug; documents
+  correctly flip to `FAILED` with that message captured in
+  `error_message`, exactly matching Step 10.7's `DocumentHealth`
+  dashboard's expected failure-display path. Cleaned up all seeded rows
+  via `psql` afterward both times (see the process-mistake note above
+  for why this matters beyond tidiness), `docker compose down`.
+
 ## Next recommended step
 
-Continue with **Step 11.2 — Generate synthetic employer policy docs**
-(`feat/synthetic-document-generator` — generated docs stay git-ignored,
-per plan.md): `backend/scripts/generate_synthetic_docs.py`, using the
-already-wired `LiteLLMAdapter` (Step 3.2) to generate health/dental/
-vision plan summaries, employee handbook benefits sections, open
-enrollment guides, and FAQ documents for 5 fictional employers (50+
-documents target), converted to PDF/DOCX and saved under
-`data/synthetic/`. **Real constraint to check first**: Step 3.2's
-IMPLEMENTATION_STATUS entry noted `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`
-are both empty in this local `.env` — no real LLM credentials have been
-available in this environment through Phases 3-10. Confirm whether a
-key is now available before assuming this step can actually call a real
-model; if not, this is a genuine blocker to raise rather than something
-to mock around, since the whole point of this step is *real* generated
-content for the eval/demo corpus, not a test double.
+Phase 12 (RAG Evaluation Pipeline) is significantly blocked by the same
+missing LLM credential as Step 11.2: Step 12.1's golden dataset ideally
+references Step 11.2's per-employer synthetic content (not yet
+generated) for realistic personalized Q&A pairs, and Step 12.2's RAGAS
+runner needs a live LLM judge to compute metrics at all — so jumping
+into Phase 12 now would hit the same wall almost immediately.
+
+Continue with **Phase 13 — Dependency Injection Wiring (Final Review)**,
+**Step 13.1 — DI container audit** (`refactor/di-container-audit`):
+audit `backend/src/api/dependencies.py` to confirm every port has its
+real adapter wired (`LLMPort` → `LiteLLMAdapter`, `VectorStorePort` →
+`PineconeAdapter`, `EventBusPort` → `InMemoryEventBus`, `CachePort` →
+`RedisCacheAdapter`, every repository port → its Postgres adapter) and
+no hardcoded/mock dependency leaked into a real code path outside
+tests. Fully unblocked — no LLM/Pinecone credentials needed for a code
+audit. Once a real `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` becomes
+available in a future session, circle back to Step 11.2 → 12.1 → 12.2
+before or interleaved with Phase 14.
