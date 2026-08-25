@@ -107,6 +107,16 @@ class _FakeVectorStore(VectorStorePort):
         self.deleted_calls.append((namespace, metadata_filter))
 
 
+class _FailingVectorStore(_FakeVectorStore):
+    """Simulates an unreachable/misconfigured vector store (e.g. Pinecone
+    rejecting an unconfigured API key) to prove `delete_document` treats
+    vector cleanup as best-effort rather than failing the whole request."""
+
+    async def delete_by_metadata(self, namespace: str, metadata_filter: dict[str, Any]) -> None:
+        await super().delete_by_metadata(namespace, metadata_filter)
+        raise RuntimeError("vector store unreachable")
+
+
 class _FakeCeleryApp:
     def __init__(self) -> None:
         self.sent_tasks: list[dict[str, Any]] = []
@@ -508,6 +518,48 @@ def test_list_documents_returns_only_the_current_employers_documents() -> None:
     assert body[0]["title"] == "Mine"
 
 
+def test_list_documents_as_admin_with_no_filter_returns_every_tenants_documents() -> None:
+    first = _document(employer_id=uuid4(), title="First")
+    second = _document(employer_id=uuid4(), title="Second")
+    client = TestClient(
+        _test_app(
+            employer_id=uuid4(),
+            document_repository=_FakeDocumentRepository([first, second]),
+            current_user=TokenPayload(
+                user_id=uuid4(), employer_id=None, role=UserRole.ADMIN, token_type="access"
+            ),
+        )
+    )
+
+    response = client.get("/api/documents")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert {item["id"] for item in body} == {str(first.id), str(second.id)}
+
+
+def test_list_documents_as_admin_can_filter_by_employer_id() -> None:
+    target_employer_id = uuid4()
+    mine = _document(employer_id=target_employer_id, title="Mine")
+    someone_elses = _document(employer_id=uuid4(), title="Theirs")
+    client = TestClient(
+        _test_app(
+            employer_id=uuid4(),
+            document_repository=_FakeDocumentRepository([mine, someone_elses]),
+            current_user=TokenPayload(
+                user_id=uuid4(), employer_id=None, role=UserRole.ADMIN, token_type="access"
+            ),
+        )
+    )
+
+    response = client.get("/api/documents", params={"employer_id": str(target_employer_id)})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 1
+    assert body[0]["id"] == str(mine.id)
+
+
 # --- DELETE /documents/{id} (Step 9.3) --------------------------------------
 
 
@@ -536,6 +588,29 @@ def test_delete_document_purges_vectors_deactivates_chunks_and_removes_the_row()
     # segfaults under coverage.py on Linux CI (found the hard way — see
     # IMPLEMENTATION_STATUS.md's Step 9.3 entry). The fake's own dict is
     # already synchronous and just as direct.
+    assert document.id not in repository._documents
+
+
+def test_delete_document_still_succeeds_when_vector_store_cleanup_fails() -> None:
+    employer_id = uuid4()
+    document = _document(employer_id=employer_id)
+    repository = _FakeDocumentRepository([document])
+    chunk_repository = _FakeDocumentChunkRepository()
+    vector_store = _FailingVectorStore()
+    client = TestClient(
+        _test_app(
+            employer_id=employer_id,
+            document_repository=repository,
+            chunk_repository=chunk_repository,
+            vector_store=vector_store,
+        )
+    )
+
+    response = client.delete(f"/api/documents/{document.id}")
+
+    assert response.status_code == 204
+    assert vector_store.deleted_calls == [(str(employer_id), {"document_id": str(document.id)})]
+    assert chunk_repository.deactivated_document_ids == [document.id]
     assert document.id not in repository._documents
 
 

@@ -3173,21 +3173,119 @@ fix, the same script logs in successfully and lands on `/chat`
   on request). Cleaned up every seeded row via `psql` afterward,
   `docker compose down`.
 
+### Step 10.4 — Admin dashboard: management — DONE
+
+- `src/api/documents.ts` (`uploadDocument`/`listDocuments`/`deleteDocument`/
+  `getDocumentStatus`) and `src/api/employers.ts`
+  (`listEmployers`/`createEmployer`/`updateEmployer`/`deactivateEmployer` —
+  `deactivateEmployer` is `updateEmployer(id, { is_active: false })`, not a
+  separate endpoint; `DELETE /api/employers/{id}` exists per Step 9.4 but
+  plan.md's own bullet for this step says "deactivate," matching the
+  soft-delete pattern the rest of the app uses for tenant data) — both
+  named in `files/plan.md`'s file tree, neither built until now.
+- `src/stores/documentStore.ts` (Zustand — `documents`/`setDocuments`/
+  `addDocument`/`updateDocument`/`removeDocument`/`reset`, mirroring the
+  existing `employerStore.ts` shape from Step 10.1). `employerStore.ts`
+  already existed (Step 10.1 scaffolding) and needed no changes.
+- `src/components/admin/`: `DocumentUpload` (drag-and-drop + click-to-select,
+  client-side extension/size validation against the same
+  `pdf/docx/xlsx/xml`/25MB limits `document_routes.py` enforces server-side,
+  per-file progress indicator), `DocumentList` (status badges for
+  processing/ready/failed, version number, delete with a confirm dialog),
+  `EmployerManagement` (create form, inline edit, deactivate with a confirm
+  dialog — reusing `updateEmployer` for both edit and deactivate). Real
+  `AdminDashboard.tsx` replacing the placeholder, tabbed
+  (Document & Employer Management / Documents / Analytics — the last
+  disabled, "Coming Soon," until Step 10.5).
+- **Real backend gap found and fixed, not just a frontend task**: an
+  `ADMIN` account has no `employer_id` of its own (`core/domain/employee.py`
+  — nullable only for `admin`), but `GET /api/documents` (Step 9.3) was
+  hard-wired to `Depends(get_current_employer_id)`, which 500s for exactly
+  that role — the admin document-management screen this step asks for
+  cannot list anything without this. Fixed in `document_routes.py`:
+  `list_documents` now takes an optional `employer_id` query param and a
+  `TokenPayload` instead of the tenant-context dependency — an
+  `EMPLOYER`/`EMPLOYEE` caller still always gets their own token-derived
+  scope (the query param is ignored for them, same not-client-supplied rule
+  as every other tenant-scoped read), while an `ADMIN` caller gets every
+  tenant's documents via `document_repository.list_all()` (already existed
+  on `PostgresDocumentRepository`, added in Step 8.x and simply unused by
+  any route until now), optionally narrowed by the query param. Added
+  `employer_id` to `DocumentListItemResponse` so the admin document table
+  can be traced back to a tenant. Two new backend tests
+  (`test_list_documents_as_admin_with_no_filter_returns_every_tenants_documents`,
+  `...can_filter_by_employer_id`).
+- **Second real bug, found only by driving the actual upload → list →
+  delete flow through a real browser against the live stack, not by
+  mocks**: `DELETE /api/documents/{id}` (Step 9.3) called
+  `vector_store.delete_by_metadata()` with zero error handling around it.
+  This dev environment's `PINECONE_API_KEY` is empty (the same
+  no-credentials limitation documented since Step 3.3) — `PineconeAdapter`
+  correctly raises after its own retry policy declines to retry an auth
+  error, but the route had no `try`/`except` at all, so the unhandled
+  exception surfaced to the browser as a raw 500 (Chrome reports the
+  symptom as a CORS failure, since a 500 response never gets
+  `CORSMiddleware`'s headers attached — genuinely confusing to debug from
+  the frontend side alone until the real backend log was checked). Every
+  other place in this codebase treats a non-critical side effect as
+  best-effort (analytics logging, the in-memory event bus's per-handler
+  isolation) — a user deleting their own document should not be permanently
+  blocked because an unrelated third-party vector store is unreachable.
+  Fixed by wrapping the `vector_store.delete_by_metadata()` call in
+  `try`/`except Exception`, logging via `structlog.exception` (this file's
+  first use of `structlog` — added a module-level logger matching the
+  established adapter/worker pattern) and continuing to deactivate chunks
+  and delete the Postgres row regardless. New test
+  (`test_delete_document_still_succeeds_when_vector_store_cleanup_fails`,
+  a `_FailingVectorStore` fake) proves the delete still returns 204 and
+  still calls through to chunk deactivation + row deletion when vector
+  cleanup throws.
+- Validation: `ruff check`/`ruff format --check`/`mypy --strict src` all
+  pass; full backend suite green (591 tests, up from prior). Frontend:
+  `npm run lint` / `npx tsc --noEmit` / `npm run build` all clean.
+  **Verified end-to-end against the real stack** (`docker compose up -d
+  postgres redis backend`, `alembic upgrade head`, a real seeded `ADMIN`
+  account) with the established headless-Chromium/Playwright workflow:
+  logged in as admin, created an employer, edited its name, uploaded a
+  real PDF (had to resolve the created employer's id via a direct API call
+  first — the dashboard's employer list shows names only, not ids, which
+  is exactly what the admin employer-id upload field expects; a real
+  rough edge, noted below rather than silently fixed since it's outside
+  this step's stated scope), confirmed it appeared in the Documents tab
+  with a `Processing` badge (Celery wasn't running in this validation
+  pass, so it never advances to `Ready` — expected), deleted it, confirmed
+  the row disappeared, deactivated the employer — all through real clicks
+  against the live API, with 7 screenshots captured (reviewed directly in
+  this session, not embedded in the PR body, same limitation as Step
+  10.3). This run is exactly what caught both real bugs above; the first
+  run failed outright on both the list (500) and the delete (500/CORS)
+  before either fix existed. Cleaned up every seeded/test row via `psql`
+  afterward, `docker compose down`.
+- **Known rough edge, not fixed in this step**: the admin's "Employer
+  (Admin Only)" upload field expects a raw employer UUID with no way to
+  look one up from the dashboard itself (the employer list only shows
+  names). Usable today only by an admin willing to hit the API directly
+  or copy an id from `psql`/network tab. Flagging for Step 10.5+ rather
+  than scope-creeping a picker/typeahead into this step.
+- Also allowed `.claude/settings.local.json` to be gitignored (added a
+  `.gitignore` entry) — it was accumulating personal, session-specific
+  permission rules (own scratchpad paths, one-off exact command matches)
+  that don't belong in a shared, git-tracked file; a new git-tracked
+  `.claude/settings.json` was added separately with the small, genuinely
+  reusable read-only command allowlist (`ruff check`/`format --check`,
+  `mypy --strict`, `pytest --cov`, `docker compose ps`/`logs`) any
+  contributor running this repo's own tooling would want.
+
 ## Next recommended step
 
-Continue with **Step 10.4 — Admin dashboard: management**
-(`feat/admin-management-ui`, screenshots required in the PR per
-plan.md): document upload with drag-and-drop + progress indicator,
-document list with status badges/version numbers
-(`GET /api/documents`, `POST /api/documents/upload`,
-`DELETE /api/documents/{id}` — Step 9.3), and employer management
-(create/edit/deactivate — `POST`/`GET`/`PATCH`/`DELETE /api/employers`,
-Step 9.4). Needs a new `src/api/documents.ts` and `src/api/employers.ts`
-(both named in `files/plan.md`'s file tree, neither built yet) and a
-real `AdminDashboard.tsx` replacing the placeholder. The
-headless-Chromium screenshot workflow (Playwright, standalone in the
-scratchpad, `npm install --no-save playwright` — never touches
-`frontend/package.json`) is now the established way to produce and
-verify real screenshots without the Claude-in-Chrome extension; keep
-using it for every remaining Phase 10 step unless the extension
-reconnects.
+Continue with **Step 10.5 — Admin dashboard: overview & cost**
+(`feat/admin-cost-dashboard-ui`, screenshots required in the PR per
+plan.md): `AnalyticsDashboard` (top-level summary cards — total queries
+today/week/month, active users, documents indexed, average satisfaction
+score, total LLM cost this month) and `CostDashboard` (daily-spend line
+chart, breakdown table by model tier and by employer, days over threshold
+highlighted, date range picker) — both backed by the Step 9.6 admin
+analytics routes (`GET /api/admin/overview`, `GET /api/admin/cost-dashboard`,
+`GET /api/admin/cost-dashboard/alerts`). Will need a charting library (none
+installed yet — plan.md doesn't name one) and a new `src/api/admin.ts`.
+Same headless-Chromium/Playwright screenshot workflow as Steps 10.3/10.4.

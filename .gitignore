@@ -30,6 +30,9 @@ build/
 .DS_Store
 Thumbs.db
 
+# --- Claude Code personal settings ---
+.claude/settings.local.json
+
 # --- Project data (generated/downloaded, never committed) ---
 data/gov_pdfs/
 data/synthetic/
