@@ -5,6 +5,8 @@ to import adapters for this purpose only (files/coding-standards.md
 section 3) — no other layer does.
 """
 
+from typing import Any
+
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,7 +19,10 @@ from adapters.persistence.conversation_repo import (
     PostgresMessageRepository,
 )
 from adapters.persistence.database import get_session
-from adapters.persistence.document_repo import PostgresDocumentRepository
+from adapters.persistence.document_repo import (
+    PostgresDocumentChunkRepository,
+    PostgresDocumentRepository,
+)
 from adapters.persistence.employee_repo import PostgresEmployeeRepository
 from adapters.persistence.employer_repo import PostgresEmployerRepository
 from adapters.persistence.policy_repo import PostgresEnrollmentRepository
@@ -29,6 +34,7 @@ from core.ports.llm_port import LLMPort
 from core.ports.repository_ports import (
     AnalyticsRepository,
     ConversationRepository,
+    DocumentChunkRepository,
     DocumentRepository,
     EmployeeRepository,
     EmployerRepository,
@@ -37,6 +43,7 @@ from core.ports.repository_ports import (
 )
 from core.ports.vector_store_port import VectorStorePort
 from core.services.auth_service import AuthService
+from core.services.document_service import DocumentService
 from core.services.guardrails_service import GuardrailsService
 from core.services.query_router import QueryRouter
 from core.services.rag_service import RAGService
@@ -52,6 +59,12 @@ def get_employer_repository(session: AsyncSession = Depends(get_session)) -> Emp
 
 def get_document_repository(session: AsyncSession = Depends(get_session)) -> DocumentRepository:
     return PostgresDocumentRepository(session)
+
+
+def get_document_chunk_repository(
+    session: AsyncSession = Depends(get_session),
+) -> DocumentChunkRepository:
+    return PostgresDocumentChunkRepository(session)
 
 
 def get_conversation_repository(
@@ -119,6 +132,40 @@ def get_event_bus() -> EventBusPort:
     # instance would have nothing to make it more useful than a fresh one
     # until that's built.
     return InMemoryEventBus()
+
+
+def get_document_service(
+    document_repository: DocumentRepository = Depends(get_document_repository),
+    event_bus: EventBusPort = Depends(get_event_bus),
+) -> DocumentService:
+    return DocumentService(document_repository, event_bus)
+
+
+def get_celery_app() -> Any:
+    # `Celery`'s own type resolves to `Any` (celery.* has no stubs, per
+    # pyproject.toml's ignore_missing_imports override) — same situation
+    # as every other Celery-typed value in this codebase
+    # (`workers/celery_app.py`'s own `app`, `@app.task(...)`'s return).
+    # A DI function (not a bare module-level import in the route file)
+    # so tests can override it with a fake `send_task` that doesn't need
+    # a real Redis broker — same reasoning as every other `get_*` here.
+    #
+    # The import is deliberately *inside* this function, not at module
+    # level (same pattern `health_routes.py`'s `_check_pinecone` already
+    # uses for `pinecone`): `workers.celery_app` constructs a real
+    # `Celery(...)` app (a real Redis broker/backend client) as an
+    # import-time side effect. `api/dependencies.py` is imported by
+    # nearly every route test file, so a module-level import here would
+    # have made *every one of them* construct that Celery app too — a
+    # real, CI-only (Linux) regression found the hard way: the whole
+    # suite passed, 495/495, 100% coverage, and then segfaulted during
+    # interpreter shutdown anyway (a known class of celery/billiard +
+    # coverage.py exit-time interaction). Deferring the import to inside
+    # the function means only a request (or a test that actually calls
+    # this dependency) ever constructs it.
+    from workers.celery_app import app as celery_app
+
+    return celery_app
 
 
 def get_query_router() -> QueryRouter:

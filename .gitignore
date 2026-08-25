@@ -37,6 +37,7 @@ eval/reports/
 
 # --- Upload artifacts ---
 files.zip
+backend/src/uploads/
 
 # --- Logs ---
 *.log

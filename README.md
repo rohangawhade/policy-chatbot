@@ -108,6 +108,8 @@ Inside the Compose network, services reach each other by service name (`redis`, 
 
 **Adding a new Celery task family**: `workers/celery_app.py`'s `task_routes` sends each task-name prefix (e.g. `embedding.*`) to its own queue. A new prefix needs two changes, not one — the `task_routes` entry *and* `-Q` on the `celery-worker` command in both `docker-compose.yml` and `docker-compose.override.yml` — a queue nothing consumes just accumulates unprocessed tasks silently, with no error. `dead_letter` is deliberately never in `-Q`: it's where a task lands after exhausting its own retries, for manual inspection/replay via a one-off `celery -A workers.celery_app worker -Q dead_letter`, not automatic reprocessing.
 
+**Uploaded documents**: `backend` (the upload route) and `celery-worker` (the ingestion task) are separate containers, so uploaded files are saved to the `document_uploads` named volume — mounted at `/app/uploads` in both services — not either container's own ephemeral filesystem. `docker compose down -v` also removes this volume.
+
 </details>
 
 <details>
@@ -185,8 +187,11 @@ Nothing tracked yet — this section grows as issues are discovered and fixed.
 | GET    | `/api/chat/conversations`                 | Access token         | List the current user's own conversations.                                                        |
 | GET    | `/api/chat/conversations/{id}/messages`   | Access token (owner-scoped) | Get a conversation's message history.                                                      |
 | POST   | `/api/chat/conversations/{id}/messages`   | Access token (owner-scoped) | Send a message; returns an SSE stream of response tokens ending with a `done` event. |
+| POST   | `/api/documents/upload`                   | Access token (employer or admin) | Upload a benefits document for ingestion. Returns the new `PROCESSING` document.      |
+| GET    | `/api/documents`                          | Access token         | List documents for the current employer.                                                          |
+| DELETE | `/api/documents/{id}`                     | Access token (employer or admin) | Remove a document and purge its vectors.                                                 |
 
-Remaining Phase 9 routes (document upload/list/delete, employer/employee management, feedback, admin analytics) land next. This table will be kept current as endpoints are added.
+Remaining Phase 9 routes (employer/employee management, feedback, admin analytics) land next. This table will be kept current as endpoints are added.
 
 ## Project Structure
 

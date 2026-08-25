@@ -1,32 +1,70 @@
-"""Document ingestion status endpoints (files/plan.md Step 8.3).
+"""Document routes (files/plan.md Step 9.3, plus Step 8.3's earlier
+status-check endpoints already in this file): upload, list, and delete,
+completing the document resource alongside the ingestion-status
+endpoints Step 8.3 added early.
 
-Scoped deliberately narrow: just status-checking (a snapshot endpoint
-and an SSE stream), not the full upload/list/delete resource — that's
-Phase 9's `POST /api/documents/upload` etc. This step's own plan.md
-bullet ("API endpoint to check document processing status. SSE push to
-frontend when processing completes.") is really Phase 9 API-route work
-pulled forward a step early, so it stays scoped to exactly what it says.
+Response shape matches the established convention from Step 9.1 (see
+`auth_routes.py`'s module docstring) — this file returns its Pydantic
+model(s) directly, not wrapped in `files/coding-standards.md` section
+7's `APIResponse[T]` envelope.
 """
 
 import asyncio
 import json
 from collections.abc import AsyncIterator
-from uuid import UUID
+from pathlib import Path
+from typing import Any
+from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from pydantic import BaseModel
 from starlette.responses import StreamingResponse
 
-from api.dependencies import get_document_repository
+from api.dependencies import (
+    get_celery_app,
+    get_document_chunk_repository,
+    get_document_repository,
+    get_document_service,
+    get_vector_store_port,
+)
+from api.middleware.auth_middleware import require_role
 from api.middleware.tenant_context import get_current_employer_id
+from config import app_config
 from core.domain.document import Document, DocumentStatus
-from core.ports.repository_ports import DocumentRepository
+from core.domain.employee import UserRole
+from core.domain.policy import PolicyType
+from core.ports.repository_ports import DocumentChunkRepository, DocumentRepository
+from core.ports.vector_store_port import VectorStorePort
+from core.services.auth_service import TokenPayload
+from core.services.document_service import DocumentService
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
+
+# A module-level singleton, not an inline `Depends(require_role(...))` at
+# each call site — ruff's B008 flags a bare function call as a parameter
+# default (`extend-immutable-calls` only covers the outer `Depends`
+# itself), and this is genuinely reusable: both upload and delete are
+# "employer or admin only".
+_require_uploader_or_admin = require_role(UserRole.EMPLOYER, UserRole.ADMIN)
 
 _POLL_INTERVAL_SECONDS = 2.0
 _MAX_STREAM_SECONDS = 300.0
 _TERMINAL_STATUSES = (DocumentStatus.READY, DocumentStatus.FAILED)
+
+# The set of formats this route accepts, independent of
+# `ProcessorFactory`'s own registry (`adapters/document_processors/`) —
+# `api/` may import adapters only for DI wiring (files/coding-standards.md
+# section 3), not to call adapter logic directly from a route handler.
+# Adding a new document format therefore needs a second, small update
+# here too, alongside `ProcessorFactory.register(...)` — an accepted,
+# documented coupling, the same shape as the queue-routing "two-place
+# change" already established in Steps 8.1/8.2.
+_ALLOWED_UPLOAD_CONTENT_TYPES: dict[str, frozenset[str]] = {
+    "pdf": frozenset({"application/pdf"}),
+    "docx": frozenset({"application/vnd.openxmlformats-officedocument.wordprocessingml.document"}),
+    "xlsx": frozenset({"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}),
+    "xml": frozenset({"application/xml", "text/xml"}),
+}
 
 
 class DocumentStatusResponse(BaseModel):
@@ -34,6 +72,14 @@ class DocumentStatusResponse(BaseModel):
     status: DocumentStatus
     version: int
     error_message: str | None
+
+
+class DocumentListItemResponse(BaseModel):
+    id: UUID
+    title: str
+    policy_type: PolicyType | None
+    status: DocumentStatus
+    version: int
 
 
 async def _get_owned_document(
@@ -48,6 +94,21 @@ async def _get_owned_document(
     return document
 
 
+async def _get_deletable_document(
+    document_repository: DocumentRepository, document_id: UUID, current_user: TokenPayload
+) -> Document:
+    """Same not-found-vs-forbidden reasoning as `_get_owned_document`,
+    except an `ADMIN` (no `employer_id` of its own — a superuser scoped
+    to no single tenant, `core/domain/employee.py`) may delete any
+    employer's document."""
+    document = await document_repository.get(document_id)
+    if document is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
+    if current_user.role != UserRole.ADMIN and document.employer_id != current_user.employer_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
+    return document
+
+
 def _to_response(document: Document) -> DocumentStatusResponse:
     return DocumentStatusResponse(
         id=document.id,
@@ -55,6 +116,153 @@ def _to_response(document: Document) -> DocumentStatusResponse:
         version=document.version,
         error_message=document.error_message,
     )
+
+
+def _to_list_item(document: Document) -> DocumentListItemResponse:
+    return DocumentListItemResponse(
+        id=document.id,
+        title=document.title,
+        policy_type=document.policy_type,
+        status=document.status,
+        version=document.version,
+    )
+
+
+def _extension_of(filename: str) -> str:
+    return Path(filename).suffix.lstrip(".").lower()
+
+
+def _resolve_upload_employer_id(current_user: TokenPayload, employer_id_field: UUID | None) -> UUID:
+    """`EMPLOYER`-role accounts always upload under their own
+    `employer_id` (from the token, never a client-supplied value) — an
+    `ADMIN` has none, so it must name one explicitly (files/plan.md's
+    "employer/admin only" for this endpoint)."""
+    if current_user.employer_id is not None:
+        return current_user.employer_id
+    if employer_id_field is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="employer_id is required when uploading as an admin account.",
+        )
+    return employer_id_field
+
+
+def _save_upload(employer_id: UUID, extension: str, content: bytes) -> Path:
+    upload_dir = Path(app_config.upload_dir) / str(employer_id)
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    destination = upload_dir / f"{uuid4()}.{extension}"
+    destination.write_bytes(content)
+    return destination
+
+
+@router.post("/upload", status_code=status.HTTP_202_ACCEPTED)
+async def upload_document(
+    file: UploadFile = File(...),
+    title: str = Form(...),
+    policy_type: PolicyType | None = Form(None),
+    employer_id: UUID | None = Form(None),
+    current_user: TokenPayload = Depends(_require_uploader_or_admin),
+    document_repository: DocumentRepository = Depends(get_document_repository),
+    document_service: DocumentService = Depends(get_document_service),
+    celery_app: Any = Depends(get_celery_app),
+) -> DocumentStatusResponse:
+    """Upload a benefits document for ingestion (employer or admin only).
+
+    Validates the file (extension, content type, size), saves it to
+    local disk (`APP_UPLOAD_DIR` — no S3/blob-storage port exists, per
+    Step 8.2's explicit scope note), registers it as a `Document` row
+    (`DocumentService.register_upload()`, Step 7.1 — re-uploading the
+    same `title` under the same employer bumps the version
+    automatically rather than creating an unrelated document), then
+    hands it to `ingestion.process_document_upload` (Step 8.2) via
+    Celery for the actual extraction/chunking/embedding. Returns
+    immediately with the new `PROCESSING` document — poll `/status` or
+    `/status/stream` (Step 8.3) for completion.
+    """
+    target_employer_id = _resolve_upload_employer_id(current_user, employer_id)
+
+    # `UploadFile.filename` is typed `str | None`, but FastAPI's own
+    # multipart parsing never actually delivers a `File(...)` parameter
+    # with an empty/missing filename — a part with no filename fails
+    # request validation before an `UploadFile` is ever constructed
+    # (confirmed empirically while writing this route's tests: neither
+    # `("", ...)` nor `(None, ...)` reaches this function at all). A type
+    # narrowing, not a real HTTP-error branch.
+    assert file.filename is not None
+    extension = _extension_of(file.filename)
+    allowed_content_types = _ALLOWED_UPLOAD_CONTENT_TYPES.get(extension)
+    if allowed_content_types is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Unsupported file type: .{extension or '?'}",
+        )
+    if file.content_type not in allowed_content_types:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Content type {file.content_type!r} doesn't match a .{extension} file.",
+        )
+
+    content = await file.read()
+    max_bytes = app_config.max_upload_size_mb * 1024 * 1024
+    if len(content) > max_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"File exceeds the {app_config.max_upload_size_mb}MB upload limit.",
+        )
+
+    previous = await document_repository.get_latest_version(target_employer_id, title)
+    destination = _save_upload(target_employer_id, extension, content)
+    created = await document_service.register_upload(
+        employer_id=target_employer_id,
+        title=title,
+        source_type=extension,
+        source_path=str(destination),
+        policy_type=policy_type,
+    )
+    celery_app.send_task(
+        "ingestion.process_document_upload",
+        kwargs={
+            "document_data": created.model_dump(mode="json"),
+            "previous_version_data": previous.model_dump(mode="json") if previous else None,
+        },
+    )
+    return _to_response(created)
+
+
+@router.get("")
+async def list_documents(
+    employer_id: UUID = Depends(get_current_employer_id),
+    document_repository: DocumentRepository = Depends(get_document_repository),
+) -> list[DocumentListItemResponse]:
+    documents = await document_repository.list_by_employer(employer_id)
+    return [_to_list_item(document) for document in documents]
+
+
+@router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_document(
+    document_id: UUID,
+    current_user: TokenPayload = Depends(_require_uploader_or_admin),
+    document_repository: DocumentRepository = Depends(get_document_repository),
+    chunk_repository: DocumentChunkRepository = Depends(get_document_chunk_repository),
+    vector_store: VectorStorePort = Depends(get_vector_store_port),
+) -> None:
+    """Remove a document and its vectors (employer or admin only).
+
+    **Known gap, not addressed by this step**: cached RAG responses
+    built from this document's chunks (`RAGService`'s Redis cache,
+    Step 3.4/6.3) are not invalidated here — `invalidate_version_cache()`
+    (Step 7.3) exists but still has no caller anywhere in the app (a
+    standing gap tracked in IMPLEMENTATION_STATUS.md since that step,
+    blocked on the same missing event-subscriber infrastructure as
+    Step 6.1's `GuardrailRejectionEvent`). A deleted document's stale
+    answers can outlive it in cache until that's resolved.
+    """
+    document = await _get_deletable_document(document_repository, document_id, current_user)
+    await vector_store.delete_by_metadata(
+        str(document.employer_id), {"document_id": str(document.id)}
+    )
+    await chunk_repository.deactivate_by_document(document.id)
+    await document_repository.delete(document.id)
 
 
 @router.get("/{document_id}/status")

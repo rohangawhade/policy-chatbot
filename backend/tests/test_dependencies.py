@@ -12,7 +12,10 @@ from adapters.persistence.conversation_repo import (
     PostgresConversationRepository,
     PostgresMessageRepository,
 )
-from adapters.persistence.document_repo import PostgresDocumentRepository
+from adapters.persistence.document_repo import (
+    PostgresDocumentChunkRepository,
+    PostgresDocumentRepository,
+)
 from adapters.persistence.employee_repo import PostgresEmployeeRepository
 from adapters.persistence.employer_repo import PostgresEmployerRepository
 from adapters.persistence.policy_repo import PostgresEnrollmentRepository
@@ -21,8 +24,11 @@ from api.dependencies import (
     get_analytics_repository,
     get_auth_service,
     get_cache_port,
+    get_celery_app,
     get_conversation_repository,
+    get_document_chunk_repository,
     get_document_repository,
+    get_document_service,
     get_employee_repository,
     get_employer_repository,
     get_enrollment_repository,
@@ -39,6 +45,7 @@ from core.domain.employee import UserRole
 from core.ports.repository_ports import (
     AnalyticsRepository,
     ConversationRepository,
+    DocumentChunkRepository,
     DocumentRepository,
     EmployeeRepository,
     EmployerRepository,
@@ -46,9 +53,11 @@ from core.ports.repository_ports import (
     MessageRepository,
 )
 from core.services.auth_service import AuthService
+from core.services.document_service import DocumentService
 from core.services.guardrails_service import GuardrailsService
 from core.services.query_router import QueryRouter
 from core.services.rag_service import RAGService
+from workers.celery_app import app as celery_app
 
 
 def test_get_employee_repository_returns_a_postgres_employee_repository(
@@ -184,3 +193,24 @@ def test_get_rag_service_wires_every_collaborator(db_session: AsyncSession) -> N
     )
 
     assert isinstance(service, RAGService)
+
+
+def test_get_document_chunk_repository_returns_a_postgres_document_chunk_repository(
+    db_session: AsyncSession,
+) -> None:
+    repository = get_document_chunk_repository(db_session)
+
+    assert isinstance(repository, PostgresDocumentChunkRepository)
+    assert isinstance(repository, DocumentChunkRepository)
+
+
+def test_get_document_service_wires_the_repository_and_event_bus(
+    db_session: AsyncSession,
+) -> None:
+    service = get_document_service(get_document_repository(db_session), get_event_bus())
+
+    assert isinstance(service, DocumentService)
+
+
+def test_get_celery_app_returns_the_shared_celery_app() -> None:
+    assert get_celery_app() is celery_app

@@ -36,7 +36,7 @@ from adapters.chunking.semantic_chunker import SemanticChunker
 from adapters.document_processors.processor_factory import ProcessorFactory
 from adapters.event_bus.in_memory_event_bus import InMemoryEventBus
 from adapters.llm.litellm_adapter import LiteLLMAdapter
-from adapters.persistence.database import async_session_factory
+from adapters.persistence.database import async_session_factory, engine
 from adapters.persistence.document_repo import (
     PostgresDocumentChunkRepository,
     PostgresDocumentRepository,
@@ -92,47 +92,60 @@ def process_document_upload(
 
 
 async def _process_document_upload(document: Document, previous_version: Document | None) -> None:
-    async with async_session_factory() as session:
-        document_repository = PostgresDocumentRepository(session)
-        event_bus = InMemoryEventBus()
-        llm = LiteLLMAdapter()
+    try:
+        async with async_session_factory() as session:
+            document_repository = PostgresDocumentRepository(session)
+            event_bus = InMemoryEventBus()
+            llm = LiteLLMAdapter()
 
-        try:
-            processor = ProcessorFactory.get(document.source_type)
-            text = processor.extract_text(document.source_path)
+            try:
+                processor = ProcessorFactory.get(document.source_type)
+                text = processor.extract_text(document.source_path)
 
-            chunker = ChunkerPipeline(
-                MetadataExtractor(),
-                SemanticChunker(llm=llm, embedding_model=llm_config.embedding_model),
-            )
-            chunks = await chunker.process(text, document)
+                chunker = ChunkerPipeline(
+                    MetadataExtractor(),
+                    SemanticChunker(llm=llm, embedding_model=llm_config.embedding_model),
+                )
+                chunks = await chunker.process(text, document)
 
-            embedding_service = EmbeddingService(
-                llm=llm,
-                vector_store=PineconeAdapter(
-                    api_key=pinecone_config.api_key or "unconfigured",
-                    index_name=pinecone_config.index_name,
-                ),
-                chunk_repository=PostgresDocumentChunkRepository(session),
-                event_bus=event_bus,
-                embedding_model=llm_config.embedding_model,
-            )
-            await embedding_service.embed_and_store(chunks, document, previous_version)
-        except Exception as exc:
-            logger.exception(
-                "document_ingestion_failed", document_id=str(document.id), error=str(exc)
-            )
-            document.status = DocumentStatus.FAILED
-            document.error_message = str(exc)
+                embedding_service = EmbeddingService(
+                    llm=llm,
+                    vector_store=PineconeAdapter(
+                        api_key=pinecone_config.api_key or "unconfigured",
+                        index_name=pinecone_config.index_name,
+                    ),
+                    chunk_repository=PostgresDocumentChunkRepository(session),
+                    event_bus=event_bus,
+                    embedding_model=llm_config.embedding_model,
+                )
+                await embedding_service.embed_and_store(chunks, document, previous_version)
+            except Exception as exc:
+                logger.exception(
+                    "document_ingestion_failed", document_id=str(document.id), error=str(exc)
+                )
+                document.status = DocumentStatus.FAILED
+                document.error_message = str(exc)
+                await document_repository.update(document)
+                await session.commit()
+                raise
+
+            document.status = DocumentStatus.READY
+            document.error_message = None
             await document_repository.update(document)
+
+            await event_bus.publish(
+                DocumentProcessedEvent(document_id=document.id, employer_id=document.employer_id)
+            )
             await session.commit()
-            raise
-
-        document.status = DocumentStatus.READY
-        document.error_message = None
-        await document_repository.update(document)
-
-        await event_bus.publish(
-            DocumentProcessedEvent(document_id=document.id, employer_id=document.employer_id)
-        )
-        await session.commit()
+    finally:
+        # See the matching comment in `embedding_task.py`: `engine`
+        # (adapters/persistence/database.py) is a module-level singleton
+        # shared across every task this worker process ever runs, but
+        # each task gets its own fresh event loop via `asyncio.run()`
+        # (below) — a pooled connection from *this* loop fails with
+        # "attached to a different loop" if the *next* task's different
+        # loop reuses it. Disposing here leaves the pool empty for that
+        # next task. Real bug, not hypothetical — found via this exact
+        # step's real-stack validation the moment a real worker
+        # processed a second task.
+        await engine.dispose()
