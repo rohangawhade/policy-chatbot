@@ -4,8 +4,11 @@ import CostDashboard from "../components/admin/CostDashboard";
 import DocumentList from "../components/admin/DocumentList";
 import DocumentUpload from "../components/admin/DocumentUpload";
 import EmployerManagement from "../components/admin/EmployerManagement";
+import FlaggedResponses from "../components/admin/FlaggedResponses";
+import GuardrailsLog from "../components/admin/GuardrailsLog";
+import UnansweredQueries from "../components/admin/UnansweredQueries";
 
-type Tab = "management" | "documents" | "analytics";
+type Tab = "management" | "documents" | "analytics" | "quality";
 
 export default function AdminDashboard() {
   const [activeTab, setActiveTab] = useState<Tab>("management");
@@ -48,6 +51,16 @@ export default function AdminDashboard() {
             >
               Analytics
             </button>
+            <button
+              onClick={() => setActiveTab("quality")}
+              className={`px-4 py-3 font-medium transition ${
+                activeTab === "quality"
+                  ? "border-b-2 border-blue-600 text-blue-600"
+                  : "text-gray-600 hover:text-gray-900"
+              }`}
+            >
+              Quality Monitoring
+            </button>
           </div>
         </div>
 
@@ -66,6 +79,14 @@ export default function AdminDashboard() {
             <div className="space-y-6">
               <AnalyticsDashboard />
               <CostDashboard />
+            </div>
+          )}
+
+          {activeTab === "quality" && (
+            <div className="space-y-6">
+              <FlaggedResponses />
+              <UnansweredQueries />
+              <GuardrailsLog />
             </div>
           )}
         </div>

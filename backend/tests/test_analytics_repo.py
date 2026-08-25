@@ -22,6 +22,7 @@ from core.domain.analytics import (
 from core.domain.conversation import Conversation, Message, MessageRole
 from core.domain.employee import Employee, UserRole
 from core.domain.employer import Employer
+from core.domain.policy import PolicyType
 from core.ports.repository_ports import AnalyticsRepository
 
 
@@ -109,6 +110,7 @@ async def test_record_flagged_response_and_list_flagged_responses(
         query_text="what's my HSA limit?",
         top_similarity_score=0.42,
         flag_reason="low_retrieval_confidence",
+        policy_type=PolicyType.HEALTH,
     )
 
     await repo.record_flagged_response(flagged)
@@ -117,6 +119,7 @@ async def test_record_flagged_response_and_list_flagged_responses(
     assert len(result) == 1
     assert result[0].flag_reason == "low_retrieval_confidence"
     assert result[0].status == FlaggedResponseStatus.PENDING_REVIEW
+    assert result[0].policy_type == PolicyType.HEALTH
 
 
 async def test_list_flagged_responses_filters_by_status(db_session: AsyncSession) -> None:

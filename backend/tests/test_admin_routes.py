@@ -159,7 +159,7 @@ class _FakeMessageRepository(MessageRepository):
         self._messages = list(messages or [])
 
     async def get(self, entity_id: UUID) -> Message | None:
-        raise NotImplementedError
+        return next((m for m in self._messages if m.id == entity_id), None)
 
     async def create(self, entity: Message) -> Message:
         raise NotImplementedError
@@ -484,6 +484,62 @@ def test_list_flagged_responses_returns_every_row() -> None:
     assert body[0]["status"] == "pending_review"
 
 
+def test_list_flagged_responses_enriches_from_the_flagged_message() -> None:
+    message = Message(
+        conversation_id=uuid4(),
+        employer_id=uuid4(),
+        role=MessageRole.ASSISTANT,
+        content="Your HSA limit is $4,150 for 2026.",
+        model_used="gpt-4o-mini",
+        policy_type=PolicyType.HEALTH,
+    )
+    flagged = FlaggedResponse(
+        employer_id=uuid4(),
+        conversation_id=uuid4(),
+        message_id=message.id,
+        query_text="hsa limit?",
+        flag_reason="low_retrieval_confidence",
+    )
+    client = TestClient(
+        _test_app(
+            analytics_repository=_FakeAnalyticsRepository(flagged=[flagged]),
+            message_repository=_FakeMessageRepository([message]),
+        )
+    )
+
+    response = client.get("/api/admin/flagged-responses")
+
+    assert response.status_code == 200
+    body = response.json()[0]
+    assert body["response_text"] == "Your HSA limit is $4,150 for 2026."
+    assert body["model_used"] == "gpt-4o-mini"
+    assert body["policy_type"] == "health"
+
+
+def test_list_flagged_responses_leaves_enrichment_null_when_message_is_gone() -> None:
+    flagged = FlaggedResponse(
+        employer_id=uuid4(),
+        conversation_id=uuid4(),
+        message_id=uuid4(),
+        query_text="hsa limit?",
+        flag_reason="low_retrieval_confidence",
+    )
+    client = TestClient(
+        _test_app(
+            analytics_repository=_FakeAnalyticsRepository(flagged=[flagged]),
+            message_repository=_FakeMessageRepository([]),
+        )
+    )
+
+    response = client.get("/api/admin/flagged-responses")
+
+    assert response.status_code == 200
+    body = response.json()[0]
+    assert body["response_text"] is None
+    assert body["model_used"] is None
+    assert body["policy_type"] is None
+
+
 def test_update_flagged_response_marks_it_reviewed() -> None:
     flagged = FlaggedResponse(
         employer_id=uuid4(),
@@ -585,6 +641,34 @@ def test_list_unanswered_queries_only_returns_low_confidence_flags() -> None:
     assert response.status_code == 200
     body = response.json()
     assert [row["id"] for row in body] == [str(low_confidence.id)]
+
+
+def test_list_unanswered_queries_includes_policy_type_for_grouping() -> None:
+    message = Message(
+        conversation_id=uuid4(),
+        employer_id=uuid4(),
+        role=MessageRole.ASSISTANT,
+        content="I don't have enough information to answer that.",
+        policy_type=PolicyType.DENTAL,
+    )
+    flagged = FlaggedResponse(
+        employer_id=uuid4(),
+        conversation_id=uuid4(),
+        message_id=message.id,
+        query_text="orthodontia coverage?",
+        flag_reason="low_retrieval_confidence",
+    )
+    client = TestClient(
+        _test_app(
+            analytics_repository=_FakeAnalyticsRepository(flagged=[flagged]),
+            message_repository=_FakeMessageRepository([message]),
+        )
+    )
+
+    response = client.get("/api/admin/unanswered-queries")
+
+    assert response.status_code == 200
+    assert response.json()[0]["policy_type"] == "dental"
 
 
 def test_get_topic_heatmap_groups_by_date_and_policy_type() -> None:

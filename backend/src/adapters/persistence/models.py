@@ -258,6 +258,14 @@ class FlaggedResponse(Base, TimestampMixin):
         Enum(FlaggedResponseStatus, name="flagged_response_status"),
         default=FlaggedResponseStatus.PENDING_REVIEW,
     )
+    # Mirrors the query's already-detected policy type (`RAGService.
+    # _detect_policy_type`, same source as `Message.policy_type`) --
+    # denormalized here, not joined from `messages` at read time, so
+    # Step 10.6's "group unanswered queries by employer and policy type"
+    # doesn't need to guess which message in the conversation was the
+    # query. Nullable: `None` means no policy type was detected, same
+    # meaning as everywhere else this enum is optional.
+    policy_type: Mapped[PolicyType | None] = mapped_column(Enum(PolicyType, name="policy_type"))
 
 
 class GuardrailRejection(Base):

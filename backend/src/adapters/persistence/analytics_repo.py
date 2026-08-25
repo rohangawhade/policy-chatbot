@@ -20,7 +20,12 @@ from core.domain.analytics import (
     LLMCostLog,
     RequestLatencyLog,
 )
+from core.domain.policy import PolicyType
 from core.ports.repository_ports import AnalyticsRepository
+
+
+def _orm_policy_type(policy_type: PolicyType | None) -> models.PolicyType | None:
+    return models.PolicyType[policy_type.name] if policy_type is not None else None
 
 
 class PostgresAnalyticsRepository(AnalyticsRepository):
@@ -69,6 +74,7 @@ class PostgresAnalyticsRepository(AnalyticsRepository):
                 top_similarity_score=flagged.top_similarity_score,
                 flag_reason=flagged.flag_reason,
                 status=models.FlaggedResponseStatus[flagged.status.name],
+                policy_type=_orm_policy_type(flagged.policy_type),
                 created_at=flagged.created_at,
                 updated_at=flagged.updated_at,
             )
