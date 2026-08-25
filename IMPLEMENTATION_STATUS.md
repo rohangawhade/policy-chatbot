@@ -2984,14 +2984,72 @@ match CI exactly.
   yet — there's no real login flow to produce a token until Step 10.2 —
   so that remains to be exercised end-to-end once that step lands.
 
+### Step 10.2 — Auth pages — DONE
+
+- `src/api/auth.ts` — `login(email, password)` (`POST /api/auth/login`,
+  form-encoded `username`/`password` — the exact `OAuth2PasswordRequestForm`
+  contract `auth_routes.py` expects, not JSON) and `refresh(refreshToken)`
+  (`POST /api/auth/refresh`). No `register()` — there's no self-registration
+  UI anywhere in `files/plan.md`'s Phase 10 file tree (only
+  `LoginPage`/`ChatPage`/`AdminDashboard`/`EmployerPortal`); accounts are
+  created via the management-side `POST /api/employees` in Step 10.4/10.8's
+  admin/employer UIs instead, matching Step 9.4's backend design
+  ("management-side creation... distinct from open self-registration").
+- `src/api/client.ts` gained the 401 → refresh → retry response
+  interceptor. Deliberately calls a bare `axios.post()` for the refresh
+  request rather than importing `api/auth.ts`'s `refresh()` — `auth.ts`
+  imports `client.ts` for `apiClient`, so importing back would be
+  circular; a bare call also avoids this same interceptor recursively
+  firing on its own refresh request. A `_retried` flag on the original
+  request config caps this at one retry. Both the retry-exhausted and
+  refresh-itself-failed paths call `authStore.logout()` and hard-redirect
+  to `/login` (`window.location.assign` — an axios interceptor has no
+  router context to call `useNavigate()` from).
+- `src/pages/LoginPage.tsx` — real form (email/password), a
+  `role`-selection button group (`files/plan.md`'s literal step text)
+  that is **cosmetic only** — the backend's login has no concept of
+  "logging in as" a role, so selecting one doesn't change the request;
+  it only decides which portal's styling is highlighted, with a line of
+  copy saying so explicitly. After a successful `login()` call,
+  `authStore.setTokens()` decodes the *real* role from the response and
+  `useNavigate()` sends the user to `defaultRouteForRole()` (Step
+  10.1) — always the account's actual role, never the cosmetic
+  selection. Error states: 401 shows the backend's own `detail` message
+  (defaults to "Incorrect email or password."); a network failure (no
+  `error.response` at all) shows a distinct "couldn't reach the server"
+  message.
+- Validation: `npm run lint` / `npx tsc --noEmit` / `npm run build` — the
+  three `frontend-quality` CI steps — all clean.
+  **Verified the real network contract against a live backend**: brought
+  up `docker compose up -d postgres redis backend`, created a real
+  employer + employee via `psql` + `POST /api/auth/register`, then
+  `curl`'d `POST /api/auth/login` with the exact
+  `application/x-www-form-urlencoded` body `LoginPage.tsx`'s `login()`
+  sends — 200 with a real token pair on the right password, 401 on a
+  wrong one. Cleaned up the test rows via `psql` afterward.
+  **Browser-interactive verification not completed this step**: the
+  Claude-in-Chrome extension was disconnected for this session (`tabs_context_mcp`
+  failed "Browser extension is not connected" on every retry) after
+  successfully driving Step 10.1's browser checks earlier in the same
+  session — a tooling/environment issue, not something this step's code
+  changed. Did not fabricate or skip past this: the network-contract
+  `curl` check above and the clean `tsc`/`build` output are real, but
+  actually clicking through the login form, watching the redirect fire,
+  and confirming zero console errors in a live page **has not been done
+  for this step** and should be the first thing a next session (or the
+  user) does once the extension reconnects.
+
 ## Next recommended step
 
-Continue with **Step 10.2 — Auth pages** (`feat/login-and-role-routing-ui`):
-login page with role selection, `src/api/auth.ts` (login/register/refresh
-calls against the real backend), wiring `authStore.setTokens()`/
-`setAccessToken()` to real API responses, the 401 → refresh → retry
-Axios response interceptor `client.ts` deferred, and auto-redirect via
-`ProtectedRoute`'s `defaultRouteForRole()` (already built, Step 10.1)
-after a successful login. This is also the first step that can exercise
-Step 10.1's role-based routing end-to-end against a real authenticated
-session — worth doing as part of this step's own validation.
+Continue with **Step 10.3 — Chat interface** (`feat/chat-streaming-ui`,
+screenshots required in the PR per plan.md): `ChatWindow`,
+`StreamingMessage` (rendering SSE tokens from
+`POST /api/chat/conversations/{id}/messages` as they arrive — the
+`useSSE` hook from `files/plan.md`'s file tree), `ChatInput`, a
+conversation sidebar wired to `chatStore` (already built, Step 10.1),
+source citations, and `FeedbackButtons`. **Before starting**, retry the
+Claude-in-Chrome connection (or ask the user to reconnect it) and
+actually click through Step 10.2's login flow in a real browser — this
+step's own screenshots requirement makes a working browser session a
+hard prerequisite, not just nice-to-have, and it's the one piece of
+Step 10.2 that's still unverified.
