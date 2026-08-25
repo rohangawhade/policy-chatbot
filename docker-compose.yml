@@ -99,6 +99,14 @@ services:
   frontend:
     build:
       context: ./frontend
+    # Only affects this service's own runtime env, not the static build
+    # output baked in by the Dockerfile's `RUN npm run build` (Vite embeds
+    # VITE_-prefixed vars at build time, and `docker compose build` has no
+    # access to env_file/environment — that's build-arg territory, deferred
+    # to Phase 14's production hardening). The docker-compose.override.yml
+    # dev target (`npm run dev`) is the path this actually fixes today.
+    env_file:
+      - .env
     ports:
       - "4173:4173"
     networks:
