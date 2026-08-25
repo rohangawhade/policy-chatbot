@@ -166,3 +166,83 @@ export async function listUnansweredQueries(
   );
   return response.data;
 }
+
+// Mirrors admin_routes.py's LatencyStats/LatencyResponse (Step 10.7's
+// retrieval/generation split).
+export interface LatencyStatsDto {
+  label: string;
+  count: number;
+  p50_ms: number;
+  p95_ms: number;
+  p99_ms: number;
+}
+
+export interface LatencyResponseDto {
+  overall: LatencyStatsDto;
+  retrieval: LatencyStatsDto;
+  generation: LatencyStatsDto;
+  by_model_tier: LatencyStatsDto[];
+}
+
+export interface LatencyParams {
+  employerId?: string;
+  modelTier?: string;
+  start?: string;
+  end?: string;
+}
+
+export async function getLatency(params: LatencyParams = {}): Promise<LatencyResponseDto> {
+  const response = await apiClient.get<LatencyResponseDto>("/api/admin/latency", {
+    params: {
+      employer_id: params.employerId || undefined,
+      model_tier: params.modelTier || undefined,
+      start: params.start || undefined,
+      end: params.end || undefined,
+    },
+  });
+  return response.data;
+}
+
+// Mirrors admin_routes.py's DocumentHealthItem (Step 10.7's error_message field).
+export interface DocumentHealthItemDto {
+  id: string;
+  employer_id: string;
+  title: string;
+  version: number;
+  status: "processing" | "ready" | "failed";
+  error_message: string | null;
+  is_stale: boolean;
+  zero_query_hits: boolean;
+  last_queried_at: string | null;
+  updated_at: string;
+}
+
+export async function getDocumentHealth(
+  params: Pick<ListParams, "employerId"> = {},
+): Promise<DocumentHealthItemDto[]> {
+  const response = await apiClient.get<DocumentHealthItemDto[]>("/api/admin/document-health", {
+    params: { employer_id: params.employerId || undefined },
+  });
+  return response.data;
+}
+
+// Mirrors admin_routes.py's TopicHeatmapCell/TopicHeatmapResponse.
+export interface TopicHeatmapCellDto {
+  date: string;
+  policy_type: PolicyType | null;
+  query_count: number;
+}
+
+export async function getTopicHeatmap(params: ListParams = {}): Promise<TopicHeatmapCellDto[]> {
+  const response = await apiClient.get<{ cells: TopicHeatmapCellDto[] }>(
+    "/api/admin/topic-heatmap",
+    {
+      params: {
+        employer_id: params.employerId || undefined,
+        start: params.start || undefined,
+        end: params.end || undefined,
+      },
+    },
+  );
+  return response.data.cells;
+}

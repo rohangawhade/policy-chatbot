@@ -3463,15 +3463,102 @@ fix, the same script logs in successfully and lands on `/chat`
   embedded in the PR body, same limitation as Steps 10.3-10.5). Cleaned
   up every seeded row via `psql` afterward, `docker compose down`.
 
+### Step 10.7 — Admin dashboard: operational health — DONE
+
+- `src/components/admin/LatencyMonitor.tsx` — grouped bar chart
+  (`recharts`) of p50/p95/p99 for retrieval vs. generation vs. overall,
+  a model-tier text filter, and a time-window selector (last hour/24h/7d,
+  computed client-side into a `start` query param) with a 20s polling
+  refresh — plan.md's "real-time-ish (polling)" ask; there's no
+  WebSocket/SSE port for this metric, so periodic refetch is the
+  pragmatic reading. `src/components/admin/DocumentHealth.tsx` — only
+  documents with an actual issue (failed/stale/zero-hits) are listed,
+  each with issue badges and the ingestion error message inline for
+  failures. `src/components/admin/TopicHeatmap.tsx` — policy-type ×
+  time-bucket grid with a week/month toggle, sequential single-hue
+  (blue) color intensity by query volume, matching the `dataviz` skill's
+  magnitude-encoding rule used for `CostDashboard`'s chart. All three
+  added to a new "Operational Health" tab in `AdminDashboard.tsx`.
+  `src/api/admin.ts` extended with `getLatency`/`getDocumentHealth`/
+  `getTopicHeatmap`.
+- **Documented interpretation**: `GET /api/admin/topic-heatmap` still
+  returns one cell per day (unchanged since Step 9.6) rather than
+  pre-bucketed weeks/months — plan.md's "columns = time buckets
+  (weeks/months)" is a display concern with no new data behind it, so
+  the bucketing (and the week/month toggle) happens client-side instead
+  of adding a second, differently-shaped backend endpoint.
+- **Two real, necessary backend extensions — plan.md's own Step 10.7
+  bullets ask for data the existing endpoints (Step 9.6) didn't expose,
+  even though both were already collected**:
+  1. "Separate lines for retrieval latency vs LLM generation latency":
+     `RequestLatencyLog` already had `retrieval_ms`/`llm_ms` columns
+     (Step 8), but `GET /api/admin/latency` only ever computed
+     percentiles over `total_ms`. `LatencyResponse` gained `retrieval`/
+     `generation` fields (`overall`/`by_model_tier` unchanged), computed
+     the same way via a new `_latency_stats` helper — logs missing
+     either optional field are simply excluded from that field's
+     percentiles rather than counted as zero.
+  2. "Failed ingestion (with error message)": `Document.error_message`
+     already existed (Step 8.2) but wasn't copied onto
+     `DocumentHealthItem`. Added directly — no schema change, the data
+     was already there.
+- New backend tests: `test_get_latency_splits_retrieval_and_generation`
+  (proves the retrieval/generation split, including that a log missing
+  `retrieval_ms`/`llm_ms` is excluded rather than zero-counted),
+  `test_get_document_health_surfaces_the_failed_ingestion_error_message`;
+  the existing zeroed-stats test extended to also assert
+  `retrieval`/`generation` zero out correctly.
+- Validation: `ruff check`/`ruff format --check`/`mypy --strict src` all
+  pass; full backend suite green, 598 tests (up from 596). Frontend:
+  `npm run lint` / `npx tsc --noEmit` / `npm run build` clean.
+  **Verified end-to-end against the real stack**: rebuilt the backend
+  image (this step changed backend code), `alembic upgrade head` (no
+  new migration this step — both extensions are read-side only), seeded
+  one employer/an admin, three documents (one failed with a real error
+  message, one stale, one healthy), five `request_latency_logs` rows
+  with a real retrieval/generation split across two model tiers, and
+  five messages across two different weeks/policy types. Confirmed via
+  direct API calls first that all three endpoints returned the correct
+  data, then drove the actual UI with headless Chromium (Playwright):
+  opened the new Operational Health tab, confirmed the latency chart's
+  three bar groups and the by-tier table matched the API exactly,
+  confirmed Document Health showed the failed document's badge *and*
+  its exact error message plus the stale document's badge (and
+  correctly omitted the healthy one), confirmed the heatmap's weekly
+  grid matched the seeded per-week/policy-type counts with the higher
+  count (dental, 2) visibly darker than the others (1 each), then
+  switched the latency time window to 7d and the heatmap to month view
+  and confirmed both re-rendered correctly (month view correctly summed
+  the two week-buckets' data into one column). 3 screenshots captured
+  and reviewed in this session (not embedded in the PR body, same
+  limitation as Steps 10.3-10.6). Cleaned up every seeded row via
+  `psql` afterward, `docker compose down`.
+- **Process note, not a code issue — this affected Step 10.6, not 10.7**:
+  after merging PR #52, the `git checkout -b` for Step 10.6's branch was
+  skipped, and its commit landed directly on local `main`. Caught
+  immediately (nothing had been pushed yet): created
+  `feat/admin-quality-monitoring-ui` at that commit, then `git reset
+  --hard` on local `main` — overshot on the first attempt (reset two
+  commits back instead of one, briefly losing Step 10.5's merge commit
+  from the local `main` pointer), corrected immediately with `git reset
+  --hard origin/main`. No data was ever lost — Step 10.5's merge commit
+  was already on the remote the whole time — but flagging the near-miss
+  here since a second push in between the two resets would have made it
+  a real problem. This step (10.7) started with an explicit
+  `git checkout -b` from the start specifically to not repeat this.
+
 ## Next recommended step
 
-Continue with **Step 10.7 — Admin dashboard: operational health**
-(`feat/admin-operational-health-ui`, screenshots required in the PR per
-plan.md): `LatencyMonitor` (P50/P95/P99 latency chart, retrieval vs.
-generation split, filterable by model tier and time window —
-`GET /api/admin/latency`), `DocumentHealth` (failed-ingestion/stale/
-zero-query-hit documents — `GET /api/admin/document-health`), and
-`TopicHeatmap` (query volume by policy type × time bucket, visual grid —
-`GET /api/admin/topic-heatmap`). All three routes already exist from
-Step 9.6; `recharts` is available for the latency chart. Same
-headless-Chromium/Playwright screenshot workflow as Steps 10.3-10.6.
+Continue with **Step 10.8 — Employer portal**
+(`feat/employer-portal-ui`, screenshots required in the PR per plan.md):
+self-serve document upload scoped to the caller's own employer (reusing
+Step 10.4's `DocumentUpload`/`DocumentList` components where they already
+support an `EMPLOYER`-role caller — they were built admin-first, so check
+whether they need any change for a non-admin, non-`employer_id`-picker
+caller before assuming they just work), employee management (invite,
+view, deactivate — `POST`/`GET`/`PATCH`/`DELETE /api/employees`, Step 9.4),
+and a policy overview (which policies exist, which employees are
+enrolled — `GET /api/policies`/`GET /api/enrollments`, Step 9.4). This is
+the last step of Phase 10 — the README's Phase 10 checkbox should be
+checked once it lands. Same headless-Chromium/Playwright screenshot
+workflow as Steps 10.3-10.7.

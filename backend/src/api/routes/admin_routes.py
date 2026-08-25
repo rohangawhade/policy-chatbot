@@ -39,6 +39,22 @@ admin dashboard.
   employer and policy type" ask (`FlaggedResponse` itself has no
   `policy_type`; `Message` does). Best-effort: a missing/deleted message
   leaves these three fields `null` rather than 404ing the whole list.
+- `GET /api/admin/latency`'s `retrieval`/`generation` fields (Step 10.7):
+  plan.md asks for "separate lines for retrieval latency vs LLM
+  generation latency" -- `RequestLatencyLog` already had
+  `retrieval_ms`/`llm_ms` columns (Step 8), but the response only ever
+  computed percentiles over `total_ms`. Extended rather than replaced;
+  `overall`/`by_model_tier` are unchanged.
+- `GET /api/admin/document-health`'s `error_message` field (Step 10.7):
+  plan.md asks to show "failed ingestion (with error message)" --
+  `Document.error_message` already existed (Step 8.2), just wasn't
+  copied onto `DocumentHealthItem` until now.
+- `GET /api/admin/topic-heatmap`'s day-level cells vs. plan.md's "columns
+  = time buckets (weeks/months)" (Step 10.7): the endpoint still returns
+  one cell per day, same as Step 9.6 shipped it -- rolling days up into
+  week/month buckets is a display concern with no new data behind it, so
+  it's done client-side (`TopicHeatmap.tsx`) rather than adding a second,
+  differently-bucketed backend shape.
 """
 
 from collections import defaultdict
@@ -147,7 +163,19 @@ class LatencyStats(BaseModel):
 
 class LatencyResponse(BaseModel):
     overall: LatencyStats
+    retrieval: LatencyStats
+    generation: LatencyStats
     by_model_tier: list[LatencyStats]
+
+
+def _latency_stats(label: str, values: list[float]) -> LatencyStats:
+    return LatencyStats(
+        label=label,
+        count=len(values),
+        p50_ms=_percentile(values, 50),
+        p95_ms=_percentile(values, 95),
+        p99_ms=_percentile(values, 99),
+    )
 
 
 class FlaggedResponseItem(BaseModel):
@@ -193,6 +221,7 @@ class DocumentHealthItem(BaseModel):
     title: str
     version: int
     status: DocumentStatus
+    error_message: str | None
     is_stale: bool
     zero_query_hits: bool
     last_queried_at: datetime | None
@@ -311,6 +340,13 @@ async def get_latency(
         employer_id=employer_id, model_tier=model_tier, start=start, end=end
     )
     overall_values = [float(log.total_ms) for log in logs]
+    # `retrieval_ms`/`llm_ms` are optional on `RequestLatencyLog` (Step 8's
+    # logging can omit either) -- plan.md's Step 10.7 "separate lines for
+    # retrieval latency vs LLM generation latency" needs their own
+    # percentiles, not just `total_ms`, which the response never broke out
+    # until now.
+    retrieval_values = [float(log.retrieval_ms) for log in logs if log.retrieval_ms is not None]
+    generation_values = [float(log.llm_ms) for log in logs if log.llm_ms is not None]
 
     by_tier: dict[str, list[float]] = defaultdict(list)
     for log in logs:
@@ -318,23 +354,10 @@ async def get_latency(
             by_tier[log.model_tier].append(float(log.total_ms))
 
     return LatencyResponse(
-        overall=LatencyStats(
-            label="overall",
-            count=len(overall_values),
-            p50_ms=_percentile(overall_values, 50),
-            p95_ms=_percentile(overall_values, 95),
-            p99_ms=_percentile(overall_values, 99),
-        ),
-        by_model_tier=[
-            LatencyStats(
-                label=tier,
-                count=len(values),
-                p50_ms=_percentile(values, 50),
-                p95_ms=_percentile(values, 95),
-                p99_ms=_percentile(values, 99),
-            )
-            for tier, values in sorted(by_tier.items())
-        ],
+        overall=_latency_stats("overall", overall_values),
+        retrieval=_latency_stats("retrieval", retrieval_values),
+        generation=_latency_stats("generation", generation_values),
+        by_model_tier=[_latency_stats(tier, values) for tier, values in sorted(by_tier.items())],
     )
 
 
@@ -478,6 +501,7 @@ async def get_document_health(
             title=doc.title,
             version=doc.version,
             status=doc.status,
+            error_message=doc.error_message,
             is_stale=doc.updated_at < stale_cutoff,
             zero_query_hits=doc.last_queried_at is None,
             last_queried_at=doc.last_queried_at,

@@ -1,14 +1,17 @@
 import { useState } from "react";
 import AnalyticsDashboard from "../components/admin/AnalyticsDashboard";
 import CostDashboard from "../components/admin/CostDashboard";
+import DocumentHealth from "../components/admin/DocumentHealth";
 import DocumentList from "../components/admin/DocumentList";
 import DocumentUpload from "../components/admin/DocumentUpload";
 import EmployerManagement from "../components/admin/EmployerManagement";
 import FlaggedResponses from "../components/admin/FlaggedResponses";
 import GuardrailsLog from "../components/admin/GuardrailsLog";
+import LatencyMonitor from "../components/admin/LatencyMonitor";
+import TopicHeatmap from "../components/admin/TopicHeatmap";
 import UnansweredQueries from "../components/admin/UnansweredQueries";
 
-type Tab = "management" | "documents" | "analytics" | "quality";
+type Tab = "management" | "documents" | "analytics" | "quality" | "operational";
 
 export default function AdminDashboard() {
   const [activeTab, setActiveTab] = useState<Tab>("management");
@@ -61,6 +64,16 @@ export default function AdminDashboard() {
             >
               Quality Monitoring
             </button>
+            <button
+              onClick={() => setActiveTab("operational")}
+              className={`px-4 py-3 font-medium transition ${
+                activeTab === "operational"
+                  ? "border-b-2 border-blue-600 text-blue-600"
+                  : "text-gray-600 hover:text-gray-900"
+              }`}
+            >
+              Operational Health
+            </button>
           </div>
         </div>
 
@@ -87,6 +100,14 @@ export default function AdminDashboard() {
               <FlaggedResponses />
               <UnansweredQueries />
               <GuardrailsLog />
+            </div>
+          )}
+
+          {activeTab === "operational" && (
+            <div className="space-y-6">
+              <LatencyMonitor />
+              <DocumentHealth />
+              <TopicHeatmap />
             </div>
           )}
         </div>
