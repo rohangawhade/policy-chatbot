@@ -1,6 +1,6 @@
 .PHONY: help install install-backend install-frontend dev dev-backend dev-frontend \
 	test test-backend lint lint-backend lint-frontend format format-backend format-frontend \
-	typecheck migrate up down build seed pre-commit-install
+	typecheck migrate up down build seed download-gov-docs pre-commit-install
 
 BACKEND_VENV := backend/.venv/Scripts
 
@@ -18,6 +18,7 @@ help:
 	@echo "make down            docker compose down"
 	@echo "make build           docker compose build"
 	@echo "make seed            Seed employers/employees/policies + trigger ingestion"
+	@echo "make download-gov-docs   Download real government benefits PDFs into data/gov_pdfs/"
 	@echo "make pre-commit-install   Install git hooks"
 
 install: install-backend install-frontend
@@ -80,6 +81,9 @@ build:
 
 seed:
 	cd backend && .venv/Scripts/python.exe scripts/seed_data.py
+
+download-gov-docs:
+	cd backend && .venv/Scripts/python.exe scripts/download_gov_docs.py
 
 pre-commit-install:
 	backend/.venv/Scripts/pre-commit.exe install --hook-type pre-commit --hook-type commit-msg

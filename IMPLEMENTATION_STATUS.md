@@ -3632,18 +3632,108 @@ fix, the same script logs in successfully and lands on `/chat`
 
 **Phase 10 — React Frontend: COMPLETE.**
 
+## Phase 11 — Data Acquisition & Seeding
+
+### Step 11.1 — Download real government PDFs — DONE
+
+- `backend/scripts/download_gov_docs.py` — the project's first script
+  under `scripts/` (plan.md's file tree puts it under `backend/`, not
+  repo root). Downloads real, public benefits documents from four
+  government sources into `data/gov_pdfs/<source>/<type>/`:
+  - **OPM.gov (bulk, not hand-listed)**: discovers every distinct FEHB
+    carrier plan brochure by downloading OPM's own published "FEHB Plan
+    Key" spreadsheet (a public-use `.xlsx` file mapping every plan to
+    its brochure number) and turning each unique brochure number into
+    a real brochure PDF URL — 58 unique brochures as of the 2026 plan
+    year, on its own covering most of this step's 50-100 target.
+  - **CMS.gov / Medicare.gov** (6 curated, individually-verified URLs):
+    SBC templates/samples plus Medicare & Medicaid summary documents.
+  - **DOL.gov / EBSA** (5 curated, individually-verified URLs): ERISA
+    compliance guides.
+  - 69 total documents this run — within plan.md's 50-100 target.
+- **Documented interpretation**: plan.md says "healthcare.gov -> SBC
+  templates," but healthcare.gov's own domain doesn't host those PDFs —
+  its own SBC page links out to CMS.gov/CCIIO, confirmed by fetching it
+  during research for this script. Filed under `cms/`, not a separate
+  `healthcare_gov/` folder that would just re-download the identical
+  files from the same origin under a different label.
+- Idempotent by design: `data/gov_pdfs/manifest.json` (gitignored along
+  with the rest of `data/gov_pdfs/`, per plan.md's "downloaded PDFs stay
+  git-ignored") records url/sha256/size/timestamp per file; a file only
+  re-downloads if it's missing from *both* disk and the manifest, or
+  `--force` is passed. `--dry-run`/`--source`/`--limit`/`--delay` CLI
+  flags. Every request sends a descriptive, honest User-Agent
+  identifying the script (not a spoofed browser string) — several of
+  these sites 403 a bare/default User-Agent but serve a named one fine;
+  ordinary bot etiquette, not evasion of anything.
+- **Real bug found during dry-run validation, before any real
+  download**: OPM's own spreadsheet has a malformed "Brochure Number"
+  cell (`"RI-73 899"` instead of `"RI 73-899"`, a data-entry typo on
+  OPM's end, not this script's) — an initial `.removeprefix("RI ")`
+  transform would have silently turned this into a garbage filename/URL
+  (`"RI-73 899.pdf"`) instead of catching it. Fixed by extracting the
+  brochure code via regex (`\d{2}-\d{3,4}`) instead of a fixed prefix
+  strip, so a malformed value is skipped with a logged warning rather
+  than silently corrupting a filename — caught by actually dry-running
+  against the real spreadsheet, not by reasoning about the format.
+- **Second real bug, found while writing this step's tests, not by the
+  manual validation run**: the polite between-request delay used
+  `time.sleep()` inside an `async def` — a blocking call that stalls
+  the whole event loop, not `await asyncio.sleep()`. Harmless for this
+  specific script (strictly sequential, no concurrent tasks sharing the
+  loop) but wrong on principle (`coding-standards.md` section 9) and
+  would have been a real bug the moment anything concurrent used the
+  same loop. Fixed; also let the test suite patch `asyncio.sleep` to
+  instant (the same fixture pattern Step 3.2's LiteLLM adapter tests
+  established) instead of needing a separate mechanism.
+- `backend/pyproject.toml`'s `pythonpath` extended to `["src", "scripts"]`
+  so `scripts/*.py` modules are importable from `tests/` (bare-import
+  style, matching the rest of this codebase) — needed for this step's
+  tests and set up now since Step 11.2/11.3 will add more `scripts/`
+  modules that will want the same coverage.
+- New `backend/tests/test_download_gov_docs.py` (11 tests, zero real
+  network calls — every HTTP interaction goes through
+  `httpx.MockTransport`, `_OUTPUT_ROOT`/`_MANIFEST_PATH` monkeypatched
+  to an isolated `tmp_path`): the brochure-code regex against both a
+  well-formed value and the actual malformed value found in OPM's real
+  spreadsheet, `Manifest` load/save/round-trip, OPM discovery
+  (dedup + malformed-row skip + graceful empty-list on a stale/404'd
+  plan-key URL), and `_download_all`'s write/manifest-record,
+  dry-run-writes-nothing, skip-already-in-manifest, and
+  failure-doesn't-raise paths.
+- Added a `make download-gov-docs` target, matching the existing `make
+  seed` pattern.
+- Validation: `ruff check`/`ruff format --check`/`mypy --strict` (both
+  the script and its test file — not CI-gated for `scripts/`, since
+  only `mypy --strict src` runs in CI, but kept to the same bar anyway)
+  all pass. Full backend suite green, 613 tests (up from 602 — 11 new).
+  **Ran the real script against the real internet, twice**: a
+  `--dry-run` first (which is what caught the malformed-brochure-number
+  bug before anything was actually fetched), then a real full run — 69
+  downloaded, 0 failed, all real PDFs (`file` confirms `PDF document,
+  version 1.7` on a spot-checked OPM brochure), organized correctly
+  under `data/gov_pdfs/{opm,cms,dol}/...`. Re-ran a third time with no
+  changes to confirm idempotency: `downloaded=0 skipped=69 failed=0`,
+  completing in under a second (only the plan-key spreadsheet was
+  re-fetched for discovery; every actual PDF request was skipped).
+  Spot-checked `--source`/`--limit` filtering. Confirmed
+  `data/gov_pdfs/` (including `manifest.json`) is correctly excluded by
+  the pre-existing `.gitignore` entry via `git check-ignore -v`.
+
 ## Next recommended step
 
-Continue with **Phase 11 — Data Acquisition & Seeding**, starting with
-**Step 11.1 — Download real government PDFs**
-(`feat/gov-pdf-download-script` — downloaded PDFs stay git-ignored):
-`scripts/download_gov_docs.py` to pull open-access benefits PDFs from
-healthcare.gov, OPM.gov, DOL.gov, and CMS.gov into `data/gov_pdfs/` by
-source/type, targeting 50-100 real documents. This is the first script
-in the project that does real, unattended internet downloads from
-government sites — worth checking each source's robots.txt/terms before
-scripting bulk downloads, and building in retry/backoff plus a
-manifest/checksum file so re-runs don't re-download everything. No
-frontend or backend code changes expected; this step is standalone
-tooling that Step 11.3's seed script (and Step 12's eval dataset) will
-consume later.
+Continue with **Step 11.2 — Generate synthetic employer policy docs**
+(`feat/synthetic-document-generator` — generated docs stay git-ignored,
+per plan.md): `backend/scripts/generate_synthetic_docs.py`, using the
+already-wired `LiteLLMAdapter` (Step 3.2) to generate health/dental/
+vision plan summaries, employee handbook benefits sections, open
+enrollment guides, and FAQ documents for 5 fictional employers (50+
+documents target), converted to PDF/DOCX and saved under
+`data/synthetic/`. **Real constraint to check first**: Step 3.2's
+IMPLEMENTATION_STATUS entry noted `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`
+are both empty in this local `.env` — no real LLM credentials have been
+available in this environment through Phases 3-10. Confirm whether a
+key is now available before assuming this step can actually call a real
+model; if not, this is a genuine blocker to raise rather than something
+to mock around, since the whole point of this step is *real* generated
+content for the eval/demo corpus, not a test double.
