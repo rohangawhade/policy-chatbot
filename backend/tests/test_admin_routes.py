@@ -448,6 +448,33 @@ def test_get_latency_computes_percentiles_and_breaks_down_by_tier() -> None:
     assert tiers == {"cheap", "powerful"}
 
 
+def test_get_latency_splits_retrieval_and_generation() -> None:
+    latencies = [
+        RequestLatencyLog(
+            employer_id=uuid4(), total_ms=300, retrieval_ms=100, llm_ms=180, model_tier="cheap"
+        ),
+        RequestLatencyLog(
+            employer_id=uuid4(), total_ms=500, retrieval_ms=120, llm_ms=350, model_tier="cheap"
+        ),
+        # A log with no retrieval_ms/llm_ms (Step 8 logging can omit either) --
+        # must not count toward those percentiles, only `overall`.
+        RequestLatencyLog(employer_id=uuid4(), total_ms=200, model_tier="cheap"),
+    ]
+    client = TestClient(
+        _test_app(analytics_repository=_FakeAnalyticsRepository(latencies=latencies))
+    )
+
+    response = client.get("/api/admin/latency")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["overall"]["count"] == 3
+    assert body["retrieval"]["count"] == 2
+    assert body["retrieval"]["label"] == "retrieval"
+    assert body["generation"]["count"] == 2
+    assert body["generation"]["label"] == "generation"
+
+
 def test_get_latency_with_no_data_returns_zeroed_stats() -> None:
     client = TestClient(_test_app())
 
@@ -462,6 +489,8 @@ def test_get_latency_with_no_data_returns_zeroed_stats() -> None:
         "p95_ms": 0.0,
         "p99_ms": 0.0,
     }
+    assert body["retrieval"]["count"] == 0
+    assert body["generation"]["count"] == 0
     assert body["by_model_tier"] == []
 
 
@@ -741,6 +770,25 @@ def test_get_document_health_flags_stale_and_zero_hit_documents() -> None:
     assert body[str(stale_document.id)]["zero_query_hits"] is True
     assert body[str(fresh_document.id)]["is_stale"] is False
     assert body[str(fresh_document.id)]["zero_query_hits"] is False
+
+
+def test_get_document_health_surfaces_the_failed_ingestion_error_message() -> None:
+    failed_document = Document(
+        employer_id=uuid4(),
+        title="Corrupt.pdf",
+        source_type="pdf",
+        source_path="z",
+        status=DocumentStatus.FAILED,
+        error_message="Could not parse PDF: unexpected EOF",
+    )
+    client = TestClient(_test_app(document_repository=_FakeDocumentRepository([failed_document])))
+
+    response = client.get("/api/admin/document-health")
+
+    assert response.status_code == 200
+    body = response.json()[0]
+    assert body["status"] == "failed"
+    assert body["error_message"] == "Could not parse PDF: unexpected EOF"
 
 
 def test_get_document_health_filters_by_employer() -> None:
