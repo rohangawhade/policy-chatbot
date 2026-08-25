@@ -54,6 +54,14 @@ class _FakeDocumentRepository(DocumentRepository):
     def set_status(self, document_id: UUID, status: DocumentStatus) -> None:
         self._documents[document_id].status = status
 
+    async def list_all(self, *, employer_id: UUID | None = None) -> list[Document]:
+        if employer_id is None:
+            return list(self._documents.values())
+        return [d for d in self._documents.values() if d.employer_id == employer_id]
+
+    async def mark_queried(self, document_ids: list[UUID]) -> None:
+        raise NotImplementedError
+
 
 class _FakeDocumentChunkRepository(DocumentChunkRepository):
     def __init__(self) -> None:

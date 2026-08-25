@@ -1,3 +1,4 @@
+from datetime import datetime
 from uuid import UUID, uuid4
 
 import pytest
@@ -100,14 +101,55 @@ async def test_analytics_repository_concrete_implementation_satisfies_the_contra
         async def record_guardrail_rejection(self, rejection: GuardrailRejection) -> None:
             self.rejections.append(rejection)
 
+        async def list_llm_costs(
+            self,
+            *,
+            employer_id: UUID | None = None,
+            start: datetime | None = None,
+            end: datetime | None = None,
+        ) -> list[LLMCostLog]:
+            return self.cost_logs
+
+        async def list_latencies(
+            self,
+            *,
+            employer_id: UUID | None = None,
+            model_tier: str | None = None,
+            start: datetime | None = None,
+            end: datetime | None = None,
+        ) -> list[RequestLatencyLog]:
+            return self.latency_logs
+
         async def list_flagged_responses(
-            self, employer_id: UUID, *, status: FlaggedResponseStatus | None = None
+            self, *, employer_id: UUID | None = None, status: FlaggedResponseStatus | None = None
         ) -> list[FlaggedResponse]:
             if status is None:
                 return self.flagged
             return [f for f in self.flagged if f.status == status]
 
-        async def list_guardrail_rejections(self, employer_id: UUID) -> list[GuardrailRejection]:
+        async def get_flagged_response(self, flagged_response_id: UUID) -> FlaggedResponse | None:
+            for flagged in self.flagged:
+                if flagged.id == flagged_response_id:
+                    return flagged
+            return None
+
+        async def update_flagged_response_status(
+            self, flagged_response_id: UUID, status: FlaggedResponseStatus
+        ) -> FlaggedResponse:
+            for index, flagged in enumerate(self.flagged):
+                if flagged.id == flagged_response_id:
+                    updated = flagged.model_copy(update={"status": status})
+                    self.flagged[index] = updated
+                    return updated
+            raise ValueError(f"FlaggedResponse {flagged_response_id} does not exist.")
+
+        async def list_guardrail_rejections(
+            self,
+            *,
+            employer_id: UUID | None = None,
+            start: datetime | None = None,
+            end: datetime | None = None,
+        ) -> list[GuardrailRejection]:
             return self.rejections
 
     repo = _FakeAnalyticsRepository()
@@ -128,7 +170,7 @@ async def test_analytics_repository_concrete_implementation_satisfies_the_contra
         employer_id=employer_id, query_text="weather?", rejection_reason="off_topic"
     )
     await repo.record_guardrail_rejection(rejection)
-    assert await repo.list_guardrail_rejections(employer_id) == [rejection]
+    assert await repo.list_guardrail_rejections(employer_id=employer_id) == [rejection]
 
     flagged = FlaggedResponse(
         employer_id=employer_id,
@@ -139,6 +181,6 @@ async def test_analytics_repository_concrete_implementation_satisfies_the_contra
     )
     await repo.record_flagged_response(flagged)
     results = await repo.list_flagged_responses(
-        employer_id, status=FlaggedResponseStatus.PENDING_REVIEW
+        employer_id=employer_id, status=FlaggedResponseStatus.PENDING_REVIEW
     )
     assert results == [flagged]

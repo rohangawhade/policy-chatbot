@@ -28,6 +28,7 @@ from adapters.persistence.employer_repo import PostgresEmployerRepository
 from adapters.persistence.feedback_repo import PostgresFeedbackRepository
 from adapters.persistence.policy_repo import PostgresEnrollmentRepository, PostgresPolicyRepository
 from adapters.vector_store.pinecone_adapter import PineconeAdapter
+from api.event_subscribers import register_default_subscribers
 from config import auth_config, llm_config, pinecone_config, redis_config
 from core.ports.cache_port import CachePort
 from core.ports.event_bus_port import EventBusPort
@@ -134,15 +135,19 @@ def get_vector_store_port() -> VectorStorePort:
     )
 
 
-def get_event_bus() -> EventBusPort:
+def get_event_bus(
+    analytics_repository: AnalyticsRepository = Depends(get_analytics_repository),
+) -> EventBusPort:
     # A fresh instance per request, not a shared singleton — matches
     # every Celery task's existing wiring (`embedding_task.py`,
-    # `document_ingestion_task.py`). No subscriber-registration
-    # infrastructure exists anywhere in the app yet (a standing gap
-    # tracked in IMPLEMENTATION_STATUS.md since Step 6.1) — a shared
-    # instance would have nothing to make it more useful than a fresh one
-    # until that's built.
-    return InMemoryEventBus()
+    # `document_ingestion_task.py`), and still correct now that
+    # subscribers are registered: `analytics_repository` is bound to this
+    # request's own `AsyncSession` (Step 3.5's session-per-request rule),
+    # so a subscriber closing over it can't be shared across requests
+    # either — a fresh bus is the only thing that keeps the two in sync.
+    event_bus = InMemoryEventBus()
+    register_default_subscribers(event_bus, analytics_repository=analytics_repository)
+    return event_bus
 
 
 def get_document_service(
@@ -204,6 +209,7 @@ def get_rag_service(
     conversation_repository: ConversationRepository = Depends(get_conversation_repository),
     message_repository: MessageRepository = Depends(get_message_repository),
     event_bus: EventBusPort = Depends(get_event_bus),
+    document_repository: DocumentRepository = Depends(get_document_repository),
 ) -> RAGService:
     return RAGService(
         llm,
@@ -215,5 +221,6 @@ def get_rag_service(
         conversation_repository,
         message_repository,
         event_bus,
+        document_repository,
         embedding_model=llm_config.embedding_model,
     )

@@ -69,6 +69,7 @@ def test_enum_members_match_expected_vocabulary() -> None:
         "pending_review",
         "reviewed",
         "dismissed",
+        "escalated",
     }
 
 

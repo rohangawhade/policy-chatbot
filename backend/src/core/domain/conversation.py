@@ -6,6 +6,8 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from core.domain.policy import PolicyType
+
 
 class MessageRole(str, Enum):
     USER = "user"
@@ -32,4 +34,10 @@ class Message(BaseModel):
     role: MessageRole
     content: str
     model_used: str | None = None
+    # Set only on USER messages, from `RAGService.retrieve()`'s already-
+    # computed detection (Step 6.3) — Step 9.6's topic-heatmap endpoint
+    # is the first consumer. `None` means "no policy type detected in
+    # the query text", the same meaning `RetrievalResult.policy_type`
+    # already carries; it's never set on an ASSISTANT message.
+    policy_type: PolicyType | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

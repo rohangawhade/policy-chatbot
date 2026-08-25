@@ -96,6 +96,58 @@ async def test_list_by_employer_only_returns_that_employers_feedback(
     assert result[0].rating == FeedbackRating.THUMBS_UP
 
 
+async def test_list_all_with_no_filter_spans_every_employer(db_session: AsyncSession) -> None:
+    employer_id, message = await _make_message(db_session)
+    other_employer_id, other_message = await _make_message(db_session)
+    repo = PostgresFeedbackRepository(db_session)
+    await repo.create(
+        Feedback(
+            message_id=message.id,
+            conversation_id=message.conversation_id,
+            employer_id=employer_id,
+            rating=FeedbackRating.THUMBS_UP,
+        )
+    )
+    await repo.create(
+        Feedback(
+            message_id=other_message.id,
+            conversation_id=other_message.conversation_id,
+            employer_id=other_employer_id,
+            rating=FeedbackRating.THUMBS_DOWN,
+        )
+    )
+
+    result = await repo.list_all()
+
+    assert len(result) == 2
+
+
+async def test_list_all_filters_by_employer(db_session: AsyncSession) -> None:
+    employer_id, message = await _make_message(db_session)
+    other_employer_id, other_message = await _make_message(db_session)
+    repo = PostgresFeedbackRepository(db_session)
+    await repo.create(
+        Feedback(
+            message_id=message.id,
+            conversation_id=message.conversation_id,
+            employer_id=employer_id,
+            rating=FeedbackRating.THUMBS_UP,
+        )
+    )
+    await repo.create(
+        Feedback(
+            message_id=other_message.id,
+            conversation_id=other_message.conversation_id,
+            employer_id=other_employer_id,
+            rating=FeedbackRating.THUMBS_DOWN,
+        )
+    )
+
+    result = await repo.list_all(employer_id=employer_id)
+
+    assert [f.employer_id for f in result] == [employer_id]
+
+
 async def test_update_changes_rating_and_comment(db_session: AsyncSession) -> None:
     employer_id, message = await _make_message(db_session)
     repo = PostgresFeedbackRepository(db_session)

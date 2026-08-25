@@ -2700,50 +2700,173 @@ periodically, not just when explicitly asked.
   confirmed a non-admin gets 403 on the same analytics call. Cleaned up
   test rows via `psql` afterward, then `docker compose down`.
 
-**Phase 9 in progress** — Steps 9.1-9.5 done; Steps 9.6-9.7 remain.
+**Phase 9 in progress** — Steps 9.1-9.6 done; Step 9.7 remains.
+
+## Event-bus subscriber-registration gap — RESOLVED (during Step 9.6)
+
+The standing gap tracked since Step 6.1 ("no event-subscriber-
+registration infrastructure exists anywhere in the app") is closed for
+the one concrete case that actually needed it. New file
+`backend/src/api/event_subscribers.py`: `register_default_subscribers(event_bus,
+*, analytics_repository)` subscribes a handler for
+`GuardrailRejectionEvent` that persists a `GuardrailRejection` row via
+`AnalyticsRepository.record_guardrail_rejection()`. `api/dependencies.py`'s
+`get_event_bus()` now depends on `get_analytics_repository` and calls
+`register_default_subscribers()` on every fresh `InMemoryEventBus()` it
+builds — still a fresh instance per request/task (not a shared
+singleton), which turns out to still be the right call now that it has
+a subscriber too: `analytics_repository` is bound to that request's own
+`AsyncSession` (Step 3.5's session-per-request rule), so a subscriber
+closing over it can't outlive the request either. `GuardrailsService`
+(Step 6.1) needed zero changes — it already published
+`GuardrailRejectionEvent` and only ever will, per section 12's
+fire-and-forget-via-event-bus rule; it was the *subscriber* side that
+was missing, not the publisher.
+
+**Deliberately not resolved as part of this**: `ChatMessageReceivedEvent`/
+`ChatResponseGeneratedEvent`/`LowConfidenceResponseEvent` (Step 6.6) and
+`DocumentVersionReplacedEvent` (Step 7.2) are still published into a
+void. Nothing in Phase 9 needs a subscriber for any of them yet — Step
+9.6's admin endpoints read `FlaggedResponse`/`LLMCostLog`/
+`RequestLatencyLog` via `RAGService`'s existing direct writes, not via
+an event. `DocumentVersionReplacedEvent` → `RAGService.invalidate_version_cache()`
+in particular remains a real, known gap (flagged since Step 9.3), but
+wiring it hits a genuine architecture constraint: `RAGService` itself
+depends on `EventBusPort` (for its own publishes), so a subscriber
+built from a live `RAGService` instance would make `get_event_bus()` →
+`get_rag_service()` → `get_event_bus()` a circular DI dependency. Fixing
+that needs a small design decision (e.g. extracting cache invalidation
+into its own collaborator `RAGService` and a subscriber both depend on)
+that's out of scope for "make the event bus work" — flagging here for
+whoever picks up cache invalidation on document deletion/replacement
+next, rather than working around the cycle ad hoc.
+
+### Step 9.6 — Admin analytics routes — DONE
+
+- **New file** `backend/src/api/routes/admin_routes.py` — all ten
+  endpoints from `files/plan.md`'s list, router-level
+  `dependencies=[Depends(require_role(UserRole.ADMIN))]` (same pattern
+  Step 9.4's `employer_routes.py` established for an all-admin file).
+  Every list/aggregate follows Step 9.5's established convention: fetch
+  raw rows from the repository, filter/aggregate in Python — no
+  repository in this codebase does SQL-level `GROUP BY`.
+  `employer_id` is an optional query param on every endpoint (`None` =
+  every tenant), not derived from the caller, since an `ADMIN` account
+  has none of its own and these endpoints are explicitly cross-tenant.
+  - `GET /overview`: today/week/month query counts, active users this
+    week, document count, avg satisfaction, cost this month — rolling
+    windows (`now - timedelta(...)`), not calendar-boundary ones.
+  - `GET /cost-dashboard` (+`/alerts`): total/by-model/by-employer/
+    by-day cost breakdown; alerts flags `(employer, day)` pairs whose
+    summed spend exceeds a threshold (query param, defaulting to the
+    new `LLMConfig.daily_cost_alert_threshold_usd`, default 50.0 —
+    `.env.example`/`config.py` updated).
+  - `GET /latency`: P50/P95/P99 via a small nearest-rank
+    `_percentile()` helper (no new dependency — `statistics.quantiles`
+    needs `len(data) >= 2` and errors otherwise, which real low-traffic
+    data would hit), overall and broken down by `model_tier`.
+  - `GET /flagged-responses` + `PATCH /flagged-responses/{id}`: list
+    (filterable by employer/status) and a status-transition endpoint —
+    422 if the target status is `pending_review` (that's the *initial*
+    state, never a valid target of an admin action), 404 for an unknown
+    id.
+  - `GET /guardrail-rejections`: now has real data to read, thanks to
+    the event-bus fix above.
+  - `GET /unanswered-queries` and `document-health`'s "stale"
+    threshold: **two documented interpretations**, not literal spec
+    readings — see `admin_routes.py`'s module docstring. Unanswered
+    reuses `FlaggedResponse` rows with
+    `flag_reason="low_retrieval_confidence"` (no literal
+    "I don't have enough information" string is tracked anywhere — the
+    LLM is only *instructed* to say that, per `RAGService`'s
+    `_NO_CONTEXT_NOTICE`, and its actual wording is generated). Stale
+    uses a fixed `_STALE_THRESHOLD_DAYS = 182` against `updated_at`.
+  - `GET /topic-heatmap`: groups by `(date, policy_type)` from a new
+    `Message.policy_type` field (see schema changes below).
+  - `GET /document-health`: "zero query hits" from a new
+    `Document.last_queried_at` field (see schema changes below).
+- **Schema changes** (migration `d7ad8824e70e`, additive, reversible —
+  verified with a full `upgrade head` → `downgrade base` → `upgrade
+  head` cycle + `alembic check`, no drift):
+  1. `messages.policy_type` (nullable, reuses the existing `policy_type`
+     Postgres enum, `create_type=False` per Step 1.3's ENUM lifecycle
+     pattern) — `RAGService._persist_turn()` now sets it on every USER
+     message from `RetrievalResult.policy_type` (Step 6.3's detection,
+     already computed, no new logic).
+  2. `documents.last_queried_at` (nullable timestamp) — new
+     `DocumentRepository.mark_queried(document_ids)` bulk-sets it to
+     now; `RAGService.retrieve()` calls it with the distinct
+     `document_id`s pulled from `VectorMatch.metadata` after every
+     Pinecone query (`RAGService` gained a `document_repository`
+     constructor param for this — `api/dependencies.py`'s
+     `get_rag_service()` updated to match).
+  3. `flagged_response_status` Postgres enum gains an `ESCALATED` value
+     (`ALTER TYPE ... ADD VALUE`) for the `PATCH` endpoint's "mark as
+     reviewed / dismiss / escalate" — downgrade rebuilds the enum type
+     without it (rename → recreate → cast → drop-old), since Postgres
+     has no `DROP VALUE`; fails (correctly) if any row still has that
+     status at downgrade time.
+- **Port surface added** (`core/ports/repository_ports.py`):
+  `AnalyticsRepository.list_llm_costs`/`list_latencies`/
+  `get_flagged_response`/`update_flagged_response_status` (plus
+  `list_flagged_responses`/`list_guardrail_rejections` changed from a
+  required positional `employer_id` to an optional keyword one — no
+  existing caller outside tests used the old signature);
+  `ConversationRepository.list_active_since` (a real SQL join against
+  `messages`, used to derive "active users" without adding
+  `employee_id` to `Message`); `MessageRepository.list_for_analytics`;
+  `DocumentRepository.list_all`/`mark_queried`;
+  `FeedbackRepository.list_all`. All implemented in the matching
+  `Postgres*Repository` adapter.
+- Validation: `ruff check`, `ruff format --check`, `mypy --strict src`
+  all pass with zero suppressions in every new/changed file. New
+  `tests/test_admin_routes.py` (20 tests covering all ten endpoints —
+  success, empty-data, filtering, the 422/404 PATCH branches, and one
+  403-for-non-admin test covering the shared router-level guard) plus
+  new/extended tests in `test_analytics_repo.py`, `test_conversation_repo.py`,
+  `test_document_repo.py`, `test_feedback_repo.py`, `test_event_subscribers.py`,
+  `test_repository_ports.py`, `test_rag_service.py`, `test_dependencies.py`,
+  and `test_models.py` (the `ESCALATED` vocabulary addition) for every
+  new port method and the `RAGService`/event-bus wiring changes. 100%
+  coverage on every new/changed file, **100% coverage across the entire
+  `src/` tree** (2834/2834 statements), 586 tests passing across the
+  whole suite (up from 546), zero warnings. Full Alembic
+  upgrade/downgrade/upgrade cycle + `alembic check` against a real
+  Postgres 16 container. Re-verified inside a `python:3.12-slim` Linux
+  container on the same Docker network before pushing — first-try
+  green, no segfault.
+  **Additionally verified against the real stack**: `docker compose up
+  -d --build backend celery-worker` (real Postgres + Redis + FastAPI),
+  minted a real admin JWT locally (same secret the running backend
+  reads from `.env`), seeded real rows across every analytics table via
+  `psql` (an employer/employee/document/conversation/message plus one
+  row each in `llm_cost_logs`, `request_latency_logs`,
+  `flagged_responses`, `guardrail_rejections`), then via `curl`: all
+  eight `GET` endpoints returned the exact expected aggregated/filtered
+  shapes (cost totals, P50/P95/P99, the stale+zero-hits document
+  correctly flagged), `PATCH .../flagged-responses/{id}` moved a row to
+  `reviewed` (200), rejected `pending_review` as a target status (422),
+  404'd for an unknown id, and an unauthenticated request got 401.
+  Separately re-confirmed the event-bus fix itself end-to-end against
+  real Postgres (publish a `GuardrailRejectionEvent` through a real
+  `InMemoryEventBus` with `register_default_subscribers()` wired in →
+  a real `GuardrailRejection` row lands via `PostgresAnalyticsRepository`)
+  before building the routes on top of it. Cleaned up every seeded row
+  via `psql` afterward, then `docker compose down`.
 
 ## Next recommended step
 
-Phases 4 (Chunking & Embedding Pipeline), 5 (Authentication &
-Multi-Tenancy), 6 (RAG Pipeline), 7 (Document Versioning), and 8
-(Celery Workers & Document Ingestion — Steps 8.1, 8.2, 8.3) are all
-COMPLETE and merged. Steps 9.1 (Auth routes), 9.2 (Chat routes), 9.3
-(Document routes), 9.4 (Employer & employee management routes), and 9.5
-(Feedback routes) are also COMPLETE and merged (or pending merge — see
-this PR).
+Phases 4-8 and Steps 9.1-9.6 are all COMPLETE and merged (or pending
+merge — see this PR). Continue with **Step 9.7 — Health routes**
+(`/health`/`/ready` already exist from Step 1.5) — per plan.md's own
+bullet list for this step, likely just confirming nothing more is
+needed rather than new code. That closes out Phase 9; Phase 10 (React
+chat UI + admin dashboard) is next after that.
 
-Continue with **Step 9.6 — Admin analytics routes**
-(`feat/admin-analytics-routes`): ten endpoints per `files/plan.md`'s
-list (`GET /api/admin/overview`, `cost-dashboard` (+`/alerts`),
-`latency`, `flagged-responses` (+`PATCH .../{id}`),
-`guardrail-rejections`, `unanswered-queries`, `topic-heatmap`,
-`document-health`) — `AnalyticsRepository` (Step 3.5) and
-`FlaggedResponse`/`LLMCostLog`/`RequestLatencyLog` (all written
-directly, Step 6.6/`RAGService`) already back most of these directly;
-`guardrail-rejections` is the one endpoint the standing event-bus gap
-below actually blocks, since nothing persists `GuardrailRejectionEvent`
-anywhere yet. Then **Step 9.7 — Health routes** (already exist from
-Step 1.5 — likely just confirming nothing more is needed, per plan.md's
-own bullet list for this step) closes out Phase 9.
-
-**Standing gap, still unresolved — now spans Phases 6-9, and Step 9.6
-is the first step actually blocked by it (not just a future
-implication)**: no event-subscriber-registration infrastructure exists
-anywhere in the app. `GuardrailRejectionEvent` (Step 6.1),
-`ChatMessageReceivedEvent`/`ChatResponseGeneratedEvent`/
-`LowConfidenceResponseEvent` (Step 6.6), and `DocumentVersionReplacedEvent`
-(Step 7.2) are all published into a void — `get_event_bus()` (Step 9.2)
-still returns a fresh `InMemoryEventBus()` per request/task, matching
-every existing Celery task's pattern, so there is still nowhere a
-subscriber could even be registered. `GET /api/admin/guardrail-rejections`
-(Step 9.6) has nothing to read without this — recommend resolving this
-gap immediately before or during Step 9.6, not deferring it a further
-step, since it's no longer just a hypothetical future need.
-
-**Standing habit, kept through Step 9.5**: before pushing a PR, run the
+**Standing habit, kept through Step 9.6**: before pushing a PR, run the
 exact CI pytest command
 (`pytest --cov=src --cov-report=term-missing --cov-fail-under=80`)
 inside a `python:3.12-slim` container on the same `docker compose`
-network as the real Postgres service. Two steps in a row (9.4, 9.5)
-have now gone first-try-green in CI since adopting this — keep doing it
-for every remaining Phase 9 step.
+network as the real Postgres service. Every step since 9.4 has now gone
+first-try-green in CI since adopting this — keep doing it for every
+remaining step.

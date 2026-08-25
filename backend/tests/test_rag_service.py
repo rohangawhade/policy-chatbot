@@ -11,6 +11,7 @@ from core.domain.analytics import (
     RequestLatencyLog,
 )
 from core.domain.conversation import Conversation, Message, MessageRole
+from core.domain.document import Document
 from core.domain.events import (
     ChatMessageReceivedEvent,
     ChatResponseGeneratedEvent,
@@ -24,6 +25,7 @@ from core.ports.llm_port import LLMPort, UsageCost
 from core.ports.repository_ports import (
     AnalyticsRepository,
     ConversationRepository,
+    DocumentRepository,
     EnrollmentRepository,
     MessageRepository,
 )
@@ -157,12 +159,45 @@ class FakeAnalyticsRepository(AnalyticsRepository):
     async def record_guardrail_rejection(self, rejection: GuardrailRejection) -> None:
         raise NotImplementedError
 
+    async def list_llm_costs(
+        self,
+        *,
+        employer_id: UUID | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> list[LLMCostLog]:
+        raise NotImplementedError
+
+    async def list_latencies(
+        self,
+        *,
+        employer_id: UUID | None = None,
+        model_tier: str | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> list[RequestLatencyLog]:
+        raise NotImplementedError
+
     async def list_flagged_responses(
-        self, employer_id: UUID, *, status: FlaggedResponseStatus | None = None
+        self, *, employer_id: UUID | None = None, status: FlaggedResponseStatus | None = None
     ) -> list[FlaggedResponse]:
         raise NotImplementedError
 
-    async def list_guardrail_rejections(self, employer_id: UUID) -> list[GuardrailRejection]:
+    async def get_flagged_response(self, flagged_response_id: UUID) -> FlaggedResponse | None:
+        raise NotImplementedError
+
+    async def update_flagged_response_status(
+        self, flagged_response_id: UUID, status: FlaggedResponseStatus
+    ) -> FlaggedResponse:
+        raise NotImplementedError
+
+    async def list_guardrail_rejections(
+        self,
+        *,
+        employer_id: UUID | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> list[GuardrailRejection]:
         raise NotImplementedError
 
 
@@ -184,6 +219,11 @@ class FakeConversationRepository(ConversationRepository):
         raise NotImplementedError
 
     async def list_by_employee(self, employee_id: UUID) -> list[Conversation]:
+        raise NotImplementedError
+
+    async def list_active_since(
+        self, since: datetime, *, employer_id: UUID | None = None
+    ) -> list[Conversation]:
         raise NotImplementedError
 
 
@@ -211,6 +251,45 @@ class FakeMessageRepository(MessageRepository):
     ) -> list[Message]:
         self.list_by_conversation_calls.append((conversation_id, limit))
         return self._history
+
+    async def list_for_analytics(
+        self,
+        *,
+        employer_id: UUID | None = None,
+        role: MessageRole | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> list[Message]:
+        raise NotImplementedError
+
+
+class FakeDocumentRepository(DocumentRepository):
+    def __init__(self) -> None:
+        self.mark_queried_calls: list[list[UUID]] = []
+
+    async def get(self, entity_id: UUID) -> Document | None:
+        raise NotImplementedError
+
+    async def create(self, entity: Document) -> Document:
+        raise NotImplementedError
+
+    async def update(self, entity: Document) -> Document:
+        raise NotImplementedError
+
+    async def delete(self, entity_id: UUID) -> None:
+        raise NotImplementedError
+
+    async def list_by_employer(self, employer_id: UUID) -> list[Document]:
+        raise NotImplementedError
+
+    async def get_latest_version(self, employer_id: UUID, title: str) -> Document | None:
+        raise NotImplementedError
+
+    async def list_all(self, *, employer_id: UUID | None = None) -> list[Document]:
+        raise NotImplementedError
+
+    async def mark_queried(self, document_ids: list[UUID]) -> None:
+        self.mark_queried_calls.append(document_ids)
 
 
 class FakeEventBus(EventBusPort):
@@ -241,6 +320,7 @@ def _service(
     conversation_repository: FakeConversationRepository | None = None,
     message_repository: FakeMessageRepository | None = None,
     event_bus: FakeEventBus | None = None,
+    document_repository: FakeDocumentRepository | None = None,
     top_k: int = 5,
     low_confidence_threshold: float = 0.5,
 ) -> RAGService:
@@ -254,6 +334,7 @@ def _service(
         conversation_repository or FakeConversationRepository(),
         message_repository or FakeMessageRepository(),
         event_bus or FakeEventBus(),
+        document_repository or FakeDocumentRepository(),
         embedding_model=_MODEL,
         top_k=top_k,
         low_confidence_threshold=low_confidence_threshold,
@@ -293,6 +374,43 @@ async def test_cache_miss_embeds_and_searches_pinecone() -> None:
     assert namespace == str(employer_id)
     assert top_k == 5
     assert metadata_filter is None
+
+
+async def test_retrieve_marks_every_matched_documents_id_as_queried() -> None:
+    employer_id, employee_id = uuid4(), uuid4()
+    document_id = uuid4()
+    matches = [
+        VectorMatch(id="chunk-1", score=0.9, metadata={"document_id": str(document_id)}),
+        VectorMatch(id="chunk-2", score=0.8, metadata={"document_id": str(document_id)}),
+    ]
+    document_repository = FakeDocumentRepository()
+    service = _service(
+        FakeLLM(),
+        FakeCache(),
+        FakeVectorStore(matches),
+        FakeEnrollmentRepository(),
+        document_repository=document_repository,
+    )
+
+    await service.retrieve("What is generally covered?", employee_id, employer_id)
+
+    assert document_repository.mark_queried_calls == [[document_id]]
+
+
+async def test_retrieve_marks_no_documents_queried_when_chunks_have_no_document_id() -> None:
+    employer_id, employee_id = uuid4(), uuid4()
+    document_repository = FakeDocumentRepository()
+    service = _service(
+        FakeLLM(),
+        FakeCache(),
+        FakeVectorStore([VectorMatch(id="chunk-1", score=0.9, metadata={})]),
+        FakeEnrollmentRepository(),
+        document_repository=document_repository,
+    )
+
+    await service.retrieve("What is generally covered?", employee_id, employer_id)
+
+    assert document_repository.mark_queried_calls == [[]]
 
 
 async def test_detected_policy_type_becomes_a_metadata_filter() -> None:
@@ -551,6 +669,7 @@ def test_assemble_prompt_uses_a_custom_prompt_template() -> None:
         FakeConversationRepository(),
         FakeMessageRepository(),
         FakeEventBus(),
+        FakeDocumentRepository(),
         embedding_model=_MODEL,
         prompt_template=custom_template,
     )

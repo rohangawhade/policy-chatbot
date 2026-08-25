@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -43,6 +44,16 @@ class _FakeMessageRepository(MessageRepository):
     ) -> list[Message]:
         raise NotImplementedError
 
+    async def list_for_analytics(
+        self,
+        *,
+        employer_id: UUID | None = None,
+        role: MessageRole | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> list[Message]:
+        raise NotImplementedError
+
 
 class _FakeConversationRepository(ConversationRepository):
     def __init__(self, conversations: list[Conversation] | None = None) -> None:
@@ -61,6 +72,11 @@ class _FakeConversationRepository(ConversationRepository):
         raise NotImplementedError
 
     async def list_by_employee(self, employee_id: UUID) -> list[Conversation]:
+        raise NotImplementedError
+
+    async def list_active_since(
+        self, since: datetime, *, employer_id: UUID | None = None
+    ) -> list[Conversation]:
         raise NotImplementedError
 
 
@@ -83,6 +99,9 @@ class _FakeFeedbackRepository(FeedbackRepository):
 
     async def list_by_employer(self, employer_id: UUID) -> list[Feedback]:
         return [f for f in self._by_id.values() if f.employer_id == employer_id]
+
+    async def list_all(self, *, employer_id: UUID | None = None) -> list[Feedback]:
+        raise NotImplementedError
 
 
 def _test_app(

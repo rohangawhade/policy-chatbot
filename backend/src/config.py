@@ -94,6 +94,11 @@ class LLMConfig(_Config):
     max_tokens: int = 2048
     streaming_enabled: bool = True
     fallback_enabled: bool = True
+    # Step 9.6's `GET /api/admin/cost-dashboard/alerts` — days where a
+    # single employer's daily spend exceeds this are flagged. Global
+    # rather than per-employer: no per-tenant billing-limit concept
+    # exists anywhere else in the app to hang a per-employer default off.
+    daily_cost_alert_threshold_usd: float = 50.0
 
 
 class AuthConfig(_Config):

@@ -185,8 +185,8 @@ def test_get_vector_store_port_returns_a_pinecone_adapter() -> None:
     assert isinstance(get_vector_store_port(), PineconeAdapter)
 
 
-def test_get_event_bus_returns_an_in_memory_event_bus() -> None:
-    assert isinstance(get_event_bus(), InMemoryEventBus)
+def test_get_event_bus_returns_an_in_memory_event_bus(db_session: AsyncSession) -> None:
+    assert isinstance(get_event_bus(get_analytics_repository(db_session)), InMemoryEventBus)
 
 
 def test_get_query_router_wires_the_configured_models() -> None:
@@ -196,8 +196,10 @@ def test_get_query_router_wires_the_configured_models() -> None:
     assert router.select_model(0.0) == llm_config.cheap_model
 
 
-def test_get_guardrails_service_wires_the_llm_and_event_bus() -> None:
-    service = get_guardrails_service(get_llm_port(), get_event_bus())
+def test_get_guardrails_service_wires_the_llm_and_event_bus(db_session: AsyncSession) -> None:
+    service = get_guardrails_service(
+        get_llm_port(), get_event_bus(get_analytics_repository(db_session))
+    )
 
     assert isinstance(service, GuardrailsService)
 
@@ -212,7 +214,7 @@ def test_get_rag_service_wires_every_collaborator(db_session: AsyncSession) -> N
         get_query_router(),
         get_conversation_repository(db_session),
         get_message_repository(db_session),
-        get_event_bus(),
+        get_event_bus(get_analytics_repository(db_session)),
     )
 
     assert isinstance(service, RAGService)
@@ -230,7 +232,9 @@ def test_get_document_chunk_repository_returns_a_postgres_document_chunk_reposit
 def test_get_document_service_wires_the_repository_and_event_bus(
     db_session: AsyncSession,
 ) -> None:
-    service = get_document_service(get_document_repository(db_session), get_event_bus())
+    service = get_document_service(
+        get_document_repository(db_session), get_event_bus(get_analytics_repository(db_session))
+    )
 
     assert isinstance(service, DocumentService)
 
