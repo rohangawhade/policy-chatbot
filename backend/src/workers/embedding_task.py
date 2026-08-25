@@ -23,7 +23,7 @@ from typing import Any
 
 from adapters.event_bus.in_memory_event_bus import InMemoryEventBus
 from adapters.llm.litellm_adapter import LiteLLMAdapter
-from adapters.persistence.database import async_session_factory
+from adapters.persistence.database import async_session_factory, engine
 from adapters.persistence.document_repo import PostgresDocumentChunkRepository
 from adapters.vector_store.pinecone_adapter import PineconeAdapter
 from config import llm_config, pinecone_config
@@ -78,16 +78,34 @@ def embed_and_index_document(
 async def _embed_and_index(
     document: Document, chunks: list[DocumentChunk], previous_version: Document | None
 ) -> None:
-    async with async_session_factory() as session:
-        service = EmbeddingService(
-            llm=LiteLLMAdapter(),
-            vector_store=PineconeAdapter(
-                api_key=pinecone_config.api_key or "unconfigured",
-                index_name=pinecone_config.index_name,
-            ),
-            chunk_repository=PostgresDocumentChunkRepository(session),
-            event_bus=InMemoryEventBus(),
-            embedding_model=llm_config.embedding_model,
-        )
-        await service.embed_and_store(chunks, document, previous_version)
-        await session.commit()
+    try:
+        async with async_session_factory() as session:
+            service = EmbeddingService(
+                llm=LiteLLMAdapter(),
+                vector_store=PineconeAdapter(
+                    api_key=pinecone_config.api_key or "unconfigured",
+                    index_name=pinecone_config.index_name,
+                ),
+                chunk_repository=PostgresDocumentChunkRepository(session),
+                event_bus=InMemoryEventBus(),
+                embedding_model=llm_config.embedding_model,
+            )
+            await service.embed_and_store(chunks, document, previous_version)
+            await session.commit()
+    finally:
+        # `engine` (adapters/persistence/database.py) is a module-level
+        # singleton shared across every task this worker process ever
+        # runs, but each task gets its own fresh event loop via
+        # `asyncio.run()` (below) — an asyncpg connection checked back
+        # into the pool at the end of *this* loop is bound to it, and
+        # reusing it from the next task's *different* loop fails with
+        # "attached to a different loop" / "another operation is in
+        # progress". Disposing here leaves the pool empty for the next
+        # task, which then opens fresh connections on its own loop.
+        # Real bug, not a hypothetical — found via Step 9.3's real-stack
+        # validation the moment a real worker processed two tasks in a
+        # row; invisible in every unit test (each test's own `db_session`
+        # fixture builds a throwaway engine, Step 3.5) and in this file's
+        # own prior "verified against the real stack" pass (Step 4.4),
+        # which only ever ran a single task per worker lifetime.
+        await engine.dispose()

@@ -33,6 +33,13 @@ class AppConfig(_Config):
     env: str = "development"
     debug: bool = True
     secret_key: str = "changeme"
+    # Local filesystem path uploaded documents are saved to (files/plan.md
+    # Step 9.3 — no S3/blob-storage port exists, per Step 8.2's explicit
+    # scope note). Docker Compose overrides this to a shared named volume
+    # path so `backend` and `celery-worker` (separate containers) see the
+    # same files; the default here is host-based-dev-relative.
+    upload_dir: str = "./uploads"
+    max_upload_size_mb: int = 25
 
 
 class DatabaseConfig(_Config):

@@ -43,6 +43,12 @@ services:
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
+      # Uploaded files must land where celery-worker (a separate
+      # container) can read them back — the shared document_uploads
+      # volume below, not backend's own ephemeral filesystem.
+      APP_UPLOAD_DIR: /app/uploads
+    volumes:
+      - document_uploads:/app/uploads
     ports:
       - "8000:8000"
     depends_on:
@@ -81,6 +87,9 @@ services:
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
+      APP_UPLOAD_DIR: /app/uploads
+    volumes:
+      - document_uploads:/app/uploads
     depends_on:
       redis:
         condition: service_healthy
@@ -97,6 +106,7 @@ services:
 
 volumes:
   postgres_data:
+  document_uploads:
 
 networks:
   policypal:

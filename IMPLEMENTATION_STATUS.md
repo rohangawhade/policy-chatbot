@@ -2372,64 +2372,191 @@ periodically, not just when explicitly asked.
   up the test employee/employer rows via `psql` afterward, then
   `docker compose down`.
 
-**Phase 9 in progress** — Steps 9.1-9.2 done; Steps 9.3-9.7 remain.
+### Step 9.3 — Document routes — DONE
+
+- `backend/src/api/routes/document_routes.py` extended with
+  `POST /api/documents/upload`, `GET /api/documents`, and
+  `DELETE /api/documents/{document_id}` (files/plan.md Step 9.3),
+  alongside Step 8.3's existing status/stream endpoints.
+  - **Upload** (employer or admin only —
+    `require_role(UserRole.EMPLOYER, UserRole.ADMIN)`): validates the
+    file (extension, content type, size — `files/coding-standards.md`
+    section 8's explicit three checks) against a route-local
+    extension→content-type map (deliberately **not**
+    `ProcessorFactory`'s own registry — `api/` may import adapters only
+    for DI wiring per section 3, not to call adapter logic directly
+    from a route; a documented, accepted two-place coupling, same
+    shape as the queue-routing pattern from Steps 8.1/8.2), saves it to
+    local disk (`APP_UPLOAD_DIR`, new config — no S3/blob-storage port
+    exists, per Step 8.2's explicit scope note), registers it via
+    `DocumentService.register_upload()` (Step 7.1 — re-uploading the
+    same `title` under the same employer bumps the version
+    automatically), then hands it to
+    `ingestion.process_document_upload` (Step 8.2) via
+    `Celery.send_task()` — by task *name*, not by importing
+    `workers/document_ingestion_task.py` directly, matching the
+    existing string-contract pattern `celery_app.py`'s own dead-letter
+    handler already uses, since `api/` importing `workers/` isn't a
+    layer relationship `coding-standards.md`'s import-boundary diagram
+    actually defines either way. Returns 202 with the new `PROCESSING`
+    document.
+  - An `ADMIN` account (no `employer_id` of its own —
+    `core/domain/employee.py`) must name one explicitly via an
+    `employer_id` form field; an `EMPLOYER` account always uploads
+    under its own token-derived `employer_id`, never a client-supplied
+    one.
+  - **List**: `GET /api/documents` — employer-scoped, no additional
+    role restriction (matches Step 8.3's status endpoints — an
+    `EMPLOYEE` can browse what documents exist for their employer).
+  - **Delete** (employer or admin only): purges the document's vectors
+    (`VectorStorePort.delete_by_metadata`), soft-deletes its chunks
+    (`DocumentChunkRepository.deactivate_by_document` — Step 7.2's
+    existing method), then hard-deletes the `Document` row. An `ADMIN`
+    may delete any employer's document (no `employer_id` of its own to
+    scope by); an `EMPLOYER` only their own — same not-found-vs-
+    forbidden 404 reasoning as every other ownership check in this
+    file.
+  - **Known gap, not addressed by this step**: deleting a document
+    doesn't invalidate its employer's cached RAG responses —
+    `RAGService.invalidate_version_cache()` (Step 7.3) still has no
+    caller anywhere in the app, blocked on the same missing
+    event-subscriber infrastructure as the gap below.
+- `backend/src/api/dependencies.py` gained
+  `get_document_chunk_repository`, `get_document_service`, and
+  `get_celery_app` (returns the shared `workers.celery_app.app` — a DI
+  function, not a bare import in the route file, so tests can override
+  it with a fake `send_task` that needs no real Redis broker).
+- `backend/src/config.py`'s `AppConfig` gained `upload_dir` (default
+  `./uploads`, host-dev-relative) and `max_upload_size_mb` (default
+  25). `docker-compose.yml` gained a `document_uploads` named volume
+  mounted at `/app/uploads` in **both** `backend` and `celery-worker`
+  — they're separate containers, so the ingestion task (running in
+  `celery-worker`) can only read what the upload route (running in
+  `backend`) wrote if they share a real volume, not each container's
+  own ephemeral filesystem; `APP_UPLOAD_DIR=/app/uploads` overrides the
+  host-relative default in both services' `environment:`, matching the
+  existing `DATABASE_URL`/`REDIS_URL` override pattern.
+- `backend/pyproject.toml`'s ruff config gained `fastapi.File`/
+  `fastapi.Form` to `extend-immutable-calls` (this is the first route
+  file to use either) — without it, B008 flags the idiomatic
+  `File(...)`/`Form(...)` parameter-default pattern as if it were a
+  real "mutable default" bug, the same false positive `Depends`/
+  `Query`/etc. were already exempted from.
+- **Two real, pre-existing bugs found and fixed via this step's own
+  real-stack validation — both invisible until a real Celery worker
+  actually processed a real enqueued message, which had never happened
+  before this step**:
+  1. **`PostgresDocumentRepository`... not this one — see Step 9.2's
+     entry for the `PineconeAdapter` empty-string-fallback fix**, which
+     this step's own upload flow exercises for the first time through
+     a real `send_task()` call (no new fix needed here — confirms Step
+     9.2's fix was correct).
+  2. **The actual new finding**: `adapters/persistence/database.py`'s
+     `engine` is a module-level singleton, shared by every Celery task
+     a worker process ever runs — but each task gets its own fresh
+     event loop via `asyncio.run()`. A connection checked back into
+     `engine`'s pool at the end of one task's event loop is bound to
+     that (now-closed) loop; the *next* task's *different* loop reusing
+     it from the pool fails with `InterfaceError: cannot perform
+     operation: another operation is in progress` (sometimes
+     `RuntimeError: ... attached to a different loop`, depending on
+     exactly which call collides). Reproduced directly — bypassing
+     Celery's dispatch entirely — with two sequential top-level
+     `asyncio.run()` calls sharing the same `engine` in one process;
+     ruled out Celery's prefork worker pool as the cause by testing
+     with `--pool=solo` too (identical failure) before finding the
+     real mechanism. This is why the *second* document ever processed
+     by a given worker process failed even though the exact same code
+     path worked in every unit test (each test's own `db_session`
+     fixture builds a throwaway engine per test, Step 3.5, so it never
+     shares state across "tasks" the way a real long-lived worker
+     does) and in Steps 4.4/8.2's own prior "verified against the real
+     stack" passes (each of those only ever ran a single task before
+     tearing the container down). Fixed by wrapping both
+     `embedding_task.py`'s `_embed_and_index` and
+     `document_ingestion_task.py`'s `_process_document_upload` in
+     `try`/`finally: await engine.dispose()` — leaves the pool empty
+     at the end of every task, so the next task's different event loop
+     always opens fresh connections instead of reusing a dead one.
+     Deliberately **not** applied to `adapters/persistence/database.py`
+     itself or to any API-layer code — the backend process runs one
+     continuous event loop for its entire lifetime (uvicorn), so its
+     own use of `engine` never crosses an event-loop boundary the way
+     a per-task `asyncio.run()` does; disposing there would only add
+     unnecessary reconnect overhead to every request.
+- Validation: `ruff check`, `ruff format --check`, `mypy --strict src`
+  all pass with zero suppressions in every new/changed file. New/
+  extended `tests/test_document_routes.py` (+15: upload success
+  including version-bump-on-re-upload-with-the-same-title, unsupported
+  file type, content-type mismatch, over-size-limit, `EMPLOYEE`-role
+  403, admin-without-`employer_id` 422 then admin-with-`employer_id`
+  202; list scoped to the current employer only; delete purges vectors
+  + deactivates chunks + removes the row, 404s for unknown/another-
+  employer's document, allows an admin across employers, 403s for
+  `EMPLOYEE`). 14 new tests in `test_dependencies.py`/
+  `test_document_routes.py`'s existing patterns for the three new DI
+  functions. 100% coverage on every new/changed file, **100% coverage
+  across the entire `src/` tree** (2260/2260 statements), 495 tests
+  passing across the whole suite (up from 479), zero warnings. Run
+  against a real `docker compose up -d postgres` container (`alembic
+  upgrade head`, no drift — no migration needed).
+  **Additionally verified against the real stack — this is where both
+  bugs above were actually found, not just confirmed**: `docker
+  compose up -d --build backend celery-worker` (real Postgres + Redis +
+  FastAPI + a real Celery worker consuming the real `ingestion` queue),
+  registered a real employer contact, then via `curl`: uploaded a real
+  file through `multipart/form-data` — 202, and confirmed via `docker
+  exec` (with `MSYS_NO_PATHCONV=1` — Git Bash on Windows otherwise
+  mangles `/app/uploads` into a host path) that the file landed in the
+  shared `document_uploads` volume exactly where the worker could read
+  it. Watched the worker actually consume and process the real
+  enqueued task (not just confirm task *registration*, unlike Steps
+  4.4/8.2's prior validation) — this is what surfaced the `engine`
+  cross-event-loop bug: the first document (an intentionally-invalid
+  PDF, to test the failure path) failed with `InterfaceError` instead
+  of its real error; after the fix, both a first *and* a second
+  sequential upload in the same worker process correctly landed on
+  `FAILED` with the genuine PyMuPDF error message. Also validated
+  duplicate-email-style content-type/extension/size rejections and the
+  admin-`employer_id` requirement directly against the live server (not
+  just `TestClient`). Cleaned up test rows via `psql` afterward, then
+  `docker compose down`.
+
+**Phase 9 in progress** — Steps 9.1-9.3 done; Steps 9.4-9.7 remain.
 
 ## Next recommended step
 
 Phases 4 (Chunking & Embedding Pipeline), 5 (Authentication &
 Multi-Tenancy), 6 (RAG Pipeline), 7 (Document Versioning), and 8
 (Celery Workers & Document Ingestion — Steps 8.1, 8.2, 8.3) are all
-COMPLETE and merged. Step 9.1 (Auth routes) and Step 9.2 (Chat routes)
-are also COMPLETE and merged (or pending merge — see this PR).
+COMPLETE and merged. Steps 9.1 (Auth routes), 9.2 (Chat routes), and
+9.3 (Document routes) are also COMPLETE and merged (or pending merge —
+see this PR).
 
-Continue with **Step 9.3 — Document routes** (`feat/document-routes`):
-`document_routes.py` (Step 8.3) already exists and just needs
-`POST /api/documents/upload` added, calling
-`DocumentService.register_upload()` (Step 7.1) then enqueueing
-`document_ingestion_task.process_document_upload` (Step 8.2) — finally
-connecting that whole ingestion chain to a real HTTP caller — plus
-`GET /api/documents` (list for the current employer) and
-`DELETE /api/documents/{id}` (remove and purge its vectors). Then Steps
-9.4-9.7 (employer/employee management + policy enrollment, feedback,
-admin analytics — ten endpoints across `GET /api/admin/*` per plan.md's
-list; health routes already exist from Step 1.5).
+Continue with **Step 9.4 — Employer & employee management routes**
+(`feat/employer-and-employee-routes`): CRUD for employers (admin only —
+the natural home for the "admin creates a new employer tenant" flow
+Step 9.3's upload route deliberately did *not* build), CRUD for
+employees under an employer, policy enrollment (enroll/unenroll), and
+`GET /api/employees/me/policies`. Then Step 9.5 (feedback routes), Step
+9.6 (ten admin-analytics endpoints — several will want the
+event-subscriber infrastructure below), and Step 9.7 (health routes
+already exist from Step 1.5 — likely just confirming nothing more is
+needed).
 
-**Standing gap, still unresolved**: no event-subscriber-registration
-infrastructure exists anywhere in the app (tracked since Step 6.1, last
-reaffirmed in Step 8.3's notes). Step 9.2 did not resolve it — `get_event_bus()`
-still returns a fresh `InMemoryEventBus()` per request, matching every
-Celery task's existing pattern, so `GuardrailRejectionEvent`/
-`ChatMessageReceivedEvent`/`ChatResponseGeneratedEvent`/
-`LowConfidenceResponseEvent`/`DocumentVersionReplacedEvent` are all
-still published into a void. Worth resolving as its own small step
-before the Phase 9 admin-analytics routes (Step 9.6) need to read
-anything derived from these events.
-
-**Standing gap, still unresolved — now affects six event types across
-three phases**: no event-subscriber-registration infrastructure exists
-anywhere in the app. Step 6.1's `GuardrailRejectionEvent`, Step 6.6's
-`ChatMessageReceivedEvent`/`ChatResponseGeneratedEvent`/
-`LowConfidenceResponseEvent`, and Step 7.2's new
-`DocumentVersionReplacedEvent` are all published into a void — nothing
-persists them, so the Phase 9 admin dashboard has nothing to read yet
-for guardrail rejections or flagged-response review beyond what Step
-6.6 already writes directly (`FlaggedResponse` itself IS persisted
-directly, per that step's reasoning — it's specifically the *events*
-about it that land nowhere). Likely needs to be
-resolved as its own small step (a `main.py` startup/lifespan wiring a
-shared, long-lived `EventBusPort` instance that subscribers register
-against, and that instance actually used everywhere an event bus
-consumer gets constructed — including `workers/embedding_task.py`,
-which currently builds a fresh, throwaway `InMemoryEventBus()` per
-Celery task invocation and thus could never see a subscriber even if
-one existed) before or during Phase 9, rather than deferred again.
-
-Phase 6 actually *used* Phase 3's adapters/Phase 4's chunks/Phase 5's
-tenant scoping together end-to-end — `files/plan.md`'s "Query Flow"
-ASCII diagram is now fully implemented (guardrails → cache → router →
-embed → Pinecone → enrollment → prompt → generate → cache/persist →
-analytics), just not yet wired into a real HTTP route (Phase 9).
-
-As of 2026-08-24 the user asked to stop pausing for confirmation before
-merges or at phase boundaries — merge once CI is green and keep going,
-only stopping if genuinely blocked.
+**Standing gap, still unresolved — now spans Phases 6-9**: no
+event-subscriber-registration infrastructure exists anywhere in the
+app. `GuardrailRejectionEvent` (Step 6.1), `ChatMessageReceivedEvent`/
+`ChatResponseGeneratedEvent`/`LowConfidenceResponseEvent` (Step 6.6),
+and `DocumentVersionReplacedEvent` (Step 7.2) are all published into a
+void — `get_event_bus()` (Step 9.2) still returns a fresh
+`InMemoryEventBus()` per request/task, matching every existing Celery
+task's pattern, so there is still nowhere a subscriber could even be
+registered. Concretely blocks: `RAGService.invalidate_version_cache()`
+(Step 7.3) having a real caller, and several Step 9.6 admin-analytics
+endpoints (guardrail-rejection review, some flagged-response context)
+having anything to read beyond what's already written directly
+(`FlaggedResponse` rows themselves, Step 6.6). Worth resolving as its
+own small step (a `main.py` startup/lifespan wiring a shared,
+long-lived `EventBusPort` instance subscribers register against, used
+everywhere a consumer is constructed) before Step 9.6 needs it.
