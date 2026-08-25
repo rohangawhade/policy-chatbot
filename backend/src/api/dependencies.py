@@ -25,7 +25,7 @@ from adapters.persistence.document_repo import (
 )
 from adapters.persistence.employee_repo import PostgresEmployeeRepository
 from adapters.persistence.employer_repo import PostgresEmployerRepository
-from adapters.persistence.policy_repo import PostgresEnrollmentRepository
+from adapters.persistence.policy_repo import PostgresEnrollmentRepository, PostgresPolicyRepository
 from adapters.vector_store.pinecone_adapter import PineconeAdapter
 from config import auth_config, llm_config, pinecone_config, redis_config
 from core.ports.cache_port import CachePort
@@ -40,6 +40,7 @@ from core.ports.repository_ports import (
     EmployerRepository,
     EnrollmentRepository,
     MessageRepository,
+    PolicyRepository,
 )
 from core.ports.vector_store_port import VectorStorePort
 from core.services.auth_service import AuthService
@@ -81,6 +82,10 @@ def get_enrollment_repository(
     session: AsyncSession = Depends(get_session),
 ) -> EnrollmentRepository:
     return PostgresEnrollmentRepository(session)
+
+
+def get_policy_repository(session: AsyncSession = Depends(get_session)) -> PolicyRepository:
+    return PostgresPolicyRepository(session)
 
 
 def get_analytics_repository(

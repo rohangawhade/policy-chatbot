@@ -2549,27 +2549,119 @@ periodically, not just when explicitly asked.
   the full suite inside the same Linux container: clean exit, 495
   passed, 100% coverage, no segfault.
 
-**Phase 9 in progress** — Steps 9.1-9.3 done; Steps 9.4-9.7 remain.
+### Step 9.4 — Employer & employee management routes — DONE
+
+- **New files**, matching `files/plan.md`'s folder structure exactly
+  (it names three separate files for this step's text, not one):
+  `backend/src/api/routes/employer_routes.py` (employer CRUD, admin
+  only — `dependencies=[Depends(require_role(UserRole.ADMIN))]` at the
+  **router** level, since every route in this file needs it, rather
+  than repeating a per-route `Depends` like every other route file
+  does — the first file where that's actually true of the whole file),
+  `employee_routes.py` (employee CRUD under an employer, plus
+  `GET /api/employees/me/policies`), and `policy_routes.py` (policy
+  CRUD plus enroll/unenroll — plan.md's "Policy assignment" bullet).
+  - `POST /api/employees` deliberately does **not** duplicate
+    `POST /api/auth/register` (Step 9.1) — it's the `EMPLOYER`/`ADMIN`-
+    initiated management-side creation (no tokens returned; the new
+    account logs in separately), reusing the same role restriction
+    (`EMPLOYER`/`EMPLOYEE` only, `ADMIN` rejected — out-of-band, same
+    reasoning as Step 9.1) and the same admin-needs-an-explicit-
+    `employer_id` pattern `document_routes.py`'s upload route
+    established in Step 9.3.
+  - Employee *management* (list/view/update/delete — not just create)
+    is restricted to `EMPLOYER`/`ADMIN` callers, a stricter default
+    than Step 9.3's employer-wide document list: this is PII (email,
+    full name), not benefits content.
+  - `POST /api/policies/{id}/enroll` reactivates an existing
+    (possibly previously-unenrolled) `Enrollment` row rather than
+    creating a second one when the employee was already enrolled once
+    before — required by the schema's `(employee_id, policy_id)`
+    unique constraint (`files/plan.md` Step 1.3), verified directly
+    against real Postgres (see below). `DELETE .../enroll/{employee_id}`
+    is a soft-delete (`is_active = False`), not a row removal — the
+    domain model's own `Enrollment.is_active` field (Step 2.1) only
+    makes sense under that reading; a hard delete would erase
+    enrollment history a benefits admin has every reason to want kept.
+  - No `EnrollmentRepository.get_by_employee_and_policy` port method
+    exists (Step 2.2 only added `list_by_employee`/`list_by_policy`) —
+    a private `_find_enrollment()` helper filters the (small,
+    per-employee) list in-process rather than adding a new port method
+    for this one caller.
+  - **Deliberate scope decision, stated in `policy_routes.py`'s own
+    module docstring**: unlike document upload, policy management does
+    *not* give an `ADMIN` an explicit-`employer_id` carve-out —
+    `files/plan.md`'s Step 9.4 text only calls out employer CRUD as
+    "admin only"; policy management stays scoped simply via
+    `get_current_employer_id` (which naturally 403s an `ADMIN`, who
+    has none) rather than speculatively extending the same admin
+    pattern everywhere it could technically apply.
+- `backend/src/api/dependencies.py` gained `get_policy_repository`
+  (`PostgresPolicyRepository`) — the only new DI function this step
+  needed; every repository/service it uses otherwise already existed.
+- `main.py` wired all three new routers in.
+- **A real, CI-only (Linux) segfault, found and root-caused the same
+  way as Step 9.3's — validated locally in a `python:3.12-slim`
+  container mirroring `ci.yml` *before* pushing this time, rather than
+  discovering it from a failed run**: no bug this time (the fix
+  process from Step 9.3 is now this step's own pre-push habit) — noted
+  here only to record that the Linux-container validation step was
+  deliberately run again and came back clean (537 tests, 100%
+  coverage, no segfault) before any CI round trip.
+- Validation: `ruff check`, `ruff format --check`, `mypy --strict src`
+  all pass with zero suppressions in every new/changed file. New
+  `tests/test_employer_routes.py` (10 tests), `tests/test_employee_routes.py`
+  (17 tests — including the admin-`employer_id` requirement, PII-scoped
+  role gating, and `get_my_policies` skipping an enrollment whose
+  policy no longer exists), `tests/test_policy_routes.py` (14 tests —
+  including enroll-reactivates-rather-than-duplicates, verified via the
+  fake repository's own row count). One new test in
+  `test_dependencies.py` for `get_policy_repository`. 100% coverage on
+  every new/changed file, **100% coverage across the entire `src/`
+  tree** (2476/2476 statements), 537 tests passing across the whole
+  suite (up from 495), zero warnings. Run against a real
+  `docker compose up -d postgres` container (`alembic upgrade head`, no
+  drift — no migration needed) **and** independently re-verified inside
+  a `python:3.12-slim` Linux container on the same Docker network,
+  matching `ci.yml`'s exact environment, before pushing.
+  **Additionally verified against the real stack**: `docker compose up
+  -d --build backend` (real Postgres + Redis + FastAPI), minted a real
+  admin JWT locally (same secret the running backend reads from
+  `.env`, no login route exists for an out-of-band role) and exercised
+  the full chain via `curl`: employer create/list/get/update, employee
+  creation as admin (422 without `employer_id`, 201 with it) and as the
+  new employer contact, a non-manager employee correctly 403ing on
+  `GET /api/employees`, policy create/list as the employer contact,
+  enroll (201) → the employee viewing it via `/me/policies` (200,
+  `is_active: true`) → unenroll (204) → the same employee still seeing
+  the policy listed but `is_active: false` (confirms the soft-delete,
+  not a disappearance) → re-enrolling and confirming via a direct
+  `psql` count that exactly one `employee_policies` row exists the
+  whole time (confirms the reactivate-not-duplicate logic against the
+  schema's real unique constraint, not just the fake repository's own
+  bookkeeping). Cleaned up test rows via `psql` afterward, then
+  `docker compose down`.
+
+**Phase 9 in progress** — Steps 9.1-9.4 done; Steps 9.5-9.7 remain.
 
 ## Next recommended step
 
 Phases 4 (Chunking & Embedding Pipeline), 5 (Authentication &
 Multi-Tenancy), 6 (RAG Pipeline), 7 (Document Versioning), and 8
 (Celery Workers & Document Ingestion — Steps 8.1, 8.2, 8.3) are all
-COMPLETE and merged. Steps 9.1 (Auth routes), 9.2 (Chat routes), and
-9.3 (Document routes) are also COMPLETE and merged (or pending merge —
-see this PR).
+COMPLETE and merged. Steps 9.1 (Auth routes), 9.2 (Chat routes), 9.3
+(Document routes), and 9.4 (Employer & employee management routes) are
+also COMPLETE and merged (or pending merge — see this PR).
 
-Continue with **Step 9.4 — Employer & employee management routes**
-(`feat/employer-and-employee-routes`): CRUD for employers (admin only —
-the natural home for the "admin creates a new employer tenant" flow
-Step 9.3's upload route deliberately did *not* build), CRUD for
-employees under an employer, policy enrollment (enroll/unenroll), and
-`GET /api/employees/me/policies`. Then Step 9.5 (feedback routes), Step
-9.6 (ten admin-analytics endpoints — several will want the
-event-subscriber infrastructure below), and Step 9.7 (health routes
-already exist from Step 1.5 — likely just confirming nothing more is
-needed).
+Continue with **Step 9.5 — Feedback routes** (`feat/feedback-routes`):
+`POST /api/feedback` (thumbs up/down + optional text for a message —
+`FeedbackRepository` already exists, Step 3.5) and
+`GET /api/feedback/analytics` (aggregated stats, admin only). Then
+**Step 9.6 — Admin analytics routes** (`feat/admin-analytics-routes`,
+ten endpoints per `files/plan.md`'s list — several will want the
+event-subscriber infrastructure below), and **Step 9.7 — Health
+routes** (already exist from Step 1.5 — likely just confirming nothing
+more is needed, per plan.md's own bullet list for this step).
 
 **Standing gap, still unresolved — now spans Phases 6-9**: no
 event-subscriber-registration infrastructure exists anywhere in the
@@ -2587,3 +2679,13 @@ having anything to read beyond what's already written directly
 own small step (a `main.py` startup/lifespan wiring a shared,
 long-lived `EventBusPort` instance subscribers register against, used
 everywhere a consumer is constructed) before Step 9.6 needs it.
+
+**New standing habit, worth keeping for the remaining Phase 9 steps**:
+before pushing a PR, run the exact CI pytest command
+(`pytest --cov=src --cov-report=term-missing --cov-fail-under=80`)
+inside a `python:3.12-slim` container on the same `docker compose`
+network as the real Postgres service — this is how Step 9.3's
+CI-only segfault was actually root-caused (bisecting shrinking test
+subsets locally is far faster than round-tripping through GitHub
+Actions), and Step 9.4 confirmed doing this preemptively catches
+regressions before they ever reach a CI run.

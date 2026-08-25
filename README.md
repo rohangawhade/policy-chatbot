@@ -190,8 +190,26 @@ Nothing tracked yet — this section grows as issues are discovered and fixed.
 | POST   | `/api/documents/upload`                   | Access token (employer or admin) | Upload a benefits document for ingestion. Returns the new `PROCESSING` document.      |
 | GET    | `/api/documents`                          | Access token         | List documents for the current employer.                                                          |
 | DELETE | `/api/documents/{id}`                     | Access token (employer or admin) | Remove a document and purge its vectors.                                                 |
+| POST   | `/api/employers`                          | Admin only            | Create an employer (tenant).                                                                     |
+| GET    | `/api/employers`                          | Admin only            | List all employers.                                                                              |
+| GET    | `/api/employers/{id}`                     | Admin only            | Get one employer.                                                                                 |
+| PATCH  | `/api/employers/{id}`                     | Admin only            | Update an employer (partial).                                                                     |
+| DELETE | `/api/employers/{id}`                     | Admin only            | Delete an employer.                                                                               |
+| POST   | `/api/employees`                          | Access token (employer or admin) | Create an employee/employer-contact account under an employer (no tokens returned).      |
+| GET    | `/api/employees`                          | Access token (employer or admin) | List employees for the current employer.                                                 |
+| GET    | `/api/employees/me/policies`              | Access token          | The current user's own enrolled policies.                                                        |
+| GET    | `/api/employees/{id}`                     | Access token (employer or admin) | Get one employee.                                                                         |
+| PATCH  | `/api/employees/{id}`                     | Access token (employer or admin) | Update an employee (partial).                                                            |
+| DELETE | `/api/employees/{id}`                     | Access token (employer or admin) | Delete an employee.                                                                       |
+| POST   | `/api/policies`                           | Access token (employer or admin) | Create a policy.                                                                          |
+| GET    | `/api/policies`                           | Access token          | List policies for the current employer.                                                          |
+| GET    | `/api/policies/{id}`                      | Access token          | Get one policy.                                                                                   |
+| PATCH  | `/api/policies/{id}`                      | Access token (employer or admin) | Update a policy (partial).                                                               |
+| DELETE | `/api/policies/{id}`                      | Access token (employer or admin) | Delete a policy.                                                                          |
+| POST   | `/api/policies/{id}/enroll`               | Access token (employer or admin) | Enroll an employee in a policy.                                                          |
+| DELETE | `/api/policies/{id}/enroll/{employee_id}` | Access token (employer or admin) | Unenroll an employee from a policy (soft-delete).                                        |
 
-Remaining Phase 9 routes (employer/employee management, feedback, admin analytics) land next. This table will be kept current as endpoints are added.
+Remaining Phase 9 routes (feedback, admin analytics) land next. This table will be kept current as endpoints are added.
 
 ## Project Structure
 
