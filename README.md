@@ -181,8 +181,12 @@ Nothing tracked yet — this section grows as issues are discovered and fixed.
 | GET    | `/api/auth/me`                            | Access token         | The authenticated account's own profile.                                                          |
 | GET    | `/api/documents/{id}/status`              | Access token (employer-scoped) | A document's current ingestion status (`processing`/`ready`/`failed`).                 |
 | GET    | `/api/documents/{id}/status/stream`       | Access token (employer-scoped) | SSE stream of ingestion status until it reaches a terminal state.                       |
+| POST   | `/api/chat/conversations`                 | Access token         | Create a new conversation for the current user.                                                   |
+| GET    | `/api/chat/conversations`                 | Access token         | List the current user's own conversations.                                                        |
+| GET    | `/api/chat/conversations/{id}/messages`   | Access token (owner-scoped) | Get a conversation's message history.                                                      |
+| POST   | `/api/chat/conversations/{id}/messages`   | Access token (owner-scoped) | Send a message; returns an SSE stream of response tokens ending with a `done` event. |
 
-Remaining Phase 9 routes (chat, document upload/list/delete, employer/employee management, feedback, admin analytics) land next. This table will be kept current as endpoints are added.
+Remaining Phase 9 routes (document upload/list/delete, employer/employee management, feedback, admin analytics) land next. This table will be kept current as endpoints are added.
 
 ## Project Structure
 

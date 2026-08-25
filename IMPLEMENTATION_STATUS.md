@@ -2254,44 +2254,156 @@ periodically, not just when explicitly asked.
   `hashed_password`), `/me` with no token (401). Cleaned up the test
   employee/employer rows via `psql` afterward, then `docker compose down`.
 
-**Phase 9 in progress** — Step 9.1 done; Steps 9.2-9.7 remain.
+### Step 9.2 — Chat routes — DONE
+
+- `backend/src/api/routes/chat_routes.py` — **new file**,
+  `POST /api/chat/conversations`, `GET /api/chat/conversations`,
+  `GET /api/chat/conversations/{id}/messages`, and
+  `POST /api/chat/conversations/{id}/messages` (files/plan.md Step
+  9.2). The last one is the first real HTTP caller of the whole RAG
+  pipeline end-to-end (`files/plan.md`'s Query Flow: guardrails ->
+  cache -> router -> embed -> Pinecone -> enrollment -> prompt ->
+  generate -> cache/persist -> analytics) — wraps `GuardrailsService`
+  (Step 6.1) and `RAGService.query()`'s `GenerationStream` (Step
+  6.5/6.6) in an SSE `StreamingResponse`.
+  - Conversations are scoped per-employee, not just per-employer:
+    `_get_owned_conversation` 404s (never 403 — same "don't leak
+    existence across a boundary the caller has no business knowing
+    about" reasoning as `document_routes.py`'s Step 8.3 helper) unless
+    `conversation.employee_id` matches the authenticated caller's own
+    id. An `EMPLOYER`-role account is itself a login-principal
+    `Employee` row (`core/domain/employee.py`) and can have its own
+    conversations too — this isn't employer-wide shared history.
+  - `POST .../messages` runs `GuardrailsService.check()` first; if
+    rejected, the SSE stream carries just the rejection message plus a
+    `{"done": true, "rejected": true}` event — no call into
+    `RAGService`, no conversation/message persistence, matching the
+    Query Flow diagram's ordering (guardrails gates everything after
+    it). If allowed, tokens stream as `{"token": "..."}` events,
+    ending with `{"done": true, "conversation_id", "message_id",
+    "model", "model_tier", "is_low_confidence", "from_cache"}` from
+    `GenerationStream.metrics`.
+  - `POST /api/chat/conversations` and the SSE endpoint both require an
+    existing conversation created via the first endpoint — by design:
+    the plan lists conversation creation as its own endpoint, separate
+    from sending a message, so a frontend can get a `conversation_id`
+    before the first message is ever sent, rather than only learning
+    it from that message's own response.
+- `backend/src/api/dependencies.py` gained one function per
+  `RAGService`/`GuardrailsService` collaborator
+  (`get_conversation_repository`, `get_message_repository`,
+  `get_enrollment_repository`, `get_analytics_repository`,
+  `get_llm_port`, `get_cache_port`, `get_vector_store_port`,
+  `get_event_bus`, `get_query_router`) plus the two composed services
+  themselves (`get_guardrails_service`, `get_rag_service`) — same
+  one-function-per-collaborator granularity as every existing
+  dependency, so each stays independently overridable in tests.
+  `get_event_bus()` returns a **fresh `InMemoryEventBus()` per
+  request**, not a shared instance — matches the exact pattern every
+  Celery task already uses (`embedding_task.py`,
+  `document_ingestion_task.py`). The standing gap (no
+  subscriber-registration infrastructure anywhere in the app, tracked
+  since Step 6.1) is **not resolved by this step** — deliberately
+  deferred again rather than improvised inside a route file; still
+  recommended as its own small step next (see below).
+- **Real, pre-existing bug found and fixed, dating back to Steps
+  3.3/4.4/8.2 — found only because this step's test suite is the first
+  to actually construct a `PineconeAdapter` with no real Pinecone key
+  configured, instead of only ever exercising it through a mock or a
+  fake collaborator**: `PineconeAdapter(api_key=pinecone_config.api_key
+  or "", ...)` — the fallback for "no key configured" was an empty
+  string, but the Pinecone SDK treats `""` as falsy and falls through
+  to reading `PINECONE_API_KEY` from the environment itself; with
+  neither set (true in this dev/CI environment since Steps 3.2/3.3),
+  it raises `PineconeConfigurationError` **at construction**, not on a
+  real call as `embedding_task.py`'s own docstring claimed. Fixed in
+  all three call sites (`dependencies.py`'s new
+  `get_vector_store_port()`, `embedding_task.py`, and
+  `document_ingestion_task.py`) by falling back to the placeholder
+  string `"unconfigured"` instead of `""` — non-empty, so construction
+  always succeeds; a real call still fails cleanly with an auth error
+  once actually invoked, which was the original intent all along.
+- Validation: `ruff check`, `ruff format --check`, `mypy --strict src`
+  all pass with zero suppressions in every new/changed file. New
+  `tests/test_chat_routes.py` (8 tests, fake `ConversationRepository`/
+  `MessageRepository` + fake `GuardrailsService`/`RAGService` objects
+  duck-typed to their real classes' public interface, same
+  dependency-override pattern every route test file uses): create
+  returns a conversation scoped to the current user, list only returns
+  the current employee's own conversations (not another employee's),
+  message history returns messages in order including `model_used`,
+  history 404s for an unknown conversation and for another employee's
+  conversation, send-message 404s for an unknown conversation, a full
+  send-message run streams tokens then a done event with the real
+  metrics (and calls `RAGService.query()` with the exact expected
+  args), and a guardrail-rejected send-message streams just the
+  rejection message and a `rejected: true` done event with **no**
+  `RAGService` call. 11 new tests in `test_dependencies.py` for every
+  new DI function (repository/port isinstance checks, `QueryRouter`
+  routes to the cheap model by default, `GuardrailsService`/
+  `RAGService` construct successfully through the real DI chain — this
+  is what caught the `PineconeAdapter` bug above). 100% coverage on
+  every new/changed file, **100% coverage across the entire `src/`
+  tree** (2176/2176 statements), 479 tests passing across the whole
+  suite (up from 460), zero warnings. Run against a real
+  `docker compose up -d postgres` container (`alembic upgrade head`, no
+  drift — no migration needed).
+  **Additionally verified against the real stack**: `docker compose up
+  -d --build backend` (real Postgres + Redis + FastAPI), registered a
+  real employee and logged in, then via `curl`: create conversation
+  (201), list conversations (200, contains it), empty message history
+  (200, `[]`), history for an unknown conversation (404). Sent a
+  message containing a benefits keyword ("What is my health
+  coverage?") — confirmed via backend logs it correctly skipped
+  `GuardrailsService`'s LLM classification call (the keyword
+  fast-path) and reached `RAGService.retrieve()`'s real `embed()` call
+  before failing on missing OpenAI credentials (this dev/CI
+  environment's known, already-documented limitation since Step 3.2 —
+  no real LLM provider key is available here). Sent a second message
+  with no benefits keyword ("What is the capital of France?") —
+  confirmed it correctly reached `GuardrailsService._classify_on_topic()`'s
+  real Anthropic call instead, failing one layer earlier for the same
+  missing-credentials reason. Both failures confirm the full DI chain
+  wires correctly end-to-end right up to the real-provider-credentials
+  boundary; neither is a wiring bug. `get_session()`'s Step 9.1 fix was
+  also implicitly re-confirmed here — the mid-pipeline crash left zero
+  rows in `messages`, exactly as the "committed at the API layer, one
+  exception rolls back the whole request" contract promises. Cleaned
+  up the test employee/employer rows via `psql` afterward, then
+  `docker compose down`.
+
+**Phase 9 in progress** — Steps 9.1-9.2 done; Steps 9.3-9.7 remain.
 
 ## Next recommended step
 
 Phases 4 (Chunking & Embedding Pipeline), 5 (Authentication &
 Multi-Tenancy), 6 (RAG Pipeline), 7 (Document Versioning), and 8
 (Celery Workers & Document Ingestion — Steps 8.1, 8.2, 8.3) are all
-COMPLETE and merged. Step 9.1 (Auth routes) is also COMPLETE and merged
-(or pending merge — see this PR).
+COMPLETE and merged. Step 9.1 (Auth routes) and Step 9.2 (Chat routes)
+are also COMPLETE and merged (or pending merge — see this PR).
 
-Continue with **Step 9.2 — Chat routes** (`feat/chat-sse-routes`):
-`POST /api/chat/conversations`, `GET /api/chat/conversations`,
-`POST /api/chat/conversations/{id}/messages` (the real SSE endpoint
-wrapping `RAGService.query()`'s `GenerationStream`, Step 6.5/6.6 — the
-first real HTTP caller of the whole RAG pipeline end-to-end), and
-`GET /api/chat/conversations/{id}/messages`. Then Step 9.3 (Document
-routes — `document_routes.py` already exists from Step 8.3 and just
-needs `POST /api/documents/upload` added, calling
+Continue with **Step 9.3 — Document routes** (`feat/document-routes`):
+`document_routes.py` (Step 8.3) already exists and just needs
+`POST /api/documents/upload` added, calling
 `DocumentService.register_upload()` (Step 7.1) then enqueueing
-`document_ingestion_task.process_document_upload` (Step 8.2), plus
-`GET /api/documents` and `DELETE /api/documents/{id}`), then Steps
-9.4-9.7 (employer/employee management, feedback, admin analytics —
-health routes already exist from Step 1.5).
+`document_ingestion_task.process_document_upload` (Step 8.2) — finally
+connecting that whole ingestion chain to a real HTTP caller — plus
+`GET /api/documents` (list for the current employer) and
+`DELETE /api/documents/{id}` (remove and purge its vectors). Then Steps
+9.4-9.7 (employer/employee management + policy enrollment, feedback,
+admin analytics — ten endpoints across `GET /api/admin/*` per plan.md's
+list; health routes already exist from Step 1.5).
 
-Continue with **Phase 9 — API Routes**: Step 9.1 (`feat/auth-routes`,
-requires two CODEOWNERS approvals — `POST /api/auth/register`,
-`POST /api/auth/login`, `POST /api/auth/refresh`, `GET /api/auth/me`;
-`AuthService` (Step 5.1) already has everything these routes need —
-this step is real route wiring, not new service logic), Step 9.2
-(`feat/chat-sse-routes` — conversation CRUD + the actual chat SSE
-endpoint wrapping `RAGService.query()`'s `GenerationStream`, Step
-6.5/6.6 — the first real caller of the whole RAG pipeline end-to-end),
-then the remaining Phase 9 routes plan.md lists (document
-upload/list/employer/employee/policy/feedback/admin) — `document_routes.py`
-(Step 8.3) already exists and just needs `POST /api/documents/upload`
-added to it, calling `DocumentService.register_upload()` (Step 7.1)
-then enqueueing `document_ingestion_task.process_document_upload`
-(Step 8.2), finally connecting that whole chain to a real HTTP caller.
+**Standing gap, still unresolved**: no event-subscriber-registration
+infrastructure exists anywhere in the app (tracked since Step 6.1, last
+reaffirmed in Step 8.3's notes). Step 9.2 did not resolve it — `get_event_bus()`
+still returns a fresh `InMemoryEventBus()` per request, matching every
+Celery task's existing pattern, so `GuardrailRejectionEvent`/
+`ChatMessageReceivedEvent`/`ChatResponseGeneratedEvent`/
+`LowConfidenceResponseEvent`/`DocumentVersionReplacedEvent` are all
+still published into a void. Worth resolving as its own small step
+before the Phase 9 admin-analytics routes (Step 9.6) need to read
+anything derived from these events.
 
 **Standing gap, still unresolved — now affects six event types across
 three phases**: no event-subscriber-registration infrastructure exists
