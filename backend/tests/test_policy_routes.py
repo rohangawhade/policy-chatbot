@@ -243,6 +243,86 @@ def test_delete_policy_removes_it() -> None:
     assert policy.id not in repository._by_id
 
 
+# --- enrollments (Step 10.8) -------------------------------------------
+
+
+def test_list_policy_enrollments_returns_enrolled_employees() -> None:
+    employer_id = uuid4()
+    policy = _policy(employer_id=employer_id)
+    employee = _employee(employer_id=employer_id, full_name="Alex Employee")
+    enrollment = Enrollment(employee_id=employee.id, policy_id=policy.id, is_active=True)
+    client = TestClient(
+        _test_app(
+            employer_id=employer_id,
+            policy_repository=_FakePolicyRepository([policy]),
+            employee_repository=_FakeEmployeeRepository([employee]),
+            enrollment_repository=_FakeEnrollmentRepository([enrollment]),
+        )
+    )
+
+    response = client.get(f"/api/policies/{policy.id}/enrollments")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 1
+    assert body[0]["employee_id"] == str(employee.id)
+    assert body[0]["full_name"] == "Alex Employee"
+    assert body[0]["email"] == employee.email
+    assert body[0]["is_active"] is True
+
+
+def test_list_policy_enrollments_omits_unenrolled_and_deleted_employees() -> None:
+    employer_id = uuid4()
+    policy = _policy(employer_id=employer_id)
+    # Enrollment points at an employee id that no longer resolves (e.g.
+    # the employee row was deleted) -- should be skipped, not 500.
+    dangling = Enrollment(employee_id=uuid4(), policy_id=policy.id, is_active=True)
+    client = TestClient(
+        _test_app(
+            employer_id=employer_id,
+            policy_repository=_FakePolicyRepository([policy]),
+            enrollment_repository=_FakeEnrollmentRepository([dangling]),
+        )
+    )
+
+    response = client.get(f"/api/policies/{policy.id}/enrollments")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_list_policy_enrollments_404s_for_another_employers_policy() -> None:
+    policy = _policy(employer_id=uuid4())
+    client = TestClient(
+        _test_app(employer_id=uuid4(), policy_repository=_FakePolicyRepository([policy]))
+    )
+
+    response = client.get(f"/api/policies/{policy.id}/enrollments")
+
+    assert response.status_code == 404
+
+
+def test_list_policy_enrollments_403s_for_an_employee_caller() -> None:
+    employer_id = uuid4()
+    policy = _policy(employer_id=employer_id)
+    client = TestClient(
+        _test_app(
+            employer_id=employer_id,
+            policy_repository=_FakePolicyRepository([policy]),
+            current_user=TokenPayload(
+                user_id=uuid4(),
+                employer_id=employer_id,
+                role=UserRole.EMPLOYEE,
+                token_type="access",
+            ),
+        )
+    )
+
+    response = client.get(f"/api/policies/{policy.id}/enrollments")
+
+    assert response.status_code == 403
+
+
 # --- enroll / unenroll ------------------------------------------------
 
 

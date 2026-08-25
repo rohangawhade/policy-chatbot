@@ -38,7 +38,7 @@ See `files/plan.md` for the full design (tech stack rationale, data flow diagram
 - [x] Document versioning: version tracking, vector/chunk replacement, cache invalidation (Phase 7)
 - [x] Celery ingestion workers: queue routing, retries, dead-letter handling, full ingestion pipeline, status tracking (Phase 8)
 - [x] API routes: auth, chat, documents, employers/employees/policies, feedback, admin analytics, health (Phase 9)
-- [ ] React chat UI + admin dashboard (Phase 10)
+- [x] React chat UI + admin dashboard + employer portal (Phase 10)
 - [ ] Data acquisition & seeding (Phase 11)
 - [ ] RAGAS evaluation pipeline (Phase 12)
 - [ ] DI audit (Phase 13)
