@@ -3027,17 +3027,63 @@ match CI exactly.
   `application/x-www-form-urlencoded` body `LoginPage.tsx`'s `login()`
   sends — 200 with a real token pair on the right password, 401 on a
   wrong one. Cleaned up the test rows via `psql` afterward.
-  **Browser-interactive verification not completed this step**: the
-  Claude-in-Chrome extension was disconnected for this session (`tabs_context_mcp`
-  failed "Browser extension is not connected" on every retry) after
-  successfully driving Step 10.1's browser checks earlier in the same
-  session — a tooling/environment issue, not something this step's code
-  changed. Did not fabricate or skip past this: the network-contract
-  `curl` check above and the clean `tsc`/`build` output are real, but
-  actually clicking through the login form, watching the redirect fire,
-  and confirming zero console errors in a live page **has not been done
-  for this step** and should be the first thing a next session (or the
-  user) does once the extension reconnects.
+  **Browser-interactive verification, deferred and then completed**: the
+  Claude-in-Chrome extension was disconnected for the rest of this
+  session (`tabs_context_mcp` failed "Browser extension is not
+  connected" on every retry) after successfully driving Step 10.1's
+  browser checks earlier in the same session. Rather than block on it,
+  switched to a headless Chromium via Playwright, installed standalone
+  in the scratchpad directory (`npm install --no-save playwright` — not
+  a project dependency, never touches `frontend/package.json`) — this
+  is what actually caught the CORS bug documented below, and confirmed
+  the fix. See that entry for what got exercised.
+
+## Standing gap found and fixed — CORS middleware was never wired into the FastAPI app
+
+**What happened**: `POST /api/auth/login` from the real frontend (real
+browser, real cross-origin request — `http://localhost:5173` calling
+`http://localhost:8000`) failed with `Access to XMLHttpRequest... has
+been blocked by CORS policy: No 'Access-Control-Allow-Origin' header is
+present`. `config.py`'s `CorsConfig`/`allowed_origins_list` has existed
+since Step 1.4, but `main.py` never actually called
+`app.add_middleware(CORSMiddleware, ...)` — the config existed, nothing
+ever read it.
+
+**Why this was missed for 9 phases**: every prior validation pass hit
+the backend via `curl` or FastAPI's `TestClient`, neither of which
+sends a browser's `Origin` header or enforces CORS on the client side —
+so the missing middleware was invisible to every check this project has
+run until literally the first real cross-origin browser request ever
+made against this backend (this session, validating Step 10.2's login
+page). This is the same class of gap as Step 3's release-please
+permissions miss and Step 9.3's cross-event-loop bug: a real, novel
+code path this specific action exercises for the first time.
+
+**Fixed**: `backend/src/main.py` now adds `CORSMiddleware`
+(`allow_origins=cors_config.allowed_origins_list`,
+`allow_credentials=True`, `allow_methods=["*"]`, `allow_headers=["*"]`)
+— added *last* so it's the outermost middleware layer, since CORS
+headers must be present on every response (including ones that never
+reach a route handler, e.g. an auth failure), not just successful ones.
+
+**Validation**: `ruff`, `ruff format --check`, `mypy --strict src` all
+pass. Three new tests in `tests/test_main.py`: a preflight `OPTIONS`
+request gets `Access-Control-Allow-Origin` back for the configured
+origin, a real (non-preflight) `GET` with an `Origin` header gets it
+too (this is specifically the case that was broken — a preflight-only
+test would have missed it, same as `curl`/`TestClient` calls with no
+`Origin` header at all missed it originally), and an unconfigured
+origin gets no CORS header at all. 100% coverage maintained
+(2837/2837), 589 tests passing (up from 586).
+**Verified against the real stack, and this is what actually surfaced
+and then confirmed the bug**: `docker compose up -d --build backend`,
+created a real employer + employee, then drove the *actual* React login
+form end-to-end with headless Chromium (Playwright, not just `curl`):
+filled email/password, clicked submit, and — before the fix — captured
+the real `net::ERR_FAILED`/CORS console error and a screenshot showing
+the form's own "Couldn't reach the server" error message; after the
+fix, the same script logs in successfully and lands on `/chat`
+(screenshotted). Cleaned up the test rows via `psql` afterward.
 
 ## Next recommended step
 
@@ -3047,9 +3093,8 @@ screenshots required in the PR per plan.md): `ChatWindow`,
 `POST /api/chat/conversations/{id}/messages` as they arrive — the
 `useSSE` hook from `files/plan.md`'s file tree), `ChatInput`, a
 conversation sidebar wired to `chatStore` (already built, Step 10.1),
-source citations, and `FeedbackButtons`. **Before starting**, retry the
-Claude-in-Chrome connection (or ask the user to reconnect it) and
-actually click through Step 10.2's login flow in a real browser — this
-step's own screenshots requirement makes a working browser session a
-hard prerequisite, not just nice-to-have, and it's the one piece of
-Step 10.2 that's still unverified.
+source citations, and `FeedbackButtons`. The headless-Chromium
+screenshot workflow (Playwright, standalone in the scratchpad — see
+above) is now the established way to produce real screenshots for a PR
+without the Claude-in-Chrome extension; keep using it for every
+remaining Phase 10 step unless the extension reconnects.
