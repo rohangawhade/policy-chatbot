@@ -47,7 +47,6 @@ from core.services.document_service import DocumentService
 from core.services.guardrails_service import GuardrailsService
 from core.services.query_router import QueryRouter
 from core.services.rag_service import RAGService
-from workers.celery_app import app as _celery_app
 
 
 def get_employee_repository(session: AsyncSession = Depends(get_session)) -> EmployeeRepository:
@@ -150,7 +149,23 @@ def get_celery_app() -> Any:
     # A DI function (not a bare module-level import in the route file)
     # so tests can override it with a fake `send_task` that doesn't need
     # a real Redis broker — same reasoning as every other `get_*` here.
-    return _celery_app
+    #
+    # The import is deliberately *inside* this function, not at module
+    # level (same pattern `health_routes.py`'s `_check_pinecone` already
+    # uses for `pinecone`): `workers.celery_app` constructs a real
+    # `Celery(...)` app (a real Redis broker/backend client) as an
+    # import-time side effect. `api/dependencies.py` is imported by
+    # nearly every route test file, so a module-level import here would
+    # have made *every one of them* construct that Celery app too — a
+    # real, CI-only (Linux) regression found the hard way: the whole
+    # suite passed, 495/495, 100% coverage, and then segfaulted during
+    # interpreter shutdown anyway (a known class of celery/billiard +
+    # coverage.py exit-time interaction). Deferring the import to inside
+    # the function means only a request (or a test that actually calls
+    # this dependency) ever constructs it.
+    from workers.celery_app import app as celery_app
+
+    return celery_app
 
 
 def get_query_router() -> QueryRouter:
