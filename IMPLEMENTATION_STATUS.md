@@ -2521,6 +2521,33 @@ periodically, not just when explicitly asked.
   admin-`employer_id` requirement directly against the live server (not
   just `TestClient`). Cleaned up test rows via `psql` afterward, then
   `docker compose down`.
+- **A third bug, CI-only (Linux) and never hit locally on this
+  Windows dev machine**: the PR's `backend-quality` check passed all
+  495 tests with 100% coverage, then **segfaulted during interpreter
+  shutdown** (exit 139) — twice, including after a first attempted fix
+  (deferring `api/dependencies.py`'s `workers.celery_app` import to
+  inside `get_celery_app()`, matching `health_routes.py`'s existing
+  lazy-`pinecone`-import pattern — a real improvement in its own right,
+  kept, but not the actual cause). Reproduced locally by running the
+  exact CI command inside a `python:3.12-slim` container on the same
+  Docker Compose network as the real Postgres service (mirroring
+  `ci.yml`'s environment precisely, rather than guessing blind) and
+  bisected by running shrinking test subsets until a single test
+  reproduced it alone: `test_delete_document_purges_vectors_deactivates_chunks_and_removes_the_row`
+  called `asyncio.run(repository.get(...))` inside an otherwise-sync
+  test function that also drives requests through `TestClient` —
+  `TestClient` manages its own event loop internally, and a second,
+  independent `asyncio.run()` call inside the same test collides with
+  it (the same underlying class of issue as the `engine`
+  cross-event-loop bug above — two independently-managed event loops
+  in one process — just manifesting as a hard interpreter-level crash
+  here instead of a catchable exception, likely coverage.py's C-level
+  tracing overlapping the exact moment of corruption). Fixed by
+  asserting against the fake repository's own dict directly
+  (`document.id not in repository._documents`) instead — synchronous,
+  no event loop needed, and no less direct a check. Re-verified with
+  the full suite inside the same Linux container: clean exit, 495
+  passed, 100% coverage, no segfault.
 
 **Phase 9 in progress** — Steps 9.1-9.3 done; Steps 9.4-9.7 remain.
 
