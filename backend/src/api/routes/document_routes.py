@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
+import structlog
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from pydantic import BaseModel
 from starlette.responses import StreamingResponse
@@ -27,7 +28,7 @@ from api.dependencies import (
     get_document_service,
     get_vector_store_port,
 )
-from api.middleware.auth_middleware import require_role
+from api.middleware.auth_middleware import get_current_user, require_role
 from api.middleware.tenant_context import get_current_employer_id
 from config import app_config
 from core.domain.document import Document, DocumentStatus
@@ -37,6 +38,8 @@ from core.ports.repository_ports import DocumentChunkRepository, DocumentReposit
 from core.ports.vector_store_port import VectorStorePort
 from core.services.auth_service import TokenPayload
 from core.services.document_service import DocumentService
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
 
@@ -76,6 +79,7 @@ class DocumentStatusResponse(BaseModel):
 
 class DocumentListItemResponse(BaseModel):
     id: UUID
+    employer_id: UUID
     title: str
     policy_type: PolicyType | None
     status: DocumentStatus
@@ -121,6 +125,7 @@ def _to_response(document: Document) -> DocumentStatusResponse:
 def _to_list_item(document: Document) -> DocumentListItemResponse:
     return DocumentListItemResponse(
         id=document.id,
+        employer_id=document.employer_id,
         title=document.title,
         policy_type=document.policy_type,
         status=document.status,
@@ -231,10 +236,24 @@ async def upload_document(
 
 @router.get("")
 async def list_documents(
-    employer_id: UUID = Depends(get_current_employer_id),
+    employer_id: UUID | None = None,
+    current_user: TokenPayload = Depends(get_current_user),
     document_repository: DocumentRepository = Depends(get_document_repository),
 ) -> list[DocumentListItemResponse]:
-    documents = await document_repository.list_by_employer(employer_id)
+    """Lists documents for the caller's own tenant (`EMPLOYER`/`EMPLOYEE`
+    accounts -- the `employer_id` query param is ignored for them, the
+    token's own value always wins, same not-client-supplied rule as
+    every other tenant-scoped read in this codebase) or, for an `ADMIN`
+    account (which has no `employer_id` of its own,
+    `core/domain/employee.py`), every document across every tenant,
+    optionally narrowed to one employer via the query param -- the
+    admin-dashboard document-management screen (files/plan.md Step
+    10.4) needs to browse and manage documents it didn't necessarily
+    upload itself."""
+    if current_user.employer_id is not None:
+        documents = await document_repository.list_by_employer(current_user.employer_id)
+    else:
+        documents = await document_repository.list_all(employer_id=employer_id)
     return [_to_list_item(document) for document in documents]
 
 
@@ -258,9 +277,22 @@ async def delete_document(
     answers can outlive it in cache until that's resolved.
     """
     document = await _get_deletable_document(document_repository, document_id, current_user)
-    await vector_store.delete_by_metadata(
-        str(document.employer_id), {"document_id": str(document.id)}
-    )
+    # Best-effort: an unreachable/misconfigured vector store (already
+    # retried by `PineconeAdapter` itself where the failure is
+    # retryable) must not block deleting the user's own document -- it
+    # would otherwise leave the document stuck and undeletable purely
+    # because of an unrelated third-party outage. Worst case is a
+    # handful of orphaned vectors under a `document_id` Postgres no
+    # longer knows about, which the RAG pipeline never surfaces since
+    # retrieval is always scoped to documents that still exist there.
+    try:
+        await vector_store.delete_by_metadata(
+            str(document.employer_id), {"document_id": str(document.id)}
+        )
+    except Exception as exc:
+        logger.exception(
+            "document_vector_cleanup_failed", document_id=str(document.id), error=str(exc)
+        )
     await chunk_repository.deactivate_by_document(document.id)
     await document_repository.delete(document.id)
 
