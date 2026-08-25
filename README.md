@@ -171,12 +171,18 @@ Nothing tracked yet — this section grows as issues are discovered and fixed.
 
 ## API Endpoints
 
-| Method | Path      | Auth | Description                                                                                     |
-| ------ | --------- | ---- | ------------------------------------------------------------------------------------------------- |
-| GET    | `/health` | None | Liveness probe — 200 if the process is up. No dependency checks.                                  |
-| GET    | `/ready`  | None | Readiness probe — checks PostgreSQL and Redis (required) and Pinecone (if configured). 503 if not ready. |
+| Method | Path                                     | Auth               | Description                                                                                     |
+| ------ | ----------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------- |
+| GET    | `/health`                                 | None                | Liveness probe — 200 if the process is up. No dependency checks.                                  |
+| GET    | `/ready`                                  | None                | Readiness probe — checks PostgreSQL and Redis (required) and Pinecone (if configured). 503 if not ready. |
+| POST   | `/api/auth/register`                      | None                | Create an `employer`- or `employee`-role account under an existing employer; returns a token pair. |
+| POST   | `/api/auth/login`                         | None                | OAuth2 password flow (email as `username`); returns an access + refresh token pair.               |
+| POST   | `/api/auth/refresh`                       | Refresh token        | Exchange a refresh token for a new access token.                                                  |
+| GET    | `/api/auth/me`                            | Access token         | The authenticated account's own profile.                                                          |
+| GET    | `/api/documents/{id}/status`              | Access token (employer-scoped) | A document's current ingestion status (`processing`/`ready`/`failed`).                 |
+| GET    | `/api/documents/{id}/status/stream`       | Access token (employer-scoped) | SSE stream of ingestion status until it reaches a terminal state.                       |
 
-Remaining routes land in Phase 9. This table will be kept current as endpoints are added.
+Remaining Phase 9 routes (chat, document upload/list/delete, employer/employee management, feedback, admin analytics) land next. This table will be kept current as endpoints are added.
 
 ## Project Structure
 

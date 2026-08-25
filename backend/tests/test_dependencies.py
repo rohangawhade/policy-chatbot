@@ -6,10 +6,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from adapters.persistence.document_repo import PostgresDocumentRepository
 from adapters.persistence.employee_repo import PostgresEmployeeRepository
-from api.dependencies import get_auth_service, get_document_repository, get_employee_repository
+from adapters.persistence.employer_repo import PostgresEmployerRepository
+from api.dependencies import (
+    get_auth_service,
+    get_document_repository,
+    get_employee_repository,
+    get_employer_repository,
+)
 from config import auth_config
 from core.domain.employee import UserRole
-from core.ports.repository_ports import DocumentRepository, EmployeeRepository
+from core.ports.repository_ports import DocumentRepository, EmployeeRepository, EmployerRepository
 from core.services.auth_service import AuthService
 
 
@@ -20,6 +26,15 @@ def test_get_employee_repository_returns_a_postgres_employee_repository(
 
     assert isinstance(repository, PostgresEmployeeRepository)
     assert isinstance(repository, EmployeeRepository)
+
+
+def test_get_employer_repository_returns_a_postgres_employer_repository(
+    db_session: AsyncSession,
+) -> None:
+    repository = get_employer_repository(db_session)
+
+    assert isinstance(repository, PostgresEmployerRepository)
+    assert isinstance(repository, EmployerRepository)
 
 
 def test_get_document_repository_returns_a_postgres_document_repository(

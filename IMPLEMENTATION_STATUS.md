@@ -2140,12 +2140,143 @@ periodically, not just when explicitly asked.
   needs no live services). `ci.yml`'s `backend-quality` job does this
   automatically via a `postgres:16` service container (Step 3.5).
 
+## Phase 9 — API Routes
+
+### Step 9.1 — Auth routes — DONE
+
+- `backend/src/api/routes/auth_routes.py` — **new file**,
+  `POST /api/auth/register`, `POST /api/auth/login`,
+  `POST /api/auth/refresh`, `GET /api/auth/me`, matching plan.md's Step
+  9.1 list exactly. `AuthService` (Step 5.1) already had every piece of
+  logic these need — this file is HTTP wiring only.
+  - `/register`: creates an `EMPLOYER`- or `EMPLOYEE`-role account under
+    an existing `employer_id`, then returns a token pair (same shape as
+    `/login`) so the caller doesn't need a second round trip.
+    Self-registering as `ADMIN` is rejected (422) — an admin is a
+    superuser scoped to no employer (`core/domain/employee.py`), created
+    out-of-band, never through open registration. Unknown `employer_id`
+    → 404; already-registered `email` → 409 (checked via
+    `EmployeeRepository.get_by_email` before insert).
+  - `/login`: standard OAuth2 password flow (`OAuth2PasswordRequestForm`
+    — `username` is the account's email), matching
+    `auth_service.py`'s own "OAuth2 password flow" docstring and
+    `auth_middleware.py`'s existing `OAuth2PasswordBearer` scheme.
+  - `/refresh`: JSON body `{refresh_token}` → a new access token only
+    (`AuthService.refresh_access_token()`'s actual contract — it doesn't
+    rotate the refresh token).
+  - `/me`: current user's profile via `get_current_user` (Step 5.2) +
+    `EmployeeRepository.get()`. `hashed_password` deliberately excluded
+    from the response — domain data, never something an API response
+    should echo back (flagged as an API-layer responsibility back in
+    Step 2.1).
+- `AuthService.issue_token_pair()` (was `_issue_token_pair`, private):
+  promoted to public — `authenticate()` (login) already used it
+  internally, and `/register` now legitimately needs to mint a token
+  pair for a brand-new account without re-verifying a password it was
+  never given a reason to doubt. Reaching into a private method across
+  the `api/` → `core/services/` boundary would have been the wrong fix.
+- `backend/src/api/dependencies.py` gained `get_employer_repository`,
+  same pattern as every other `get_*_repository`.
+- `backend/src/api/middleware/auth_middleware.py`: `OAuth2PasswordBearer`'s
+  `tokenUrl` hint updated from the placeholder `"/auth/token"` (Step 5.2's
+  note: "Phase 9 defines the real route this eventually points at") to
+  the real `"/api/auth/login"` — only affects Swagger UI's "Authorize"
+  button, not runtime behavior.
+- `main.py` wired `auth_routes.router` in (before `document_routes.router`,
+  matching plan.md's Step 9.1 → 9.2 → 9.3 ordering).
+- **Deliberate consistency decision, not an oversight**: `files/coding-standards.md`
+  section 7 asks for every response wrapped in a generic `APIResponse[T]`
+  envelope (`success`/`data`/`error`/`meta`), but neither route file that
+  existed before this step (`health_routes.py`, `document_routes.py`)
+  does that — both return their Pydantic response model directly, with
+  no documented reasoning anywhere for the deviation. `auth_routes.py`
+  matches that existing, established convention rather than introducing
+  a third, inconsistent style. Flagged here as a **standing gap**:
+  adopting the envelope, if wanted, is a cross-cutting change that
+  should touch every route file at once in its own dedicated step, not
+  be decided ad hoc per file.
+- **Real, pre-existing bug found and fixed, dating back to Step 3.5 —
+  found only because this is the first route to ever write anything**:
+  `adapters/persistence/database.py`'s `get_session()` (the FastAPI
+  dependency every route's repository is built from) never called
+  `session.commit()` — only `session.flush()` happens in
+  `base_repository.py`, and "committed at the API layer" (Step 3.5's
+  Unit-of-Work contract) was never actually implemented at that layer.
+  Every route before this step was read-only (`health_routes.py`,
+  `document_routes.py`), so an uncommitted-then-discarded transaction
+  was invisible. Caught by real-stack validation: registering the same
+  email twice both returned 201 instead of 409 on the second attempt —
+  the first request's insert was flushed (visible within its own
+  transaction) but silently rolled back the moment that request's
+  session closed. Fixed by making `get_session()` commit once the route
+  handler returns cleanly and roll back if it raised — the standard
+  FastAPI generator-dependency idiom, and the only place that "single
+  session per request, committed at the API layer" can actually live
+  given the current DI wiring. New regression tests
+  (`test_get_session_commits_on_a_clean_exit`,
+  `test_get_session_rolls_back_on_an_exception`) drive `get_session()`
+  to both completion and to an injected exception via `anext`/`athrow`
+  and verify persistence (or its absence) through a second, independent
+  session — each disposes `database.engine`'s connection pool
+  afterward, since pytest-asyncio hands every test function its own
+  event loop and a pooled `asyncpg` connection from a prior test's loop
+  crashes the Windows proactor event loop if reused (a real failure hit
+  and fixed during this step's own validation, not a hypothetical).
+- Validation: `ruff check`, `ruff format --check`, `mypy --strict src`
+  all pass with zero suppressions in every new/changed file. New
+  `tests/test_auth_routes.py` (15 tests, fake `EmployeeRepository`/
+  `EmployerRepository` + a real `AuthService`, same dependency-override
+  pattern `test_document_routes.py` established): register success for
+  both `EMPLOYER` and `EMPLOYEE` roles, `ADMIN` rejected, unknown
+  employer 404s, duplicate email 409s, login success/wrong-password/
+  unknown-email/inactive-account, refresh success/wrong-token-type/
+  garbage-token, `/me` returns the right shape with no `hashed_password`
+  key at all, `/me` 401s with no token, `/me` 404s if the token's
+  subject no longer exists. One new test in `test_dependencies.py` for
+  `get_employer_repository`, matching the existing pattern for the other
+  `get_*_repository` functions. Two new regression tests in
+  `test_database.py` for the commit/rollback fix (above). 100% coverage
+  on every new/changed file, **100% coverage across the entire `src/`
+  tree** (2065/2065 statements), 460 tests passing across the whole
+  suite (up from 442), zero warnings. Run against a real
+  `docker compose up -d postgres` container (`alembic upgrade head`, no
+  drift — no migration needed).
+  **Additionally verified against the real stack, not just
+  mocks/TestClient**: `docker compose up -d --build backend` (real
+  Postgres + Redis + FastAPI), inserted a real `Employer` row via
+  `psql`, then exercised the full flow with `curl` against the live
+  server — register (201, row actually persisted this time — confirms
+  the `get_session` fix), duplicate-email register (409, confirms the
+  fix closed the real bug), unknown-employer register (404), `ADMIN`
+  register (422), login with correct/wrong credentials (200/401),
+  refresh with the issued refresh token (200, new access token), `/me`
+  with the issued access token (200, exact expected shape, no
+  `hashed_password`), `/me` with no token (401). Cleaned up the test
+  employee/employer rows via `psql` afterward, then `docker compose down`.
+
+**Phase 9 in progress** — Step 9.1 done; Steps 9.2-9.7 remain.
+
 ## Next recommended step
 
 Phases 4 (Chunking & Embedding Pipeline), 5 (Authentication &
 Multi-Tenancy), 6 (RAG Pipeline), 7 (Document Versioning), and 8
 (Celery Workers & Document Ingestion — Steps 8.1, 8.2, 8.3) are all
-COMPLETE and merged.
+COMPLETE and merged. Step 9.1 (Auth routes) is also COMPLETE and merged
+(or pending merge — see this PR).
+
+Continue with **Step 9.2 — Chat routes** (`feat/chat-sse-routes`):
+`POST /api/chat/conversations`, `GET /api/chat/conversations`,
+`POST /api/chat/conversations/{id}/messages` (the real SSE endpoint
+wrapping `RAGService.query()`'s `GenerationStream`, Step 6.5/6.6 — the
+first real HTTP caller of the whole RAG pipeline end-to-end), and
+`GET /api/chat/conversations/{id}/messages`. Then Step 9.3 (Document
+routes — `document_routes.py` already exists from Step 8.3 and just
+needs `POST /api/documents/upload` added, calling
+`DocumentService.register_upload()` (Step 7.1) then enqueueing
+`document_ingestion_task.process_document_upload` (Step 8.2), plus
+`GET /api/documents` and `DELETE /api/documents/{id}`), then Steps
+9.4-9.7 (employer/employee management, feedback, admin analytics —
+health routes already exist from Step 1.5).
 
 Continue with **Phase 9 — API Routes**: Step 9.1 (`feat/auth-routes`,
 requires two CODEOWNERS approvals — `POST /api/auth/register`,

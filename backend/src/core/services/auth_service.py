@@ -89,7 +89,7 @@ class AuthService:
             raise InvalidCredentialsError()
         if not self.verify_password(password, employee.hashed_password):
             raise InvalidCredentialsError()
-        return self._issue_token_pair(employee)
+        return self.issue_token_pair(employee)
 
     def refresh_access_token(self, refresh_token: str) -> str:
         """Verify a refresh token and issue a new access token from it.
@@ -136,7 +136,15 @@ class AuthService:
         except (KeyError, ValueError) as exc:
             raise InvalidTokenError("missing or malformed claims") from exc
 
-    def _issue_token_pair(self, employee: Employee) -> TokenPair:
+    def issue_token_pair(self, employee: Employee) -> TokenPair:
+        """Mint a fresh access + refresh token pair for an already-known,
+        already-authenticated (or just-created) account.
+
+        Public because Step 9.1's registration route needs to issue tokens
+        for a brand-new account without re-verifying a password it was
+        never given a reason to doubt — `authenticate()` uses this
+        internally too, for the login path.
+        """
         access_token = self._create_token(
             employee.id,
             employee.employer_id,
