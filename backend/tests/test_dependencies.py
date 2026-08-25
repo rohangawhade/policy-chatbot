@@ -18,6 +18,7 @@ from adapters.persistence.document_repo import (
 )
 from adapters.persistence.employee_repo import PostgresEmployeeRepository
 from adapters.persistence.employer_repo import PostgresEmployerRepository
+from adapters.persistence.feedback_repo import PostgresFeedbackRepository
 from adapters.persistence.policy_repo import PostgresEnrollmentRepository, PostgresPolicyRepository
 from adapters.vector_store.pinecone_adapter import PineconeAdapter
 from api.dependencies import (
@@ -33,6 +34,7 @@ from api.dependencies import (
     get_employer_repository,
     get_enrollment_repository,
     get_event_bus,
+    get_feedback_repository,
     get_guardrails_service,
     get_llm_port,
     get_message_repository,
@@ -51,6 +53,7 @@ from core.ports.repository_ports import (
     EmployeeRepository,
     EmployerRepository,
     EnrollmentRepository,
+    FeedbackRepository,
     MessageRepository,
     PolicyRepository,
 )
@@ -150,6 +153,15 @@ def test_get_policy_repository_returns_a_postgres_policy_repository(
 
     assert isinstance(repository, PostgresPolicyRepository)
     assert isinstance(repository, PolicyRepository)
+
+
+def test_get_feedback_repository_returns_a_postgres_feedback_repository(
+    db_session: AsyncSession,
+) -> None:
+    repository = get_feedback_repository(db_session)
+
+    assert isinstance(repository, PostgresFeedbackRepository)
+    assert isinstance(repository, FeedbackRepository)
 
 
 def test_get_analytics_repository_returns_a_postgres_analytics_repository(

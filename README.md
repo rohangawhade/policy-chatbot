@@ -209,7 +209,10 @@ Nothing tracked yet — this section grows as issues are discovered and fixed.
 | POST   | `/api/policies/{id}/enroll`               | Access token (employer or admin) | Enroll an employee in a policy.                                                          |
 | DELETE | `/api/policies/{id}/enroll/{employee_id}` | Access token (employer or admin) | Unenroll an employee from a policy (soft-delete).                                        |
 
-Remaining Phase 9 routes (feedback, admin analytics) land next. This table will be kept current as endpoints are added.
+| POST   | `/api/feedback`                           | Access token          | Submit thumbs up/down (+ optional text) for a message.                                           |
+| GET    | `/api/feedback/analytics`                 | Admin only             | Aggregated feedback stats for one employer.                                                       |
+
+Remaining Phase 9 routes (admin analytics) land next. This table will be kept current as endpoints are added.
 
 ## Project Structure
 
