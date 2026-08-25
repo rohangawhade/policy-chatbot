@@ -1031,6 +1031,27 @@ async def test_query_low_confidence_persists_flagged_response_and_publishes_even
     assert low_confidence_events[0].top_similarity_score == 0.2
 
 
+async def test_query_low_confidence_flagged_response_carries_the_detected_policy_type() -> None:
+    employer_id, employee_id = uuid4(), uuid4()
+    match = VectorMatch(id="c1", score=0.2, metadata={})
+    llm = FakeLLM(stream_tokens=["answer"])
+    analytics = FakeAnalyticsRepository()
+    service = _service(
+        llm,
+        FakeCache(),
+        FakeVectorStore([match]),
+        FakeEnrollmentRepository(),
+        analytics_repository=analytics,
+        low_confidence_threshold=0.5,
+    )
+
+    stream = await service.query("What does my dental plan cover?", employee_id, employer_id)
+    await _consume(stream)
+
+    assert len(analytics.flagged_responses) == 1
+    assert analytics.flagged_responses[0].policy_type == PolicyType.DENTAL
+
+
 async def test_query_high_confidence_does_not_flag_or_publish() -> None:
     employer_id, employee_id = uuid4(), uuid4()
     match = VectorMatch(id="c1", score=0.9, metadata={})

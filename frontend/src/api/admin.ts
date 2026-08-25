@@ -1,4 +1,5 @@
 import { apiClient } from "./client";
+import type { PolicyType } from "./documents";
 
 // Mirrors admin_routes.py's OverviewResponse (GET /api/admin/overview).
 export interface OverviewDto {
@@ -75,5 +76,93 @@ export async function getCostAlerts(params: CostDashboardParams = {}): Promise<C
       end: params.end || undefined,
     },
   });
+  return response.data;
+}
+
+// Mirrors admin_routes.py's FlaggedResponseItem (Step 9.6 + Step 10.6's
+// response_text/model_used/policy_type enrichment). `top_similarity_score`
+// is the only per-query retrieval signal actually persisted -- there's no
+// stored list of individual retrieved chunks to expand into (see
+// admin_routes.py's own documented-interpretation note).
+export interface FlaggedResponseItemDto {
+  id: string;
+  employer_id: string;
+  conversation_id: string;
+  message_id: string;
+  query_text: string;
+  top_similarity_score: number | null;
+  flag_reason: string;
+  status: "pending_review" | "reviewed" | "dismissed" | "escalated";
+  created_at: string;
+  response_text: string | null;
+  model_used: string | null;
+  policy_type: PolicyType | null;
+}
+
+// Mirrors admin_routes.py's GuardrailRejectionItem.
+export interface GuardrailRejectionItemDto {
+  id: string;
+  employer_id: string;
+  query_text: string;
+  rejection_reason: string;
+  created_at: string;
+}
+
+export interface ListParams {
+  employerId?: string;
+  start?: string;
+  end?: string;
+}
+
+export async function listFlaggedResponses(
+  params: ListParams & { status?: string } = {},
+): Promise<FlaggedResponseItemDto[]> {
+  const response = await apiClient.get<FlaggedResponseItemDto[]>("/api/admin/flagged-responses", {
+    params: {
+      employer_id: params.employerId || undefined,
+      status_filter: params.status || undefined,
+    },
+  });
+  return response.data;
+}
+
+// "reviewed"/"dismissed"/"escalated" are the only statuses the backend
+// accepts (admin_routes.py's `_TERMINAL_FLAG_STATUSES` -- `pending_review`
+// is the initial state, never a target). Mapped in the UI to plan.md's
+// "reviewed"/"false positive"/"needs document update" labels.
+export async function updateFlaggedResponse(
+  id: string,
+  status: "reviewed" | "dismissed" | "escalated",
+): Promise<FlaggedResponseItemDto> {
+  const response = await apiClient.patch<FlaggedResponseItemDto>(
+    `/api/admin/flagged-responses/${id}`,
+    { status },
+  );
+  return response.data;
+}
+
+export async function listGuardrailRejections(
+  params: ListParams = {},
+): Promise<GuardrailRejectionItemDto[]> {
+  const response = await apiClient.get<GuardrailRejectionItemDto[]>(
+    "/api/admin/guardrail-rejections",
+    {
+      params: {
+        employer_id: params.employerId || undefined,
+        start: params.start || undefined,
+        end: params.end || undefined,
+      },
+    },
+  );
+  return response.data;
+}
+
+export async function listUnansweredQueries(
+  params: Pick<ListParams, "employerId"> = {},
+): Promise<FlaggedResponseItemDto[]> {
+  const response = await apiClient.get<FlaggedResponseItemDto[]>(
+    "/api/admin/unanswered-queries",
+    { params: { employer_id: params.employerId || undefined } },
+  );
   return response.data;
 }

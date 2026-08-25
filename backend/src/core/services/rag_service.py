@@ -311,6 +311,7 @@ class GenerationStream:
             message_id=message_id,
             model=model,
             query_text=self._query_text,
+            policy_type=retrieval.policy_type,
             top_score=top_score,
             is_low_confidence=is_low_confidence,
         )
@@ -602,6 +603,7 @@ class RAGService:
         message_id: UUID,
         model: str,
         query_text: str,
+        policy_type: PolicyType | None,
         top_score: float | None,
         is_low_confidence: bool,
     ) -> None:
@@ -628,6 +630,7 @@ class RAGService:
                 query_text=query_text,
                 top_similarity_score=top_score,
                 flag_reason=_LOW_CONFIDENCE_FLAG_REASON,
+                policy_type=policy_type,
             )
         )
         await self._event_bus.publish(

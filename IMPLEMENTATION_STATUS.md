@@ -3360,17 +3360,118 @@ fix, the same script logs in successfully and lands on `/chat`
   the PR body, same `gh`/GitHub-REST-API limitation as Steps 10.3-10.4).
   Cleaned up every seeded row via `psql` afterward, `docker compose down`.
 
+### Step 10.6 — Admin dashboard: quality monitoring — DONE
+
+- `src/components/admin/FlaggedResponses.tsx` — table of auto-flagged
+  low-confidence responses, each row expandable (query, generated
+  response, model used, top retrieved-chunk similarity) with three
+  actions. `src/components/admin/GuardrailsLog.tsx` — rejected-query
+  table (query, reason, employer, timestamp). `src/components/admin/
+  UnansweredQueries.tsx` — the low-confidence subset, grouped by
+  employer then policy type. All three added to a new "Quality
+  Monitoring" tab in `AdminDashboard.tsx`. `src/api/admin.ts` extended
+  with `listFlaggedResponses`/`updateFlaggedResponse`/
+  `listGuardrailRejections`/`listUnansweredQueries`.
+- **Documented interpretations**:
+  - Plan.md's admin actions ("reviewed"/"false positive"/"needs document
+    update") don't literally match the backend's terminal statuses
+    (`reviewed`/`dismissed`/`escalated`, Step 9.6's
+    `_TERMINAL_FLAG_STATUSES` — `pending_review` is the initial state,
+    never a target). Mapped `dismissed` → "False Positive" (the flag
+    wasn't a real quality problem) and `escalated` → "Needs Document
+    Update" (routed for follow-up work) — a labeling decision, not a new
+    backend status.
+  - "Grouped by employer and policy type" (`UnansweredQueries`): the
+    backend endpoint returns a flat list; grouping happens client-side
+    rather than adding a second, differently-shaped endpoint for what's
+    purely a presentation concern.
+- **Real, necessary backend expansion — not scope creep, plan.md's own
+  Step 10.6 bullets ask for data the existing `FlaggedResponseItem`
+  (Step 9.6) didn't carry**:
+  1. "Each row expandable to show... the generated response, and the
+     model used": `FlaggedResponse` only ever stored `message_id`, not
+     the response text or model. `admin_routes.py`'s
+     `_to_flagged_response_item` now optionally takes the `Message` row
+     `message_id` already points to (fetched via
+     `message_repository.get()` in `list_flagged_responses`,
+     `update_flagged_response`, and `list_unanswered_queries`) and
+     surfaces its `content`/`model_used` as new `response_text`/
+     `model_used` fields on `FlaggedResponseItem` — best-effort: a
+     missing/deleted message leaves them `null` rather than 404ing the
+     whole list.
+  2. **Documented gap, not filled**: "retrieved chunks (with similarity
+     scores)," plural — `FlaggedResponse` only ever stored one
+     `top_similarity_score`, never the individual chunks. That detail
+     was never persisted anywhere in the pipeline and reconstructing it
+     (re-running retrieval after the fact, or logging every chunk match
+     at generation time) is out of scope for a dashboard step. The
+     existing single score is what's shown; documented in
+     `admin_routes.py`'s module docstring rather than silently
+     papered over or faked with placeholder chunks.
+  3. "Grouped by employer and policy type": `FlaggedResponse` had no
+     `policy_type` at all (only `Message.policy_type` does, and it's
+     only ever set on the *user's* query message — `FlaggedResponse.
+     message_id` points to the *assistant's* response message, so
+     fetching that message can't recover it). Added a real, additive
+     `policy_type` column to `flagged_responses`
+     (migration `59b154e773c6`, nullable, reusing the existing
+     `policy_type` Postgres enum type — verified with a full `upgrade`
+     → `downgrade` → `upgrade` cycle against real Postgres, no
+     `create_type`/`drop_type` lifecycle issue since `op.add_column`/
+     `op.drop_column` never touch the shared enum type, unlike Step
+     1.3's `op.create_table`/`op.drop_table` bug), populated at write
+     time in `RAGService._finalize_turn` from `retrieval.policy_type`
+     (already computed earlier in the same request — no new detection
+     logic, just threading an existing value one call further).
+     `core/domain/analytics.py`, `adapters/persistence/models.py`, and
+     `adapters/persistence/analytics_repo.py` (a new `_orm_policy_type`
+     helper, matching `document_repo.py`'s existing pattern for the same
+     nullable-enum-by-name conversion) all updated to match.
+- New backend tests: `test_list_flagged_responses_enriches_from_the_
+  flagged_message`, `test_list_flagged_responses_leaves_enrichment_null_
+  when_message_is_gone`, `test_list_unanswered_queries_includes_policy_
+  type_for_grouping` (test_admin_routes.py); `test_query_low_confidence_
+  flagged_response_carries_the_detected_policy_type` (test_rag_service.py,
+  proves `_detect_policy_type`'s existing output actually reaches the
+  persisted `FlaggedResponse`); the existing `test_record_flagged_
+  response_and_list_flagged_responses` (test_analytics_repo.py) extended
+  to round-trip a real `policy_type` value against live Postgres — the
+  enum-name-vs-value class of bug this project has been bitten by before
+  (Step 3.5) is exactly what this test would have caught.
+- Validation: `ruff check`/`ruff format --check`/`mypy --strict src` all
+  pass; full backend suite green, 596 tests (up from 592 — 4 new,
+  1 existing extended). Full Alembic `upgrade`/`downgrade`/`upgrade`
+  cycle re-verified against real Postgres for the new migration,
+  `alembic check` reports no drift. Frontend: `npm run lint` /
+  `npx tsc --noEmit` / `npm run build` clean (a real `chunk size >500kB`
+  build warning appeared, from `recharts`, Step 10.5 — noted, not acted
+  on for this small internal dashboard). **Verified end-to-end against
+  the real stack**: rebuilt the backend image (`docker compose up -d
+  --build backend redis` — this step changed backend code), `alembic
+  upgrade head`, seeded two employers/an admin/three flagged responses
+  (two `low_retrieval_confidence`, one a different reason) with real
+  assistant messages behind them, two guardrail rejections. Confirmed
+  via direct API calls first that all three endpoints returned the
+  correctly enriched/grouped data, then drove the actual UI with
+  headless Chromium (Playwright): opened the new Quality Monitoring tab,
+  confirmed all three sections rendered with the right data (including
+  the employer/policy-type grouping), expanded a flagged-response row
+  and confirmed the query/response/model/similarity all matched the
+  seed data exactly, clicked "Mark Reviewed" and confirmed a real
+  `PATCH` round-trip flipped the badge from "Pending Review" to
+  "Reviewed". 3 screenshots captured and reviewed in this session (not
+  embedded in the PR body, same limitation as Steps 10.3-10.5). Cleaned
+  up every seeded row via `psql` afterward, `docker compose down`.
+
 ## Next recommended step
 
-Continue with **Step 10.6 — Admin dashboard: quality monitoring**
-(`feat/admin-quality-monitoring-ui`, screenshots required in the PR per
-plan.md): `FlaggedResponses` (table of auto-flagged low-confidence
-responses, each row expandable to show the query/retrieved chunks with
-similarity scores/generated response/model used, with reviewed/dismissed/
-escalated actions — `GET`/`PATCH /api/admin/flagged-responses`),
-`GuardrailsLog` (rejected queries with reason/employer/timestamp —
-`GET /api/admin/guardrail-rejections`), and `UnansweredQueries` (grouped
-by employer and policy type — `GET /api/admin/unanswered-queries`). All
-three routes already exist from Step 9.6. Same headless-Chromium/Playwright
-screenshot workflow as Steps 10.3-10.5; `recharts` is now available if a
-future step wants a chart rather than a table.
+Continue with **Step 10.7 — Admin dashboard: operational health**
+(`feat/admin-operational-health-ui`, screenshots required in the PR per
+plan.md): `LatencyMonitor` (P50/P95/P99 latency chart, retrieval vs.
+generation split, filterable by model tier and time window —
+`GET /api/admin/latency`), `DocumentHealth` (failed-ingestion/stale/
+zero-query-hit documents — `GET /api/admin/document-health`), and
+`TopicHeatmap` (query volume by policy type × time bucket, visual grid —
+`GET /api/admin/topic-heatmap`). All three routes already exist from
+Step 9.6; `recharts` is available for the latency chart. Same
+headless-Chromium/Playwright screenshot workflow as Steps 10.3-10.6.

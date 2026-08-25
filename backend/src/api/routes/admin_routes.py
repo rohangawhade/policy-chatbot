@@ -27,6 +27,18 @@ admin dashboard.
 - `GET /api/admin/document-health`'s "stale" bucket uses a fixed
   `_STALE_THRESHOLD_DAYS` (182, "6+ months") against `updated_at` —
   plan.md doesn't specify an exact day count for "6 months".
+- `FlaggedResponseItem`'s `response_text`/`model_used`/`policy_type`
+  (Step 10.6): `FlaggedResponse` (Step 6.6) only ever stored a single
+  `top_similarity_score`, never the individual retrieved chunks plan.md's
+  Step 10.6 bullet asks the admin UI to expand ("retrieved chunks with
+  similarity scores") -- that per-chunk detail was never persisted
+  anywhere and reconstructing it isn't in scope here. What *is*
+  reconstructable is the generated response and the model that produced
+  it (the `Message` row `message_id` already points to, `content`/
+  `model_used`), plus `policy_type` for `unanswered-queries`' "grouped by
+  employer and policy type" ask (`FlaggedResponse` itself has no
+  `policy_type`; `Message` does). Best-effort: a missing/deleted message
+  leaves these three fields `null` rather than 404ing the whole list.
 """
 
 from collections import defaultdict
@@ -47,7 +59,7 @@ from api.dependencies import (
 from api.middleware.auth_middleware import require_role
 from config import llm_config
 from core.domain.analytics import FlaggedResponse, FlaggedResponseStatus
-from core.domain.conversation import MessageRole
+from core.domain.conversation import Message, MessageRole
 from core.domain.document import DocumentStatus
 from core.domain.employee import UserRole
 from core.domain.feedback import FeedbackRating
@@ -148,6 +160,9 @@ class FlaggedResponseItem(BaseModel):
     flag_reason: str
     status: FlaggedResponseStatus
     created_at: datetime
+    response_text: str | None = None
+    model_used: str | None = None
+    policy_type: PolicyType | None = None
 
 
 class FlaggedResponseUpdateRequest(BaseModel):
@@ -323,7 +338,9 @@ async def get_latency(
     )
 
 
-def _to_flagged_response_item(flagged: FlaggedResponse) -> FlaggedResponseItem:
+def _to_flagged_response_item(
+    flagged: FlaggedResponse, message: Message | None = None
+) -> FlaggedResponseItem:
     return FlaggedResponseItem(
         id=flagged.id,
         employer_id=flagged.employer_id,
@@ -334,6 +351,9 @@ def _to_flagged_response_item(flagged: FlaggedResponse) -> FlaggedResponseItem:
         flag_reason=flagged.flag_reason,
         status=flagged.status,
         created_at=flagged.created_at,
+        response_text=message.content if message else None,
+        model_used=message.model_used if message else None,
+        policy_type=message.policy_type if message else None,
     )
 
 
@@ -342,11 +362,14 @@ async def list_flagged_responses(
     employer_id: UUID | None = None,
     status_filter: FlaggedResponseStatus | None = None,
     analytics_repository: AnalyticsRepository = Depends(get_analytics_repository),
+    message_repository: MessageRepository = Depends(get_message_repository),
 ) -> list[FlaggedResponseItem]:
     flagged = await analytics_repository.list_flagged_responses(
         employer_id=employer_id, status=status_filter
     )
-    return [_to_flagged_response_item(f) for f in flagged]
+    return [
+        _to_flagged_response_item(f, await message_repository.get(f.message_id)) for f in flagged
+    ]
 
 
 @router.patch("/flagged-responses/{flagged_response_id}")
@@ -354,6 +377,7 @@ async def update_flagged_response(
     flagged_response_id: UUID,
     body: FlaggedResponseUpdateRequest,
     analytics_repository: AnalyticsRepository = Depends(get_analytics_repository),
+    message_repository: MessageRepository = Depends(get_message_repository),
 ) -> FlaggedResponseItem:
     """Mark a flagged response reviewed, dismissed, or escalated.
 
@@ -377,7 +401,7 @@ async def update_flagged_response(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Flagged response not found."
         ) from exc
-    return _to_flagged_response_item(updated)
+    return _to_flagged_response_item(updated, await message_repository.get(updated.message_id))
 
 
 @router.get("/guardrail-rejections")
@@ -406,10 +430,12 @@ async def list_guardrail_rejections(
 async def list_unanswered_queries(
     employer_id: UUID | None = None,
     analytics_repository: AnalyticsRepository = Depends(get_analytics_repository),
+    message_repository: MessageRepository = Depends(get_message_repository),
 ) -> list[FlaggedResponseItem]:
     flagged = await analytics_repository.list_flagged_responses(employer_id=employer_id)
+    unanswered = [f for f in flagged if f.flag_reason == _UNANSWERED_FLAG_REASON]
     return [
-        _to_flagged_response_item(f) for f in flagged if f.flag_reason == _UNANSWERED_FLAG_REASON
+        _to_flagged_response_item(f, await message_repository.get(f.message_id)) for f in unanswered
     ]
 
 
