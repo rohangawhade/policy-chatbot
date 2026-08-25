@@ -14,6 +14,16 @@ Nothing in `files/plan.md`'s Step 9.4 text calls out admin access to
 policy management specifically (only employer CRUD is named
 "admin only"), so this stays simple rather than speculatively adding
 the same admin carve-out everywhere.
+
+**Added for Step 10.8**: `GET /{policy_id}/enrollments`.
+`EnrollmentRepository.list_by_policy` (Step 2.2/3.5) already existed and
+was already implemented (`PostgresEnrollmentRepository`), but nothing
+routed to it — `files/plan.md`'s Step 10.8 employer-portal bullet
+("policy overview: ... which employees are enrolled") needs exactly
+this and there was no way to get it. Gated behind `_require_manager`
+like every other route here that returns employee PII (matching
+`employee_routes.py`'s stricter-than-document-list default for the
+same reason).
 """
 
 from uuid import UUID
@@ -64,6 +74,13 @@ class EnrollmentRequest(BaseModel):
 class EnrollmentResponse(BaseModel):
     employee_id: UUID
     policy_id: UUID
+    is_active: bool
+
+
+class EnrolledEmployeeResponse(BaseModel):
+    employee_id: UUID
+    full_name: str
+    email: str
     is_active: bool
 
 
@@ -120,6 +137,35 @@ async def get_policy(
 ) -> PolicyResponse:
     policy = await _get_owned_policy(policy_repository, policy_id, employer_id)
     return _to_response(policy)
+
+
+@router.get("/{policy_id}/enrollments", dependencies=[Depends(_require_manager)])
+async def list_policy_enrollments(
+    policy_id: UUID,
+    employer_id: UUID = Depends(get_current_employer_id),
+    policy_repository: PolicyRepository = Depends(get_policy_repository),
+    employee_repository: EmployeeRepository = Depends(get_employee_repository),
+    enrollment_repository: EnrollmentRepository = Depends(get_enrollment_repository),
+) -> list[EnrolledEmployeeResponse]:
+    """Which employees are enrolled in this policy (files/plan.md Step
+    10.8's employer-portal policy overview)."""
+    await _get_owned_policy(policy_repository, policy_id, employer_id)
+    enrollments = await enrollment_repository.list_by_policy(policy_id)
+
+    response = []
+    for enrollment in enrollments:
+        employee = await employee_repository.get(enrollment.employee_id)
+        if employee is None:
+            continue
+        response.append(
+            EnrolledEmployeeResponse(
+                employee_id=employee.id,
+                full_name=employee.full_name,
+                email=employee.email,
+                is_active=enrollment.is_active,
+            )
+        )
+    return response
 
 
 @router.patch("/{policy_id}", dependencies=[Depends(_require_manager)])

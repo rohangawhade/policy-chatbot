@@ -3547,18 +3547,103 @@ fix, the same script logs in successfully and lands on `/chat`
   a real problem. This step (10.7) started with an explicit
   `git checkout -b` from the start specifically to not repeat this.
 
+### Step 10.8 — Employer portal — DONE
+
+- `pages/EmployerPortal.tsx` — replaced the Step 10.1 placeholder with a
+  real tabbed page (Documents / Employees / Policies), same tabbed
+  convention as `AdminDashboard.tsx`. Three new
+  `src/components/employer/` files, matching `files/plan.md`'s own file
+  tree for this step exactly (`SelfServeUpload.tsx`, `UserManagement.tsx`,
+  `PolicyOverview.tsx` — a *different* three-file split than the admin
+  dashboard's `DocumentUpload`+`DocumentList`, so built fresh rather than
+  importing the admin components into `employer/`, keeping the two
+  folders' boundaries clean as the plan's tree implies):
+  - `SelfServeUpload.tsx` — upload + list combined into one component
+    (the plan names one file, not admin's two), no employer-id field at
+    all (unlike admin's `DocumentUpload`, which needs one for the
+    admin-no-employer_id case) — an `EMPLOYER` caller's employer_id is
+    always token-derived, so there's nothing to pick from here.
+  - `UserManagement.tsx` — invite (see below)/view/deactivate, reusing
+    `document_routes.py`'s established "PATCH `is_active: false`, not
+    hard DELETE" soft-delete pattern (same choice Step 10.4 made for
+    employer deactivation).
+  - `PolicyOverview.tsx` — every policy under the org, each row
+    expandable to show enrolled employees (name/email/status).
+  - New `src/api/employees.ts` and `src/api/policies.ts` (both needed,
+    neither named in plan.md's `api/` file tree — same "add what a real
+    call site needs, matching existing granularity" precedent as Step
+    9.3's `ConversationSidebar`/Step 10.3).
+- **Documented interpretation**: plan.md's "invite" employee is direct
+  account creation with a caller-set temporary password
+  (`POST /api/employees`, Step 9.4) — there's no email/SMTP integration
+  anywhere in this codebase to send an actual invite link, so "invite"
+  can only mean this.
+- **Real, necessary backend addition — plan.md's own bullet ("policy
+  overview: ... which employees are enrolled") needs data no existing
+  route exposed**: `EnrollmentRepository.list_by_policy` (Step 2.2, and
+  already implemented in `PostgresEnrollmentRepository` since Step 3.5)
+  had never been routed to anything — `policy_routes.py` only ever
+  exposed enroll/unenroll (write), never a read of "who's enrolled in
+  this policy." Added `GET /api/policies/{policy_id}/enrollments`
+  (`EnrolledEmployeeResponse` — employee_id/full_name/email/is_active,
+  joining each enrollment to its `Employee` row), gated behind the same
+  `_require_manager` (`EMPLOYER`/`ADMIN`) role check as every other
+  route in this file that returns employee PII, matching
+  `employee_routes.py`'s established stricter-than-document-list
+  default for that data class. A dangling enrollment (employee row
+  deleted) is skipped rather than erroring.
+- Confirmed rather than assumed that `DocumentUpload`/`DocumentList`
+  from Step 10.4 and the upload/list/delete document routes (Step 9.3)
+  already work correctly for an `EMPLOYER` caller with zero changes
+  (`_require_uploader_or_admin = require_role(EMPLOYER, ADMIN)`,
+  `_resolve_upload_employer_id` already derives from the token for a
+  non-admin caller) — this is exactly why `SelfServeUpload.tsx` is a
+  fresh, simpler component rather than a wrapper around the admin ones:
+  the backend was already ready, only a self-serve-shaped frontend was
+  missing.
+- New backend tests (`test_policy_routes.py`):
+  `test_list_policy_enrollments_returns_enrolled_employees`,
+  `test_list_policy_enrollments_omits_unenrolled_and_deleted_employees`,
+  `test_list_policy_enrollments_404s_for_another_employers_policy`,
+  `test_list_policy_enrollments_403s_for_an_employee_caller`.
+- Validation: `ruff check`/`ruff format --check`/`mypy --strict src` all
+  pass; full backend suite green, 602 tests (up from 598). Frontend:
+  `npm run lint` / `npx tsc --noEmit` / `npm run build` clean.
+  **Verified end-to-end against the real stack**: rebuilt the backend
+  image (new route added), `alembic upgrade head` (no new migration —
+  this step is read-side only, no schema change), seeded one employer
+  account (role `EMPLOYER`, not `ADMIN`), one employee, and two
+  policies with one active enrollment. Confirmed via direct API calls
+  first that login as the employer account and both endpoints worked,
+  then drove the actual UI with headless Chromium (Playwright): logged
+  in as the `EMPLOYER` account (redirected to `/employer`, not
+  `/admin`), confirmed the Documents tab shows no admin-only
+  employer-id field, switched to Employees and confirmed the existing
+  employee appeared, invited a brand-new employee through the real form
+  and confirmed a genuine `POST /api/employees` round-trip added them
+  to the list, switched to Policies and expanded a policy row and
+  confirmed the seeded enrollment appeared with the correct
+  name/email/status (and the *other* policy correctly showed no
+  enrollments). 4 screenshots captured and reviewed in this session
+  (not embedded in the PR body, same limitation as Steps 10.3-10.7).
+  Cleaned up every seeded row via `psql` afterward, `docker compose down`.
+- README.md's Features checklist Phase 10 line updated to checked —
+  this was the last step of the phase.
+
+**Phase 10 — React Frontend: COMPLETE.**
+
 ## Next recommended step
 
-Continue with **Step 10.8 — Employer portal**
-(`feat/employer-portal-ui`, screenshots required in the PR per plan.md):
-self-serve document upload scoped to the caller's own employer (reusing
-Step 10.4's `DocumentUpload`/`DocumentList` components where they already
-support an `EMPLOYER`-role caller — they were built admin-first, so check
-whether they need any change for a non-admin, non-`employer_id`-picker
-caller before assuming they just work), employee management (invite,
-view, deactivate — `POST`/`GET`/`PATCH`/`DELETE /api/employees`, Step 9.4),
-and a policy overview (which policies exist, which employees are
-enrolled — `GET /api/policies`/`GET /api/enrollments`, Step 9.4). This is
-the last step of Phase 10 — the README's Phase 10 checkbox should be
-checked once it lands. Same headless-Chromium/Playwright screenshot
-workflow as Steps 10.3-10.7.
+Continue with **Phase 11 — Data Acquisition & Seeding**, starting with
+**Step 11.1 — Download real government PDFs**
+(`feat/gov-pdf-download-script` — downloaded PDFs stay git-ignored):
+`scripts/download_gov_docs.py` to pull open-access benefits PDFs from
+healthcare.gov, OPM.gov, DOL.gov, and CMS.gov into `data/gov_pdfs/` by
+source/type, targeting 50-100 real documents. This is the first script
+in the project that does real, unattended internet downloads from
+government sites — worth checking each source's robots.txt/terms before
+scripting bulk downloads, and building in retry/backoff plus a
+manifest/checksum file so re-runs don't re-download everything. No
+frontend or backend code changes expected; this step is standalone
+tooling that Step 11.3's seed script (and Step 12's eval dataset) will
+consume later.
