@@ -33,6 +33,7 @@ from api.middleware.tenant_context import get_current_employer_id
 from config import app_config
 from core.domain.document import Document, DocumentStatus
 from core.domain.employee import UserRole
+from core.domain.errors import NotFoundError
 from core.domain.policy import PolicyType
 from core.ports.repository_ports import DocumentChunkRepository, DocumentRepository
 from core.ports.vector_store_port import VectorStorePort
@@ -94,7 +95,7 @@ async def _get_owned_document(
         # Same 404 for "doesn't exist" and "belongs to another employer" —
         # a 403 would leak that the id exists at all, across a tenant
         # boundary that isn't this caller's to know about.
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
+        raise NotFoundError("Document not found.", code="not_found")
     return document
 
 
@@ -107,9 +108,9 @@ async def _get_deletable_document(
     employer's document."""
     document = await document_repository.get(document_id)
     if document is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
+        raise NotFoundError("Document not found.", code="not_found")
     if current_user.role != UserRole.ADMIN and document.employer_id != current_user.employer_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
+        raise NotFoundError("Document not found.", code="not_found")
     return document
 
 

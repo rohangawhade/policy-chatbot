@@ -42,7 +42,7 @@ See `files/plan.md` for the full design (tech stack rationale, data flow diagram
 - [x] Data acquisition & seeding: real government benefits PDFs, demo employer/employee/policy seed script (Phase 11 — LLM-generated synthetic docs, Step 11.2, blocked on a real `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`)
 - [ ] RAGAS evaluation pipeline (Phase 12 — blocked on the same missing LLM credential)
 - [x] Dependency injection wiring audit (Phase 13)
-- [ ] Production polish (Phase 14): structured logging with correlation IDs done; error handling, rate limiting, retry middleware, API docs, environment profiles, release automation still open
+- [ ] Production polish (Phase 14): structured logging with correlation IDs, global error handling done; rate limiting, retry middleware, API docs, environment profiles, release automation still open
 
 Track detailed step-by-step progress in `IMPLEMENTATION_STATUS.md`.
 
@@ -161,6 +161,13 @@ All configuration is typed and validated via `backend/src/config.py` (Pydantic S
 <summary>📋 Logging</summary>
 
 Every log line goes through `structlog` (`backend/src/logging_config.py`), configured once at process startup for both the API server and Celery workers: pretty console output when `APP_ENV` isn't `production`, JSON otherwise, and `DEBUG`-level logs only when `APP_DEBUG=true`. Every API request gets a correlation ID (read from an incoming `X-Correlation-ID` header if the caller sent one, otherwise generated) attached to every log line emitted while handling it, plus `employer_id`/`user_id` for an authenticated request — and echoed back on the response's `X-Correlation-ID` header for tracing a single request end-to-end. LLM calls (model, tokens, latency) and Celery tasks (start/complete, duration) are logged the same way.
+
+</details>
+
+<details>
+<summary>⚠️ Error Handling</summary>
+
+A route or service can raise a plain domain exception (`core/domain/errors.py`'s `PolicyPalError` hierarchy — `NotFoundError`, `AuthenticationError`, `AuthorizationError`, `TenantAccessError`, `RateLimitError`, `ModelUnavailableError`, `DomainError`, `DocumentProcessingError`) without importing anything from `fastapi` at all; a global handler (`backend/src/api/error_handlers.py`, registered in `main.py`) converts it to the right HTTP status code and a safe `{"detail": "..."}` body. Anything else unhandled — a genuine bug — never reaches the client as a stack trace: it's converted to a generic `500 {"detail": "An unexpected error occurred..."}` response, while the real exception (with its correlation ID) is still fully logged server-side via `RequestLoggerMiddleware`.
 
 </details>
 

@@ -12,6 +12,7 @@ from api.dependencies import (
     get_feedback_repository,
     get_message_repository,
 )
+from api.error_handlers import register_exception_handlers
 from api.middleware.auth_middleware import get_current_user
 from api.routes import admin_routes
 from core.domain.analytics import (
@@ -261,6 +262,7 @@ def _test_app(
     role: UserRole = UserRole.ADMIN,
 ) -> FastAPI:
     app = FastAPI()
+    register_exception_handlers(app)
     app.include_router(admin_routes.router)
     app.dependency_overrides[get_analytics_repository] = lambda: (
         analytics_repository or _FakeAnalyticsRepository()

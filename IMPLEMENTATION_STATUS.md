@@ -4044,20 +4044,123 @@ blocked). Step 11.3 below was deliberately designed to not depend on
   Phase 11.2/Phase 12 still correctly shown as blocked/open), new
   "📋 Logging" collapsible section under Environment Setup.
 
+### Step 14.2 — Error handling — DONE
+
+- `backend/src/core/domain/errors.py` — added the rest of
+  files/coding-standards.md section 6's named hierarchy verbatim:
+  `DomainError`, `NotFoundError`, `AuthorizationError`,
+  `TenantAccessError(AuthorizationError)`, `RateLimitError`,
+  `ModelUnavailableError`. `AuthenticationError`/`DocumentProcessingError`
+  and their existing subclasses (Steps 3.6/5.1) were already there.
+- `backend/src/api/error_handlers.py` (new) —
+  `register_exception_handlers(app)`, called from `main.py`'s
+  `create_app()`. Maps each `PolicyPalError` subclass to an HTTP status
+  via `app.add_exception_handler(error_type, ...)` per entry in
+  `_STATUS_BY_ERROR` (`AuthenticationError`→401, `AuthorizationError`→403,
+  `NotFoundError`→404, `RateLimitError`→429, `ModelUnavailableError`→503,
+  `DocumentProcessingError`→422, `DomainError`→400, `PolicyPalError`
+  itself→400 as the catch-all for any future subclass not otherwise
+  listed) — a subclass with no entry of its own (`TenantAccessError`,
+  `UnsupportedFormatError`) correctly resolves to its listed ancestor's
+  handler for free, since Starlette's exception-handler lookup walks the
+  raised exception's MRO (confirmed by reading
+  `starlette._exception_handler._lookup_exception_handler`'s source
+  directly, not assumed). Every handler returns `{"detail": exc.message}`
+  — the exact shape FastAPI's own default `HTTPException` handler already
+  produces, so none of the (untouched) existing `HTTPException` call
+  sites' response bodies changed.
+- **The true last-resort catch-all works differently from the rest, by
+  design, not oversight**: `app.add_exception_handler(Exception,
+  _handle_unexpected_error)` doesn't go through the same per-class MRO
+  lookup as everything else — reading
+  `Starlette.build_middleware_stack`'s source directly showed it
+  special-cases a handler registered on `Exception` (or `500`), pulling
+  it out as `ServerErrorMiddleware`'s own dedicated `handler` (the
+  outermost layer, wrapping every other middleware including Step 14.1's
+  `RequestLoggerMiddleware`/`TenantContextMiddleware`/`CORSMiddleware`) —
+  the correct, idiomatic way to install a global "anything else, return a
+  safe 500" handler in Starlette/FastAPI, not something this step
+  invented. Confirmed by reading `ServerErrorMiddleware.__call__` too:
+  it checks `self.debug` *before* even considering a custom handler, so
+  `main.py` must never pass `FastAPI(debug=True)` — regardless of
+  `AppConfig.debug` (Step 14.1's dev/prod switch for structlog's level,
+  a completely separate concern) — or Starlette's own HTML traceback
+  page would bypass this handler entirely and leak exactly what section
+  6 forbids. `main.py` already never set it, so this was verifying an
+  existing correct default, not a new fix.
+- **Deliberately doesn't log**: `_handle_unexpected_error` only shapes
+  the response. `RequestLoggerMiddleware` (Step 14.1) already logs
+  `request_failed` — correlation ID, method, path, full exception via
+  `logger.exception` — while the exception is still propagating up
+  through it, before `ServerErrorMiddleware` ever sees it; logging again
+  here would just duplicate that entry.
+- **Migrated the 15 pre-existing "not found" `HTTPException` raises**
+  (spread across `admin_routes.py`, `auth_routes.py`, `chat_routes.py`,
+  `document_routes.py` x2, `employee_routes.py` x2, `employer_routes.py`,
+  `feedback_routes.py` x2, `policy_routes.py` x3) to `raise
+  NotFoundError(same_message, code="not_found")` instead — this step's
+  first real caller of the new hierarchy, not dead code, and exactly the
+  layering section 6 asks for ("API layer converts domain exceptions to
+  appropriate HTTP status codes"): these routes no longer need to import
+  `HTTPException`/`status` at all for this check (4 files —
+  `chat_routes.py`, `employer_routes.py`, `feedback_routes.py`,
+  `policy_routes.py` — had that as their *only* use of `HTTPException`,
+  so `ruff --fix` dropped the now-unused import in each). Every other
+  existing `HTTPException` raise (401/409/413/422/204/201 elsewhere in
+  these files) is untouched — this step's scope is "not found" only,
+  the single largest, most uniform, and safest category to migrate;
+  response bodies are byte-for-byte identical to before (same `detail`
+  message, same status code), so no behavior changed for any existing
+  caller.
+- **Real gap found and fixed while migrating**: every affected route
+  file's own test suite builds an isolated `FastAPI()` test app (one
+  router at a time, dependency-overridden) rather than the real
+  `create_app()` — an established pattern predating this step, for fast/
+  focused route tests. None of those 8 test apps had
+  `register_exception_handlers()` called on them, so the newly-raised
+  `NotFoundError`s had no registered handler in the test apps and
+  propagated as real unhandled exceptions instead of 404 responses —
+  caught immediately by running the full suite (23 failures), not a
+  hypothetical. Fixed by adding `register_exception_handlers(app)` to
+  each of the 8 affected test files' `_test_app()` helper, right after
+  `app = FastAPI()`.
+- Validation: `ruff check`/`ruff format --check`/`mypy --strict src` all
+  pass with zero suppressions in every new/changed file. New
+  `tests/test_error_handlers.py` (12 tests: every `_STATUS_BY_ERROR`
+  entry's status code via a real request through a minimal app, the two
+  MRO-fallback cases — `TenantAccessError`→403,
+  `UnsupportedFormatError`→422 — an unmapped `PolicyPalError` subclass
+  falling back to 400, an unhandled `ValueError` producing the generic
+  safe 500 with the real message provably absent from the response body,
+  and the defensive `TypeError` guard for a non-`PolicyPalError` passed
+  directly into a handler). Extended `tests/test_errors.py` for the 6 new
+  exception classes. Full suite: 655 tests passing (up from 637), 100%
+  coverage across the entire `src/` tree (2987/2987 statements), zero
+  warnings (`-W error::UserWarning` re-run again, same discipline as Step
+  14.1). **Additionally verified against a real running server**:
+  started `uvicorn` against live Postgres, hit `/api/auth/register` with
+  a nonexistent `employer_id` and confirmed a real `404
+  {"detail":"Employer not found."}` response plus a `request_completed`
+  (not `request_failed`) log line at `status_code=404` — proving the
+  handled-vs-unhandled distinction actually holds against the real
+  middleware stack, not just `TestClient`. Torn back down afterward,
+  nothing seeded.
+- README.md: Features checklist line updated, new "⚠️ Error Handling"
+  collapsible section.
+
 ## Next recommended step
 
-Continue with **Step 14.2 — Error handling**
-(`feat/global-error-handling`): a global FastAPI exception handler, a
-custom exception hierarchy (`DomainException`, `AuthException`,
-`RateLimitException`, etc. — `core/domain/errors.py` already has
-`PolicyPalError`/`DocumentProcessingError`/`UnsupportedFormatError` from
-Step 3.6; this step likely extends that hierarchy rather than starting a
-new one), and user-friendly error messages that never leak stack traces.
-`RequestLoggerMiddleware`'s new `request_failed` log (this step) already
-captures the exception server-side with a correlation ID attached —
-Step 14.2's global handler is what turns that into a safe, consistent
-client-facing response instead of FastAPI's default 500 body. Fully
-unblocked, same as the rest of Phase 14 — no LLM/Pinecone credentials
+Continue with **Step 14.3 — Rate limiting**
+(`security/chat-rate-limiting`): per-user rate limiting on chat
+endpoints (prevent LLM cost abuse), Redis-backed sliding window.
+`RedisCacheAdapter` (Step 3.4) already exists but is a `CachePort`
+abstraction (get/set/delete/exists with TTL) — a sliding-window counter
+needs Redis primitives (`INCR`/`ZADD`/`EXPIRE`) that port doesn't expose,
+so this step likely needs a small dedicated Redis client usage in a new
+`api/middleware/rate_limiter.py` (already named, empty, in plan.md's file
+tree) rather than reusing `CachePort`. `RateLimitError` (this step) is
+ready to be raised the moment a limit is exceeded — `error_handlers.py`
+already maps it to 429. Fully unblocked — no LLM/Pinecone credentials
 needed. Phase 12 (RAG Evaluation Pipeline) remains blocked by the same
 missing LLM credential as Step 11.2 — check `.env` for
 `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` before assuming otherwise (see

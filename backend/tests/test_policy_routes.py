@@ -9,6 +9,7 @@ from api.dependencies import (
     get_enrollment_repository,
     get_policy_repository,
 )
+from api.error_handlers import register_exception_handlers
 from api.middleware.auth_middleware import get_current_user
 from api.middleware.tenant_context import get_current_employer_id
 from api.routes import policy_routes
@@ -119,6 +120,7 @@ def _test_app(
     current_user: TokenPayload | None = None,
 ) -> FastAPI:
     app = FastAPI()
+    register_exception_handlers(app)
     app.include_router(policy_routes.router)
     app.dependency_overrides[get_policy_repository] = lambda: (
         policy_repository or _FakePolicyRepository()

@@ -1,9 +1,15 @@
 from core.domain.errors import (
     AuthenticationError,
+    AuthorizationError,
     DocumentProcessingError,
+    DomainError,
     InvalidCredentialsError,
     InvalidTokenError,
+    ModelUnavailableError,
+    NotFoundError,
     PolicyPalError,
+    RateLimitError,
+    TenantAccessError,
     UnsupportedFormatError,
 )
 
@@ -54,3 +60,40 @@ def test_invalid_token_error_is_an_authentication_error() -> None:
     assert error.code == "invalid_token"
     assert error.reason == "expired"
     assert "expired" in str(error)
+
+
+def test_domain_error_is_a_policypal_error() -> None:
+    error = DomainError("business rule violated", code="domain_error")
+
+    assert isinstance(error, PolicyPalError)
+
+
+def test_not_found_error_is_a_policypal_error() -> None:
+    error = NotFoundError("Document not found.", code="not_found")
+
+    assert isinstance(error, PolicyPalError)
+
+
+def test_authorization_error_is_a_policypal_error() -> None:
+    error = AuthorizationError("not allowed", code="authorization_error")
+
+    assert isinstance(error, PolicyPalError)
+
+
+def test_tenant_access_error_is_an_authorization_error() -> None:
+    error = TenantAccessError("cross-tenant access", code="tenant_access_error")
+
+    assert isinstance(error, AuthorizationError)
+    assert isinstance(error, PolicyPalError)
+
+
+def test_rate_limit_error_is_a_policypal_error() -> None:
+    error = RateLimitError("too many requests", code="rate_limit_exceeded")
+
+    assert isinstance(error, PolicyPalError)
+
+
+def test_model_unavailable_error_is_a_policypal_error() -> None:
+    error = ModelUnavailableError("model unreachable", code="model_unavailable")
+
+    assert isinstance(error, PolicyPalError)

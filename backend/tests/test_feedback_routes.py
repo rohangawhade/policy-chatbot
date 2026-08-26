@@ -10,6 +10,7 @@ from api.dependencies import (
     get_feedback_repository,
     get_message_repository,
 )
+from api.error_handlers import register_exception_handlers
 from api.middleware.auth_middleware import get_current_user
 from api.routes import feedback_routes
 from core.domain.conversation import Conversation, Message, MessageRole
@@ -112,6 +113,7 @@ def _test_app(
     current_user: TokenPayload | None = None,
 ) -> FastAPI:
     app = FastAPI()
+    register_exception_handlers(app)
     app.include_router(feedback_routes.router)
     app.dependency_overrides[get_message_repository] = lambda: (
         message_repository or _FakeMessageRepository()

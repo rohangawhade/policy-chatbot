@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from jose import jwt
 
 from api.dependencies import get_auth_service, get_employee_repository, get_employer_repository
+from api.error_handlers import register_exception_handlers
 from api.routes import auth_routes
 from core.domain.employee import Employee, UserRole
 from core.domain.employer import Employer
@@ -77,6 +78,7 @@ def _test_app(
     employer_repository: EmployerRepository,
 ) -> FastAPI:
     app = FastAPI()
+    register_exception_handlers(app)
     app.include_router(auth_routes.router)
     app.dependency_overrides[get_employee_repository] = lambda: employee_repository
     app.dependency_overrides[get_employer_repository] = lambda: employer_repository

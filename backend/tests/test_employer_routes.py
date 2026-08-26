@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from api.dependencies import get_employer_repository
+from api.error_handlers import register_exception_handlers
 from api.middleware.auth_middleware import get_current_user
 from api.routes import employer_routes
 from core.domain.employee import UserRole
@@ -40,6 +41,7 @@ def _test_app(
     *, repository: EmployerRepository | None = None, role: UserRole = UserRole.ADMIN
 ) -> FastAPI:
     app = FastAPI()
+    register_exception_handlers(app)
     app.include_router(employer_routes.router)
     app.dependency_overrides[get_employer_repository] = lambda: (
         repository or _FakeEmployerRepository()

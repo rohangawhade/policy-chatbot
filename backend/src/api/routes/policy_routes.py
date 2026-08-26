@@ -28,7 +28,7 @@ same reason).
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel
 
 from api.dependencies import (
@@ -39,6 +39,7 @@ from api.dependencies import (
 from api.middleware.auth_middleware import require_role
 from api.middleware.tenant_context import get_current_employer_id
 from core.domain.employee import UserRole
+from core.domain.errors import NotFoundError
 from core.domain.policy import Enrollment, Policy, PolicyType
 from core.ports.repository_ports import EmployeeRepository, EnrollmentRepository, PolicyRepository
 
@@ -99,7 +100,7 @@ async def _get_owned_policy(
 ) -> Policy:
     policy = await policy_repository.get(policy_id)
     if policy is None or policy.employer_id != employer_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Policy not found.")
+        raise NotFoundError("Policy not found.", code="not_found")
     return policy
 
 
@@ -221,7 +222,7 @@ async def enroll_employee(
     await _get_owned_policy(policy_repository, policy_id, employer_id)
     employee = await employee_repository.get(body.employee_id)
     if employee is None or employee.employer_id != employer_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Employee not found.")
+        raise NotFoundError("Employee not found.", code="not_found")
 
     existing = await _find_enrollment(enrollment_repository, body.employee_id, policy_id)
     if existing is not None:
@@ -256,7 +257,7 @@ async def unenroll_employee(
     await _get_owned_policy(policy_repository, policy_id, employer_id)
     existing = await _find_enrollment(enrollment_repository, employee_id, policy_id)
     if existing is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Enrollment not found.")
+        raise NotFoundError("Enrollment not found.", code="not_found")
     await enrollment_repository.update(existing.model_copy(update={"is_active": False}))
 
 
