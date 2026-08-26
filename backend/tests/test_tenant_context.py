@@ -11,6 +11,7 @@ from api.middleware.tenant_context import (
     TenantContextMiddleware,
     get_current_employer_id,
     get_employer_id_from_context,
+    get_user_id_from_context,
 )
 from config import auth_config
 from core.domain.employee import UserRole
@@ -23,13 +24,14 @@ _ALGORITHM = "HS256"
 def _token(
     *,
     employer_id: UUID | None,
+    user_id: UUID | None = None,
     role: UserRole = UserRole.EMPLOYEE,
     token_type: str = "access",
     expires_delta: timedelta = timedelta(minutes=15),
 ) -> str:
     now = datetime.now(UTC)
     claims = {
-        "sub": str(uuid4()),
+        "sub": str(user_id if user_id is not None else uuid4()),
         "employer_id": str(employer_id) if employer_id is not None else None,
         "role": role.value,
         "token_type": token_type,
@@ -42,6 +44,10 @@ def _token(
 
 def test_get_employer_id_from_context_defaults_to_none_outside_a_request() -> None:
     assert get_employer_id_from_context() is None
+
+
+def test_get_user_id_from_context_defaults_to_none_outside_a_request() -> None:
+    assert get_user_id_from_context() is None
 
 
 @pytest.fixture
@@ -59,7 +65,11 @@ def middleware_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     @app.get("/context-only")
     async def context_only() -> dict[str, str | None]:
         employer_id = get_employer_id_from_context()
-        return {"employer_id": str(employer_id) if employer_id else None}
+        user_id = get_user_id_from_context()
+        return {
+            "employer_id": str(employer_id) if employer_id else None,
+            "user_id": str(user_id) if user_id else None,
+        }
 
     return TestClient(app)
 
@@ -73,14 +83,38 @@ def test_middleware_makes_employer_id_visible_to_the_endpoint(
     response = middleware_client.get("/context-only", headers={"Authorization": f"Bearer {token}"})
 
     assert response.status_code == 200
-    assert response.json() == {"employer_id": str(employer_id)}
+    assert response.json()["employer_id"] == str(employer_id)
+
+
+def test_middleware_makes_user_id_visible_to_the_endpoint(
+    middleware_client: TestClient,
+) -> None:
+    user_id = uuid4()
+    token = _token(employer_id=uuid4(), user_id=user_id)
+
+    response = middleware_client.get("/context-only", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 200
+    assert response.json()["user_id"] == str(user_id)
+
+
+def test_middleware_sets_user_id_even_for_an_admin_with_no_employer_id(
+    middleware_client: TestClient,
+) -> None:
+    user_id = uuid4()
+    token = _token(employer_id=None, user_id=user_id, role=UserRole.ADMIN)
+
+    response = middleware_client.get("/context-only", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 200
+    assert response.json() == {"employer_id": None, "user_id": str(user_id)}
 
 
 def test_middleware_leaves_context_unset_without_a_token(middleware_client: TestClient) -> None:
     response = middleware_client.get("/context-only")
 
     assert response.status_code == 200
-    assert response.json() == {"employer_id": None}
+    assert response.json() == {"employer_id": None, "user_id": None}
 
 
 def test_middleware_leaves_context_unset_for_a_garbage_token(
@@ -91,7 +125,7 @@ def test_middleware_leaves_context_unset_for_a_garbage_token(
     )
 
     assert response.status_code == 200
-    assert response.json() == {"employer_id": None}
+    assert response.json() == {"employer_id": None, "user_id": None}
 
 
 def test_middleware_leaves_context_unset_for_an_expired_token(
@@ -102,18 +136,7 @@ def test_middleware_leaves_context_unset_for_an_expired_token(
     response = middleware_client.get("/context-only", headers={"Authorization": f"Bearer {token}"})
 
     assert response.status_code == 200
-    assert response.json() == {"employer_id": None}
-
-
-def test_middleware_leaves_context_unset_for_an_admin_with_no_employer_id(
-    middleware_client: TestClient,
-) -> None:
-    token = _token(employer_id=None, role=UserRole.ADMIN)
-
-    response = middleware_client.get("/context-only", headers={"Authorization": f"Bearer {token}"})
-
-    assert response.status_code == 200
-    assert response.json() == {"employer_id": None}
+    assert response.json() == {"employer_id": None, "user_id": None}
 
 
 def test_middleware_does_not_leak_the_previous_requests_employer_id(

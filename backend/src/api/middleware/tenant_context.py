@@ -42,6 +42,12 @@ from core.ports.repository_ports import EmployeeRepository
 from core.services.auth_service import AuthService, TokenPayload
 
 _employer_id_context: ContextVar[UUID | None] = ContextVar("employer_id_context", default=None)
+# Set alongside `_employer_id_context` from the same decoded token -- unlike
+# `employer_id` (None for admin accounts), `user_id` is always present on any
+# validly decoded token. Exists so `RequestLoggerMiddleware` (Step 14.1) can
+# attach `user_id` to every log entry (files/coding-standards.md section 13)
+# without re-decoding the token itself.
+_user_id_context: ContextVar[UUID | None] = ContextVar("user_id_context", default=None)
 
 
 class _DecodeOnlyEmployeeRepository(EmployeeRepository):
@@ -99,8 +105,10 @@ class TenantContextMiddleware(BaseHTTPMiddleware):
                 payload = self._auth_service.decode_token(token)
             except InvalidTokenError:
                 payload = None
-            if payload is not None and payload.employer_id is not None:
-                _employer_id_context.set(payload.employer_id)
+            if payload is not None:
+                _user_id_context.set(payload.user_id)
+                if payload.employer_id is not None:
+                    _employer_id_context.set(payload.employer_id)
         return await call_next(request)
 
 
@@ -146,3 +154,15 @@ def get_employer_id_from_context() -> UUID | None:
     `None` itself.
     """
     return _employer_id_context.get()
+
+
+def get_user_id_from_context() -> UUID | None:
+    """Read the current request's authenticated `user_id` without
+    depending on `get_current_user` directly -- for cross-cutting
+    concerns (e.g. `RequestLoggerMiddleware`) that run outside FastAPI's
+    per-route dependency injection.
+
+    Returns `None` if `TenantContextMiddleware` isn't registered or the
+    request had no valid bearer token.
+    """
+    return _user_id_context.get()

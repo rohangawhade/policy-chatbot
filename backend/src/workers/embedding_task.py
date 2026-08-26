@@ -19,7 +19,11 @@ earlier version of this fallback had, found via Step 9.2's test suite.
 """
 
 import asyncio
+import time
 from typing import Any
+from uuid import uuid4
+
+import structlog
 
 from adapters.event_bus.in_memory_event_bus import InMemoryEventBus
 from adapters.llm.litellm_adapter import LiteLLMAdapter
@@ -30,6 +34,8 @@ from config import llm_config, pinecone_config
 from core.domain.document import Document, DocumentChunk
 from core.services.embedding_service import EmbeddingService
 from workers.celery_app import app
+
+logger = structlog.get_logger(__name__)
 
 
 @app.task(
@@ -78,6 +84,11 @@ def embed_and_index_document(
 async def _embed_and_index(
     document: Document, chunks: list[DocumentChunk], previous_version: Document | None
 ) -> None:
+    structlog.contextvars.bind_contextvars(
+        correlation_id=str(uuid4()), employer_id=str(document.employer_id)
+    )
+    start = time.monotonic()
+    logger.info("embedding_task_started", document_id=str(document.id), chunk_count=len(chunks))
     try:
         async with async_session_factory() as session:
             service = EmbeddingService(
@@ -92,7 +103,14 @@ async def _embed_and_index(
             )
             await service.embed_and_store(chunks, document, previous_version)
             await session.commit()
+            logger.info(
+                "embedding_task_completed",
+                document_id=str(document.id),
+                chunk_count=len(chunks),
+                duration_ms=int((time.monotonic() - start) * 1000),
+            )
     finally:
+        structlog.contextvars.clear_contextvars()
         # `engine` (adapters/persistence/database.py) is a module-level
         # singleton shared across every task this worker process ever
         # runs, but each task gets its own fresh event loop via

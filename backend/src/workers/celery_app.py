@@ -25,6 +25,13 @@ from celery import Celery
 from celery.signals import task_failure
 
 from config import celery_config
+from logging_config import configure_logging
+
+# Celery workers are a separate process from the API server -- `main.py`'s
+# `create_app()` never runs here, so this module (imported once per worker
+# process via `celery -A workers.celery_app worker`) is this process's own
+# entry point for Step 14.1's central structlog setup.
+configure_logging()
 
 logger = structlog.get_logger(__name__)
 

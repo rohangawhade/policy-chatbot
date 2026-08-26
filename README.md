@@ -39,10 +39,10 @@ See `files/plan.md` for the full design (tech stack rationale, data flow diagram
 - [x] Celery ingestion workers: queue routing, retries, dead-letter handling, full ingestion pipeline, status tracking (Phase 8)
 - [x] API routes: auth, chat, documents, employers/employees/policies, feedback, admin analytics, health (Phase 9)
 - [x] React chat UI + admin dashboard + employer portal (Phase 10)
-- [ ] Data acquisition & seeding (Phase 11)
-- [ ] RAGAS evaluation pipeline (Phase 12)
-- [ ] DI audit (Phase 13)
-- [ ] Production polish: logging, error handling, rate limiting (Phase 14)
+- [x] Data acquisition & seeding: real government benefits PDFs, demo employer/employee/policy seed script (Phase 11 — LLM-generated synthetic docs, Step 11.2, blocked on a real `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`)
+- [ ] RAGAS evaluation pipeline (Phase 12 — blocked on the same missing LLM credential)
+- [x] Dependency injection wiring audit (Phase 13)
+- [ ] Production polish (Phase 14): structured logging with correlation IDs done; error handling, rate limiting, retry middleware, API docs, environment profiles, release automation still open
 
 Track detailed step-by-step progress in `IMPLEMENTATION_STATUS.md`.
 
@@ -154,6 +154,13 @@ Not yet available — the document download/generation/seed scripts land in Phas
 See `.env.example` for the full list of environment variables. Model tiers are entirely config-driven (`LLM_CHEAP_MODEL`, `LLM_POWERFUL_MODEL`, `LLM_EMBEDDING_MODEL`) — if `LLM_POWERFUL_MODEL` is left empty or its provider key is missing, every query automatically falls back to the cheap model tier. No code changes needed.
 
 All configuration is typed and validated via `backend/src/config.py` (Pydantic Settings) — one class per concern (`AppConfig`, `DatabaseConfig`, `RedisConfig`, `CacheConfig`, `CeleryConfig`, `PineconeConfig`, `LLMConfig`, `AuthConfig`, `CorsConfig`), each reading only its own env-var prefix. For local host-based development it also reads the repo-root `.env` automatically (no manual `source .env` needed) — real environment variables (e.g. Docker Compose's overrides) always win over the file.
+
+</details>
+
+<details>
+<summary>📋 Logging</summary>
+
+Every log line goes through `structlog` (`backend/src/logging_config.py`), configured once at process startup for both the API server and Celery workers: pretty console output when `APP_ENV` isn't `production`, JSON otherwise, and `DEBUG`-level logs only when `APP_DEBUG=true`. Every API request gets a correlation ID (read from an incoming `X-Correlation-ID` header if the caller sent one, otherwise generated) attached to every log line emitted while handling it, plus `employer_id`/`user_id` for an authenticated request — and echoed back on the response's `X-Correlation-ID` header for tracing a single request end-to-end. LLM calls (model, tokens, latency) and Celery tasks (start/complete, duration) are logged the same way.
 
 </details>
 
