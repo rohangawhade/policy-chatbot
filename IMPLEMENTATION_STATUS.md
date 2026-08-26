@@ -3832,23 +3832,98 @@ blocked). Step 11.3 below was deliberately designed to not depend on
   via `psql` afterward both times (see the process-mistake note above
   for why this matters beyond tidiness), `docker compose down`.
 
+## Phase 13 — Dependency Injection Wiring (Final Review)
+
+### Step 13.1 — DI container audit — DONE
+
+- Audited `backend/src/api/dependencies.py` against every port defined
+  in `core/ports/` (the four standalone ports plus all 10 repository
+  ports in `repository_ports.py`) and cross-checked the rest of the
+  codebase for anything that might bypass it:
+  - **Every port has a real adapter wired via `Depends()`**: `LLMPort`
+    → `LiteLLMAdapter`, `CachePort` → `RedisCacheAdapter`,
+    `VectorStorePort` → `PineconeAdapter`, `EventBusPort` →
+    `InMemoryEventBus`, and all 10 repository ports → their Postgres
+    adapters (confirmed 1:1 against `adapters/persistence/`'s 7 repo
+    files, which group multiple repository classes per file exactly as
+    Step 3.5 designed).
+  - **No test/dev stand-in adapter leaked into production wiring**:
+    `MockLLMAdapter`/`InMemoryCacheAdapter` (Steps 3.2/3.4's deliberate
+    local-dev/test stand-ins) are referenced nowhere outside their own
+    definition files — never imported by `dependencies.py`, a route, or
+    a service.
+  - **No adapter import leaked outside `api/dependencies.py`**: grepped
+    every file in `api/routes/`, `core/`, and `main.py` for direct
+    `adapters.*` imports. Found exactly one, `api/routes/health_routes.py`
+    (imports the raw SQLAlchemy `engine` directly) — already correct
+    and already documented in that file's own docstring: a liveness/
+    readiness probe must work even when the rest of the DI graph is
+    broken, so it deliberately carries no repository ports or domain
+    services. `core/services/*.py` is completely clean (zero adapter
+    imports anywhere), matching the ports-only dependency rule.
+  - **`DocumentProcessorPort` has no `get_*` function, correctly**:
+    it's consumed only by `workers/document_ingestion_task.py` via
+    `ProcessorFactory.get(...)` (Step 3.6's Open/Closed factory
+    pattern), and Celery tasks run outside any HTTP request — they
+    never touch FastAPI's `Depends()` graph, by necessity, not oversight.
+  - **Celery tasks' own adapter construction (necessarily direct, not
+    DI) matches `dependencies.py`'s choices with zero drift**: spot-
+    checked `PineconeAdapter`/`LiteLLMAdapter` construction across
+    `dependencies.py`, `embedding_task.py`, and
+    `document_ingestion_task.py` — identical adapter classes, identical
+    `pinecone_config.api_key or "unconfigured"` fallback pattern (Step
+    9.2's fix) in all three places.
+- **Real gap found — in `tests/test_dependencies.py`, not in the
+  production wiring**: `test_get_rag_service_wires_every_collaborator`
+  called `get_rag_service` (10 parameters) with only 9 arguments.
+  Calling a `Depends(...)`-defaulted provider function directly, as
+  every test in that file does, skips FastAPI's own dependency
+  resolution — so the missing `document_repository` argument silently
+  defaulted to the raw `fastapi.params.Depends` sentinel object instead
+  of a real repository, and the test still passed because its only
+  assertion was `isinstance(service, RAGService)`, never touching that
+  attribute. No production request was ever actually at risk (FastAPI's
+  real resolver always fills in every `Depends()` parameter for a real
+  request) — this was a test-suite correctness gap, not a wiring bug,
+  but exactly the class of thing this audit step exists to catch.
+  `document_repository` was very likely added to `RAGService`/
+  `get_rag_service` in a later step than this test was first written,
+  and the test was never updated to match. Fixed: all 10 arguments are
+  now passed explicitly, and a direct assertion on
+  `service._document_repository` guards against this exact regression
+  recurring silently.
+- Recorded the full audit (the confirmed-correct mapping, both
+  documented exceptions, and the one real fix) directly in
+  `dependencies.py`'s own module docstring — the mapping stays
+  legible right where a future developer swapping an adapter would
+  already be looking, per plan.md's own "swapping an adapter = changing
+  one line in this file" goal for this phase.
+- Validation: `ruff check`/`ruff format --check`/`mypy --strict src`
+  all pass (this step added no new production code — only docstrings
+  and one test fix). Full backend suite green, 622 tests (same count
+  as Step 11.3 — one existing test strengthened, not added).
+
+**Phase 13 — Dependency Injection Wiring: COMPLETE.**
+
 ## Next recommended step
 
-Phase 12 (RAG Evaluation Pipeline) is significantly blocked by the same
-missing LLM credential as Step 11.2: Step 12.1's golden dataset ideally
-references Step 11.2's per-employer synthetic content (not yet
-generated) for realistic personalized Q&A pairs, and Step 12.2's RAGAS
-runner needs a live LLM judge to compute metrics at all — so jumping
-into Phase 12 now would hit the same wall almost immediately.
+Phase 12 (RAG Evaluation Pipeline) remains blocked by the same missing
+LLM credential as Step 11.2 (Step 12.1's golden dataset ideally
+references Step 11.2's per-employer synthetic content for realistic
+personalized Q&A pairs; Step 12.2's RAGAS runner needs a live LLM judge
+to compute metrics at all) — check `.env` for
+`ANTHROPIC_API_KEY`/`OPENAI_API_KEY` before assuming otherwise (see
+`[[policypal_llm_key_blocker]]` memory).
 
-Continue with **Phase 13 — Dependency Injection Wiring (Final Review)**,
-**Step 13.1 — DI container audit** (`refactor/di-container-audit`):
-audit `backend/src/api/dependencies.py` to confirm every port has its
-real adapter wired (`LLMPort` → `LiteLLMAdapter`, `VectorStorePort` →
-`PineconeAdapter`, `EventBusPort` → `InMemoryEventBus`, `CachePort` →
-`RedisCacheAdapter`, every repository port → its Postgres adapter) and
-no hardcoded/mock dependency leaked into a real code path outside
-tests. Fully unblocked — no LLM/Pinecone credentials needed for a code
-audit. Once a real `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` becomes
-available in a future session, circle back to Step 11.2 → 12.1 → 12.2
-before or interleaved with Phase 14.
+Continue with **Phase 14 — Polish & Production Readiness**, starting
+with **Step 14.1 — Structured logging** (`feat/structured-logging`):
+set up `structlog` with JSON output (already used ad hoc by several
+adapters/workers since Step 3.1, but never centrally configured —
+Step 3.1's own IMPLEMENTATION_STATUS entry flagged this as deferred to
+"whichever step first needs request-scoped context"), log every API
+request/LLM call (model, tokens, latency)/Celery task, and add
+correlation IDs per request for traceability (`files/coding-standards.md`
+section 13). Fully unblocked — no LLM/Pinecone credentials needed. The
+rest of Phase 14 (error handling, rate limiting, retry middleware, API
+docs, env configs, final README pass, release tagging) is also entirely
+unblocked and can proceed in order after this.

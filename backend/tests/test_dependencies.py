@@ -205,6 +205,21 @@ def test_get_guardrails_service_wires_the_llm_and_event_bus(db_session: AsyncSes
 
 
 def test_get_rag_service_wires_every_collaborator(db_session: AsyncSession) -> None:
+    # Step 13.1's DI audit found this test silently missing
+    # `document_repository` (added to `RAGService`/`get_rag_service`
+    # after this test was first written) -- calling a `Depends(...)`-
+    # defaulted provider function directly, as every test in this file
+    # does, skips FastAPI's own dependency resolution entirely, so the
+    # missing 10th positional argument defaulted to the raw
+    # `fastapi.params.Depends` sentinel object instead of a real
+    # `DocumentRepository`. The `isinstance(service, RAGService)`
+    # assertion below passed regardless, since it never inspected that
+    # specific attribute -- a real production request was never at risk
+    # (FastAPI's actual resolver always fills in every `Depends()`
+    # parameter), but this test was not actually proving what its name
+    # claimed. Every argument is now passed explicitly, and the
+    # `document_repository` wiring is asserted directly so a future
+    # regression of this exact kind fails loudly instead of silently.
     service = get_rag_service(
         get_llm_port(),
         get_cache_port(),
@@ -215,9 +230,11 @@ def test_get_rag_service_wires_every_collaborator(db_session: AsyncSession) -> N
         get_conversation_repository(db_session),
         get_message_repository(db_session),
         get_event_bus(get_analytics_repository(db_session)),
+        get_document_repository(db_session),
     )
 
     assert isinstance(service, RAGService)
+    assert isinstance(service._document_repository, PostgresDocumentRepository)
 
 
 def test_get_document_chunk_repository_returns_a_postgres_document_chunk_repository(
