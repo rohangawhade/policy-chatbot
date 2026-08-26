@@ -26,7 +26,9 @@ task's.
 """
 
 import asyncio
+import time
 from typing import Any
+from uuid import uuid4
 
 import structlog
 
@@ -92,6 +94,15 @@ def process_document_upload(
 
 
 async def _process_document_upload(document: Document, previous_version: Document | None) -> None:
+    structlog.contextvars.bind_contextvars(
+        correlation_id=str(uuid4()), employer_id=str(document.employer_id)
+    )
+    start = time.monotonic()
+    logger.info(
+        "document_ingestion_started",
+        document_id=str(document.id),
+        source_type=document.source_type,
+    )
     try:
         async with async_session_factory() as session:
             document_repository = PostgresDocumentRepository(session)
@@ -137,7 +148,14 @@ async def _process_document_upload(document: Document, previous_version: Documen
                 DocumentProcessedEvent(document_id=document.id, employer_id=document.employer_id)
             )
             await session.commit()
+            logger.info(
+                "document_ingestion_completed",
+                document_id=str(document.id),
+                chunk_count=len(chunks),
+                duration_ms=int((time.monotonic() - start) * 1000),
+            )
     finally:
+        structlog.contextvars.clear_contextvars()
         # See the matching comment in `embedding_task.py`: `engine`
         # (adapters/persistence/database.py) is a module-level singleton
         # shared across every task this worker process ever runs, but

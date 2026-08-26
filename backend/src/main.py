@@ -7,6 +7,7 @@ Routes and middleware are registered here as they're built in later phases
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from api.middleware.request_logger import RequestLoggerMiddleware
 from api.middleware.tenant_context import TenantContextMiddleware
 from api.routes import (
     admin_routes,
@@ -20,11 +21,19 @@ from api.routes import (
     policy_routes,
 )
 from config import cors_config
+from logging_config import configure_logging
 
 
 def create_app() -> FastAPI:
     """Build and configure the FastAPI application instance."""
+    configure_logging()
     app = FastAPI(title="PolicyPal", version="0.1.0")
+    # RequestLoggerMiddleware added first (innermost of these two) so
+    # TenantContextMiddleware -- added next, wrapping around it -- has
+    # already decoded the bearer token and populated the employer_id/
+    # user_id context vars by the time RequestLoggerMiddleware's own
+    # `dispatch` begins. See request_logger.py's module docstring.
+    app.add_middleware(RequestLoggerMiddleware)
     app.add_middleware(TenantContextMiddleware)
     # Added last so it's the outermost middleware layer -- CORS headers
     # (and the preflight OPTIONS response itself) must be present on

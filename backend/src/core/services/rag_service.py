@@ -16,6 +16,8 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from uuid import UUID
 
+import structlog
+
 from core.domain.analytics import FlaggedResponse, LLMCostLog, RequestLatencyLog
 from core.domain.conversation import Conversation, Message, MessageRole
 from core.domain.events import (
@@ -36,6 +38,8 @@ from core.ports.repository_ports import (
 )
 from core.ports.vector_store_port import VectorMatch, VectorStorePort
 from core.services.query_router import QueryRouter
+
+logger = structlog.get_logger(__name__)
 
 _DEFAULT_TOP_K = 5
 _DEFAULT_CACHE_TTL_SECONDS = 3600
@@ -263,6 +267,15 @@ class GenerationStream:
 
         complexity_score = service._query_router.score_complexity(self._query_text)
         model = service._query_router.select_model(complexity_score)
+        # files/coding-standards.md section 13's named INFO example
+        # ("model routed") -- query_text/prompt are deliberately never
+        # logged here (PII risk, same section), only the routing decision.
+        logger.info(
+            "model_routed",
+            model=model,
+            model_tier=service._query_router.tier_for_model(model),
+            complexity_score=complexity_score,
+        )
         prompt = service.assemble_prompt(self._query_text, retrieval, self._history)
 
         llm_start = time.monotonic()
@@ -692,6 +705,16 @@ class RAGService:
         llm_ms: int,
     ) -> None:
         usage = await self._llm.estimate_cost(model, prompt, full_text)
+        logger.info(
+            "llm_call_completed",
+            model=model,
+            model_tier=model_tier,
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            estimated_cost_usd=usage.estimated_cost_usd,
+            llm_ms=llm_ms,
+            retrieval_ms=retrieval_ms,
+        )
         await self._analytics_repository.record_llm_cost(
             LLMCostLog(
                 employer_id=employer_id,

@@ -3905,25 +3905,160 @@ blocked). Step 11.3 below was deliberately designed to not depend on
 
 **Phase 13 — Dependency Injection Wiring: COMPLETE.**
 
+## Phase 14 — Polish & Production Readiness
+
+### Step 14.1 — Structured logging — DONE
+
+- `backend/src/logging_config.py` (new) — `configure_logging()`, the one
+  place that calls `structlog.configure(...)` for the whole process
+  (Step 3.1's own entry flagged this as deferred since it first added
+  `structlog` usage: "whichever step first needs request-scoped context").
+  JSON output (`structlog.processors.JSONRenderer`) when `AppConfig.env ==
+  "production"`, pretty console output (`structlog.dev.ConsoleRenderer`)
+  otherwise; `DEBUG`-level logs only emit when `AppConfig.debug` is set
+  (files/coding-standards.md section 13). Shared processors:
+  `merge_contextvars` (so anything bound via `structlog.contextvars`
+  anywhere in a request/task shows up on every log line without being
+  passed explicitly), `add_log_level`, an ISO-8601 UTC `TimeStamper`,
+  `StackInfoRenderer`. Called from `main.py`'s `create_app()` (API
+  server) and at module-import time in `workers/celery_app.py` (Celery
+  workers are a separate process that never calls `create_app()`).
+- **Two real, empirically-found structlog gotchas, not stylistic
+  choices** (both would have silently broken this step's own test suite
+  and are documented inline in `logging_config.py`):
+  1. `cache_logger_on_first_use=True` permanently freezes a module-level
+     `logger = structlog.get_logger(__name__)` singleton's processor
+     chain the *first* time it actually logs anything — every later
+     `structlog.configure(...)` call (including a test's
+     `structlog.testing.capture_logs()`) silently has no effect on an
+     already-cached logger. Every adapter/service/worker in this
+     codebase uses exactly that module-level-singleton pattern. Caught
+     because pytest's collection phase imports `workers/celery_app.py`
+     (transitively, via most test files) before any test runs, which
+     called `configure_logging()` at import time — freezing every
+     route-test's `RequestLoggerMiddleware` logger against that config
+     before this step's own log-capturing tests ever got to run. Fixed:
+     `cache_logger_on_first_use=False`.
+  2. `structlog.dev.ConsoleRenderer` renders `exc_info` itself (its own
+     traceback formatter) and emits a `UserWarning` on every
+     `logger.exception(...)` call if `format_exc_info` is also in the
+     processor chain (it pre-flattens the traceback into a string,
+     defeating ConsoleRenderer's own formatting) — `pyproject.toml`'s
+     `filterwarnings` doesn't promote plain `UserWarning` to an error, so
+     this didn't fail tests, but it's a real per-call warning that would
+     spam every dev-mode exception log in production use. Fixed:
+     `format_exc_info` is only added to the processor chain in the
+     `production`/JSON branch, where it's actually needed (JSON has no
+     other way to represent a traceback).
+- `backend/src/api/middleware/request_logger.py` (new) —
+  `RequestLoggerMiddleware`, added to plan.md's already-named-but-empty
+  `api/middleware/request_logger.py` file slot. Generates a correlation
+  ID per request (reuses an incoming `X-Correlation-ID` header if the
+  caller sent one), binds it — plus `employer_id`/`user_id` when the
+  request is authenticated — via `structlog.contextvars.bind_contextvars`
+  so every log line emitted anywhere while handling the request carries
+  them automatically, logs `request_received`/`request_completed`
+  (method, path, status_code, duration_ms) or `request_failed` on an
+  unhandled exception (still re-raised, so `ServerErrorMiddleware`'s
+  normal 500 handling is unaffected), and echoes the correlation ID back
+  via an `X-Correlation-ID` response header for end-to-end tracing.
+  Clears contextvars in a `finally` so nothing leaks into whatever the
+  same worker thread/task does next.
+- **Must run after `TenantContextMiddleware` has already decoded the
+  token, without decoding it a second time itself**: `tenant_context.py`
+  gained a second `ContextVar`, `_user_id_context` (+
+  `get_user_id_from_context()`), set alongside the existing
+  `_employer_id_context` from the same decoded payload — unlike
+  `employer_id` (`None` for admin accounts), `user_id` is always present
+  on any validly-decoded token. `RequestLoggerMiddleware` reads both
+  getters rather than re-decoding the bearer token. This only works
+  because of *registration order*, not import order: Starlette wraps a
+  *later* `add_middleware(...)` call around an *earlier* one (confirmed
+  by reading `Starlette.add_middleware`/`build_middleware_stack`'s
+  source directly rather than assuming), so `main.py` now registers
+  `RequestLoggerMiddleware` first (innermost — closer to the route) and
+  `TenantContextMiddleware` second (wraps around it, so its token-decode
+  runs to completion before `RequestLoggerMiddleware`'s own `dispatch`
+  begins) — `CORSMiddleware` stays registered last (outermost), unchanged
+  from Step 9's CORS fix.
+- **LLM calls (model, tokens, latency)**: `core/services/rag_service.py`'s
+  `_stream_generation` logs `model_routed` (model, model_tier,
+  complexity_score) right after `QueryRouter.select_model()` runs —
+  `files/coding-standards.md` section 13's own named INFO example — and
+  `_log_generation` logs `llm_call_completed` (model, model_tier,
+  input/output tokens, estimated cost, `llm_ms`, `retrieval_ms`)
+  alongside the existing `LLMCostLog`/`RequestLatencyLog` Postgres writes
+  from Step 6.5 (those remain the durable analytics record for the admin
+  dashboard; this is the same data as an application log line, for
+  log-aggregator-based tracing). `query_text`/the full prompt are never
+  logged, per section 13's explicit PII rule — only the routing/cost
+  metrics. `query_router.py` itself is untouched — its own docstring
+  already said routing decisions are logged by the caller, not the
+  router.
+- **Celery tasks (start/complete, duration)**:
+  `workers/document_ingestion_task.py` and `workers/embedding_task.py`
+  each bind a fresh correlation ID (a plain `uuid4()`, not the Celery
+  task ID — avoids needing `bind=True`, which would have changed the
+  task functions' call signature and broken every existing test that
+  calls `_process_document_upload`/`_embed_and_index` directly) plus
+  `employer_id` via `structlog.contextvars`, log
+  `document_ingestion_started`/`embedding_task_started` before doing any
+  work and `..._completed` (with `chunk_count`/`duration_ms`) on success,
+  and clear contextvars in a `finally` alongside the existing
+  `engine.dispose()` cleanup (Step 4.4/8.2's per-task-event-loop fix —
+  unrelated to this step, left untouched). The existing
+  `document_ingestion_failed` exception log (Step 8.2) is unchanged.
+- Validation: `ruff check`, `ruff format --check`, `mypy --strict src`
+  all pass with zero suppressions in every new/changed file. New
+  `tests/test_logging_config.py` (JSON vs. console rendering,
+  `DEBUG`-level suppression/emission by `AppConfig.debug`, contextvars
+  merged into every entry, exception rendering) and
+  `tests/test_request_logger.py` (received/completed logging with
+  status/duration, correlation ID generation and reuse from an incoming
+  header, employer_id/user_id present only when authenticated, an
+  unhandled exception logs `request_failed` and still propagates to a
+  real 500, contextvars don't leak between sequential requests — the
+  last one empirically verified against a real `TestClient`, not
+  assumed, since `structlog.testing.capture_logs()` itself replaces the
+  whole processor chain and would silently drop `merge_contextvars`,
+  requiring a small custom capture helper that keeps it). Extended
+  `tests/test_tenant_context.py` for the new `_user_id_context`/
+  `get_user_id_from_context()`. **Additionally verified against a real
+  running server, not just `TestClient`**: started `uvicorn` against a
+  live Postgres + Redis (`docker compose up -d postgres redis`,
+  `alembic upgrade head`), `curl`'d `/health` with and without an
+  `X-Correlation-ID` header and confirmed it's generated/echoed
+  correctly, confirmed the console log lines appear exactly as expected
+  in dev mode, then restarted with `APP_ENV=production
+  APP_DEBUG=false` and confirmed the same request now logs valid JSON
+  lines instead. Torn back down (`docker compose down`, no `-v`,
+  nothing seeded) afterward. Full suite: 637 tests passing (up from
+  622), 100% coverage across the entire `src/` tree (2955/2955
+  statements), zero warnings (confirmed by re-running with
+  `-W error::UserWarning`, not just the default `pyproject.toml`
+  `filterwarnings`, specifically to catch the `ConsoleRenderer`/
+  `format_exc_info` conflict above for good).
+- README.md: Features checklist corrected (Phase 11's done parts and
+  Phase 13 were never checked off after Steps 11.1/11.3/13.1 merged —
+  fixed in passing since this step's own line lives right next to it;
+  Phase 11.2/Phase 12 still correctly shown as blocked/open), new
+  "📋 Logging" collapsible section under Environment Setup.
+
 ## Next recommended step
 
-Phase 12 (RAG Evaluation Pipeline) remains blocked by the same missing
-LLM credential as Step 11.2 (Step 12.1's golden dataset ideally
-references Step 11.2's per-employer synthetic content for realistic
-personalized Q&A pairs; Step 12.2's RAGAS runner needs a live LLM judge
-to compute metrics at all) — check `.env` for
+Continue with **Step 14.2 — Error handling**
+(`feat/global-error-handling`): a global FastAPI exception handler, a
+custom exception hierarchy (`DomainException`, `AuthException`,
+`RateLimitException`, etc. — `core/domain/errors.py` already has
+`PolicyPalError`/`DocumentProcessingError`/`UnsupportedFormatError` from
+Step 3.6; this step likely extends that hierarchy rather than starting a
+new one), and user-friendly error messages that never leak stack traces.
+`RequestLoggerMiddleware`'s new `request_failed` log (this step) already
+captures the exception server-side with a correlation ID attached —
+Step 14.2's global handler is what turns that into a safe, consistent
+client-facing response instead of FastAPI's default 500 body. Fully
+unblocked, same as the rest of Phase 14 — no LLM/Pinecone credentials
+needed. Phase 12 (RAG Evaluation Pipeline) remains blocked by the same
+missing LLM credential as Step 11.2 — check `.env` for
 `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` before assuming otherwise (see
 `[[policypal_llm_key_blocker]]` memory).
-
-Continue with **Phase 14 — Polish & Production Readiness**, starting
-with **Step 14.1 — Structured logging** (`feat/structured-logging`):
-set up `structlog` with JSON output (already used ad hoc by several
-adapters/workers since Step 3.1, but never centrally configured —
-Step 3.1's own IMPLEMENTATION_STATUS entry flagged this as deferred to
-"whichever step first needs request-scoped context"), log every API
-request/LLM call (model, tokens, latency)/Celery task, and add
-correlation IDs per request for traceability (`files/coding-standards.md`
-section 13). Fully unblocked — no LLM/Pinecone credentials needed. The
-rest of Phase 14 (error handling, rate limiting, retry middleware, API
-docs, env configs, final README pass, release tagging) is also entirely
-unblocked and can proceed in order after this.
