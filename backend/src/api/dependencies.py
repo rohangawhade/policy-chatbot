@@ -3,6 +3,42 @@ dependency injection (files/plan.md's api/ folder structure names this
 file's exact purpose — "DI: wires ports -> adapters"). `api/` is allowed
 to import adapters for this purpose only (files/coding-standards.md
 section 3) — no other layer does.
+
+**Step 13.1 DI container audit (2026-08-26)**: confirmed every port has
+a real adapter wired here, via `Depends()`, with exactly two deliberate
+exceptions — everything else in `core/`/`api/routes/` was confirmed
+clean of direct adapter imports:
+- `LLMPort` → `LiteLLMAdapter`, `CachePort` → `RedisCacheAdapter`,
+  `VectorStorePort` → `PineconeAdapter`, `EventBusPort` →
+  `InMemoryEventBus`, and all 10 repository ports
+  (`core/ports/repository_ports.py`) → their Postgres adapters — every
+  one has a `get_*` function below.
+- `DocumentProcessorPort` has no `get_*` function here, correctly:
+  it's consumed only by Celery tasks (`workers/document_ingestion_task.py`
+  via `ProcessorFactory.get(...)`, Step 3.6's Open/Closed factory
+  pattern), which run outside any HTTP request and so never touch
+  FastAPI's `Depends()` graph at all.
+- `api/routes/health_routes.py` imports `adapters.persistence.database`'s
+  raw `engine` directly instead of going through `get_session`/a
+  repository — also correct, and already documented in that file's own
+  docstring: a liveness/readiness probe must work even if the rest of
+  the DI graph is broken, so it deliberately has no repository ports or
+  domain services in its dependency chain.
+- Real gap found and fixed by this audit, in the *tests* rather than in
+  this file: `tests/test_dependencies.py`'s
+  `test_get_rag_service_wires_every_collaborator` called `get_rag_service`
+  directly with only 9 of its 10 parameters — calling a `Depends(...)`-
+  defaulted provider function as a plain Python function (as every test
+  in that file does) skips FastAPI's own resolution entirely, so the
+  missing `document_repository` argument silently defaulted to the raw
+  `fastapi.params.Depends` sentinel object instead of a real repository.
+  The test still passed, since its only assertion was
+  `isinstance(service, RAGService)`. No production request was ever at
+  risk (FastAPI's real resolver always fills in every `Depends()`
+  parameter for an actual request) — this was a test-suite gap, not a
+  wiring gap, but exactly the kind of thing this audit step exists to
+  catch. Fixed: the test now passes all 10 arguments and asserts the
+  `document_repository` collaborator directly.
 """
 
 from typing import Any
