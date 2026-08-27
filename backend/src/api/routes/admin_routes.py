@@ -78,6 +78,7 @@ from core.domain.analytics import FlaggedResponse, FlaggedResponseStatus
 from core.domain.conversation import Message, MessageRole
 from core.domain.document import DocumentStatus
 from core.domain.employee import UserRole
+from core.domain.errors import NotFoundError
 from core.domain.feedback import FeedbackRating
 from core.domain.policy import PolicyType
 from core.ports.repository_ports import (
@@ -421,9 +422,7 @@ async def update_flagged_response(
             flagged_response_id, body.status
         )
     except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Flagged response not found."
-        ) from exc
+        raise NotFoundError("Flagged response not found.", code="not_found") from exc
     return _to_flagged_response_item(updated, await message_repository.get(updated.message_id))
 
 

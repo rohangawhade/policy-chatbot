@@ -20,6 +20,7 @@ from api.dependencies import (
 from api.middleware.auth_middleware import get_current_user, require_role
 from api.middleware.tenant_context import get_current_employer_id
 from core.domain.employee import Employee, UserRole
+from core.domain.errors import NotFoundError
 from core.domain.policy import PolicyType
 from core.ports.repository_ports import (
     EmployeeRepository,
@@ -103,9 +104,9 @@ async def _get_managed_employee(
     ownership checks — an `ADMIN` may manage any employer's employees."""
     employee = await employee_repository.get(employee_id)
     if employee is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Employee not found.")
+        raise NotFoundError("Employee not found.", code="not_found")
     if current_user.role != UserRole.ADMIN and employee.employer_id != current_user.employer_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Employee not found.")
+        raise NotFoundError("Employee not found.", code="not_found")
     return employee
 
 

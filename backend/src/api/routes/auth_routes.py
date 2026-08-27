@@ -25,7 +25,7 @@ from pydantic import BaseModel
 from api.dependencies import get_auth_service, get_employee_repository, get_employer_repository
 from api.middleware.auth_middleware import get_current_user
 from core.domain.employee import Employee, UserRole
-from core.domain.errors import InvalidCredentialsError, InvalidTokenError
+from core.domain.errors import InvalidCredentialsError, InvalidTokenError, NotFoundError
 from core.ports.repository_ports import EmployeeRepository, EmployerRepository
 from core.services.auth_service import AuthService, TokenPayload
 
@@ -102,7 +102,7 @@ async def register(
             detail="Only 'employer' and 'employee' accounts can self-register.",
         )
     if await employer_repository.get(body.employer_id) is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Employer not found.")
+        raise NotFoundError("Employer not found.", code="not_found")
     if await employee_repository.get_by_email(body.email) is not None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail="This email is already registered."
@@ -181,5 +181,5 @@ async def me(
     """
     employee = await employee_repository.get(current_user.user_id)
     if employee is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found.")
+        raise NotFoundError("Account not found.", code="not_found")
     return _to_profile(employee)

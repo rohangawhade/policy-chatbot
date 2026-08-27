@@ -1,14 +1,14 @@
 """Custom exception hierarchy (files/coding-standards.md section 6).
 
-Only the exceptions an actual caller needs today are defined here —
-`DocumentProcessingError`/`UnsupportedFormatError` for Step 3.6's
-`ProcessorFactory` (section 1's Open/Closed example names
-`UnsupportedFormatError` directly), `AuthenticationError` and its two
-subclasses for Step 5.1's `AuthService`. Extend with
-`AuthorizationError`/`TenantAccessError`/`RateLimitError`/
-`ModelUnavailableError` etc. from the same section whenever a later
-phase actually raises one — no point defining exception classes nothing
-throws yet.
+`DocumentProcessingError`/`UnsupportedFormatError` (Step 3.6's
+`ProcessorFactory`) and `AuthenticationError`'s two subclasses (Step
+5.1's `AuthService`) predate this file's full hierarchy. Step 14.2 added
+the rest of section 6's named classes (`DomainError`, `NotFoundError`,
+`AuthorizationError`, `TenantAccessError`, `RateLimitError`,
+`ModelUnavailableError`) verbatim, plus `api/error_handlers.py`, the
+"API layer converts domain exceptions to appropriate HTTP status codes"
+piece section 6 asks for — a route/service can raise any of these
+without importing `fastapi` at all.
 """
 
 
@@ -19,6 +19,30 @@ class PolicyPalError(Exception):
         super().__init__(message)
         self.message = message
         self.code = code
+
+
+class DomainError(PolicyPalError):
+    """Business rule violation."""
+
+
+class NotFoundError(PolicyPalError):
+    """Requested entity does not exist."""
+
+
+class AuthorizationError(PolicyPalError):
+    """User lacks permission for this action."""
+
+
+class TenantAccessError(AuthorizationError):
+    """User tried to access another employer's data."""
+
+
+class RateLimitError(PolicyPalError):
+    """User exceeded allowed request rate."""
+
+
+class ModelUnavailableError(PolicyPalError):
+    """Requested LLM model tier is not configured or unreachable."""
 
 
 class DocumentProcessingError(PolicyPalError):

@@ -7,6 +7,7 @@ Routes and middleware are registered here as they're built in later phases
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from api.error_handlers import register_exception_handlers
 from api.middleware.request_logger import RequestLoggerMiddleware
 from api.middleware.tenant_context import TenantContextMiddleware
 from api.routes import (
@@ -28,6 +29,7 @@ def create_app() -> FastAPI:
     """Build and configure the FastAPI application instance."""
     configure_logging()
     app = FastAPI(title="PolicyPal", version="0.1.0")
+    register_exception_handlers(app)
     # RequestLoggerMiddleware added first (innermost of these two) so
     # TenantContextMiddleware -- added next, wrapping around it -- has
     # already decoded the bearer token and populated the employer_id/

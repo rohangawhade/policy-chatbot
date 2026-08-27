@@ -9,7 +9,7 @@ model(s) directly, not wrapped in `files/coding-standards.md` section
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel
 
 from api.dependencies import (
@@ -19,6 +19,7 @@ from api.dependencies import (
 )
 from api.middleware.auth_middleware import get_current_user, require_role
 from core.domain.employee import UserRole
+from core.domain.errors import NotFoundError
 from core.domain.feedback import Feedback, FeedbackRating
 from core.ports.repository_ports import (
     ConversationRepository,
@@ -70,10 +71,10 @@ async def submit_feedback(
     """
     message = await message_repository.get(body.message_id)
     if message is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found.")
+        raise NotFoundError("Message not found.", code="not_found")
     conversation = await conversation_repository.get(message.conversation_id)
     if conversation is None or conversation.employee_id != current_user.user_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found.")
+        raise NotFoundError("Message not found.", code="not_found")
 
     created = await feedback_repository.create(
         Feedback(

@@ -8,13 +8,14 @@ model(s) directly, not wrapped in `files/coding-standards.md` section
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel
 
 from api.dependencies import get_employer_repository
 from api.middleware.auth_middleware import require_role
 from core.domain.employee import UserRole
 from core.domain.employer import Employer
+from core.domain.errors import NotFoundError
 from core.ports.repository_ports import EmployerRepository
 
 router = APIRouter(
@@ -48,7 +49,7 @@ async def _get_employer_or_404(
 ) -> Employer:
     employer = await employer_repository.get(employer_id)
     if employer is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Employer not found.")
+        raise NotFoundError("Employer not found.", code="not_found")
     return employer
 
 

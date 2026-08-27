@@ -15,7 +15,7 @@ import json
 from collections.abc import AsyncIterator
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel
 from starlette.responses import StreamingResponse
 
@@ -28,6 +28,7 @@ from api.dependencies import (
 from api.middleware.auth_middleware import get_current_user
 from api.middleware.tenant_context import get_current_employer_id
 from core.domain.conversation import Conversation, Message, MessageRole
+from core.domain.errors import NotFoundError
 from core.ports.repository_ports import ConversationRepository, MessageRepository
 from core.services.auth_service import TokenPayload
 from core.services.guardrails_service import GuardrailsService
@@ -86,7 +87,7 @@ async def _get_owned_conversation(
         # no business knowing that (matches document_routes.py's Step
         # 8.3 reasoning, applied here to per-employee ownership instead
         # of per-employer).
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found.")
+        raise NotFoundError("Conversation not found.", code="not_found")
     return conversation
 
 

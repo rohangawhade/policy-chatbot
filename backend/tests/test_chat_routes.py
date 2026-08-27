@@ -12,6 +12,7 @@ from api.dependencies import (
     get_message_repository,
     get_rag_service,
 )
+from api.error_handlers import register_exception_handlers
 from api.middleware.auth_middleware import get_current_user
 from api.middleware.tenant_context import get_current_employer_id
 from api.routes import chat_routes
@@ -153,6 +154,7 @@ def _test_app(
     rag_service: object | None = None,
 ) -> FastAPI:
     app = FastAPI()
+    register_exception_handlers(app)
     app.include_router(chat_routes.router)
     app.dependency_overrides[get_conversation_repository] = lambda: conversation_repository
     app.dependency_overrides[get_message_repository] = lambda: (
