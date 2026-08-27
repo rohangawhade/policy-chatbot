@@ -4307,21 +4307,96 @@ blocked). Step 11.3 below was deliberately designed to not depend on
 **Phase 14 — Polish & Production Readiness: 4 of 8 steps done
 (14.1-14.4).**
 
+### Step 14.5 — API documentation — DONE
+
+- Confirmed before assuming greenfield work, per this file's own prior
+  note: `APIRouter(tags=[...])` was already set on all 9 route files —
+  the real gaps were (a) tag *names* not matching plan.md's named
+  groups (`admin_routes.py` used `"admin"`, others were all-lowercase
+  singular-ish nouns with no display polish) and no `openapi_tags`
+  metadata anywhere to attach a description to each group, and (b) 21
+  of ~47 route handlers across `admin_routes.py` (9 of 10),
+  `employer_routes.py` (all 5), `employee_routes.py` (4 of 6),
+  `policy_routes.py` (5 of 8), and `chat_routes.py` (3 of 4) had no
+  docstring at all — FastAPI uses a route's docstring as its OpenAPI
+  `description`, so these rendered with no explanation beyond the
+  auto-derived operation id. `auth_routes.py`, `document_routes.py`,
+  `feedback_routes.py`, `health_routes.py` were already fully
+  documented from earlier steps and needed no changes here.
+- `main.py` gained `_OPENAPI_TAGS`, passed to `FastAPI(...,
+  openapi_tags=...)`: one entry per tag with a one-line description.
+  Every route file's `tags=[...]` string updated to match exactly,
+  title-cased to plan.md's own wording (`"Auth"`, `"Chat"`,
+  `"Documents"`, `"Employers"`, `"Employees"`, `"Feedback"`, `"Admin
+  Analytics"`, `"Health"`) plus `"Policies"` — a real route group
+  plan.md's own named-tags list happens not to mention, kept as its own
+  tag rather than folded into another (verified this isn't just cosmetic:
+  FastAPI/Starlette matches a tag's description to a router's tag by
+  exact string equality, so a mismatch would have silently dropped the
+  description with no error — checked the real generated
+  `/openapi.json`, not just the source, to confirm all 9 descriptions
+  actually attached).
+- Added a one-to-few-line docstring to all 21 previously-undocumented
+  handlers (who can call it, what it returns, and a `Raises:` block
+  wherever it can 404/422/etc.) — terse, matching this codebase's
+  existing doc style, not restating what the type hints already say.
+- **Fixed 3 stale docstrings while touching this area, not purely
+  additive**: `auth_routes.py`'s `register`/`me` and
+  `feedback_routes.py`'s `submit_feedback` still said `HTTPException:
+  404` in their `Raises:` blocks from before Step 14.2 migrated those
+  exact 404s to `NotFoundError` — corrected to name the actual
+  exception now raised (`policy_routes.py`'s `enroll_employee` had the
+  same staleness, already caught and fixed earlier in this same pass).
+- Added `pydantic.ConfigDict(json_schema_extra={"examples": [...]})` to
+  the 6 most-used request bodies (`RegisterRequest`,
+  `SendMessageRequest`, `EmployerCreateRequest`,
+  `EmployeeCreateRequest`, `PolicyCreateRequest`,
+  `FeedbackCreateRequest`) — realistic sample payloads, not every field
+  on every schema in the app; response models were already present
+  everywhere as explicit return-type hints (FastAPI derives
+  `response_model` from those automatically), so that part of plan.md's
+  bullet needed no new work.
+- Validation: `ruff check`/`ruff format --check`/`mypy --strict src`
+  all pass with zero suppressions — this step touched only docstrings,
+  tag strings, and `ConfigDict` additions, no behavior changed. Full
+  suite: 669 tests passing (unchanged — no test assertions target
+  docstrings, tag names, or schema examples), 100% coverage across the
+  entire `src/` tree (3031/3031 statements), zero warnings. **Verified
+  against the real generated spec, not just the source**: booted
+  `uvicorn`, fetched the live `/openapi.json`, and scripted a check
+  confirming (a) all 9 tag descriptions from `main.py` actually appear
+  attached to their matching tag in the output, (b) zero operations
+  anywhere in the spec have neither a `summary` nor a `description`
+  (down from 21), and (c) `RegisterRequest`/`SendMessageRequest`'s
+  example payloads appear correctly in their component schemas.
+  Confirmed `/docs` (Swagger UI) itself returns `200`.
+- README.md: Features checklist line updated, `## API Endpoints`
+  section gained a pointer to `/docs`/`/redoc` as the actual
+  always-current source of truth (the hand-maintained table beneath it
+  predates this step and can drift; it's now explicitly labeled as a
+  quick reference, not authoritative).
+
+**Phase 14 — Polish & Production Readiness: 5 of 8 steps done
+(14.1-14.5).**
+
 ## Next recommended step
 
-Continue with **Step 14.5 — API documentation**
-(`docs/openapi-annotations`): FastAPI already auto-generates an OpenAPI
-spec from every route's type hints (nothing to newly enable), so this
-step is adding descriptions/examples/response models where they're
-still missing, and separating routes into named tag groups (Auth, Chat,
-Documents, Employers, Employees, Feedback, Admin Analytics, Health) —
-spot-check whether `APIRouter(tags=[...])` is already set consistently
-across all 9 route files (`auth_routes.py`, `chat_routes.py`,
-`document_routes.py`, `employer_routes.py`, `employee_routes.py`,
-`policy_routes.py`, `feedback_routes.py`, `admin_routes.py`,
-`health_routes.py`) before assuming this is greenfield work. Fully
-unblocked — no LLM/Pinecone credentials needed, purely docstrings/
-metadata on existing routes. Phase 12 (RAG Evaluation Pipeline) remains
-blocked by the same missing LLM credential as Step 11.2 — check `.env`
-for `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` before assuming otherwise (see
-`[[policypal_llm_key_blocker]]` memory).
+Continue with **Step 14.6 — Environment configs**
+(`chore/environment-profiles`): `.env.example` with every variable
+documented (already true — every config section added through Step
+14.5 has a matching `.env.example` block with a comment header), plus
+separate configs for `development`/`staging`/`production` and Docker
+Compose profiles for each. **Check what "separate configs" means
+concretely before assuming new files are needed**: `AppConfig.env`
+(Step 1.4) already distinguishes environments at runtime (drives Step
+14.1's JSON-vs-console logging, for one), so this step is likely about
+formalizing that into actual `.env.staging`/`.env.production` template
+files (not committed with real secrets — `.env.example`-style
+placeholders per environment) and `docker-compose.staging.yml`/
+`docker-compose.prod.yml` override files (e.g. no hot-reload mount, a
+production-grade `uvicorn` worker count) alongside the existing
+`docker-compose.override.yml` (dev-only, already established). Fully
+unblocked — no LLM/Pinecone credentials needed. Phase 12 (RAG
+Evaluation Pipeline) remains blocked by the same missing LLM credential
+as Step 11.2 — check `.env` for `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`
+before assuming otherwise (see `[[policypal_llm_key_blocker]]` memory).

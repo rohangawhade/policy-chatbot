@@ -10,7 +10,7 @@ model(s) directly, not wrapped in `files/coding-standards.md` section
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, status
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from api.dependencies import (
     get_conversation_repository,
@@ -28,10 +28,22 @@ from core.ports.repository_ports import (
 )
 from core.services.auth_service import TokenPayload
 
-router = APIRouter(prefix="/api/feedback", tags=["feedback"])
+router = APIRouter(prefix="/api/feedback", tags=["Feedback"])
 
 
 class FeedbackCreateRequest(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+                    "rating": "thumbs_up",
+                    "comment": "This answered my question exactly.",
+                }
+            ]
+        }
+    )
+
     message_id: UUID
     rating: FeedbackRating
     comment: str | None = None
@@ -64,7 +76,7 @@ async def submit_feedback(
     """Submit thumbs up/down (+ optional text) for a message.
 
     Raises:
-        HTTPException: 404 if the message doesn't exist or doesn't
+        NotFoundError: 404 if the message doesn't exist or doesn't
             belong to a conversation owned by the current user — same
             not-found-vs-forbidden reasoning as `chat_routes.py`'s
             conversation ownership checks.
