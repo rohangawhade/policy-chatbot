@@ -26,6 +26,19 @@ jobs:
         env:
           HEAD_REF: ${{ github.head_ref }}
         run: |
+          # release-please (Step 0.4/14.8) always names its own branch
+          # release-please--branches--<target>, which can never match the
+          # <type>/<scope>-<summary> convention below -- that branch is
+          # entirely automation-managed, never hand-named, so this repo's
+          # own naming convention was never meant to apply to it. Without
+          # this exception, release-please's PR can never pass a required
+          # check, and main's branch protection (enforce_admins: true, no
+          # bypass for anyone) makes it permanently unmergeable -- caught
+          # by actually trying to merge a real release PR, not assumed.
+          if [[ "$HEAD_REF" == release-please--* ]]; then
+            echo "release-please-managed branch — skipping naming convention check: $HEAD_REF"
+            exit 0
+          fi
           pattern='^(feat|fix|hotfix|refactor|perf|test|docs|chore|build|ci|security|revert)/[a-z0-9][a-z0-9-]*$'
           if ! echo "$HEAD_REF" | grep -qE "$pattern"; then
             echo "::error::Branch name '$HEAD_REF' does not match <type>/<scope>-<summary> (lowercase, kebab-case)"
