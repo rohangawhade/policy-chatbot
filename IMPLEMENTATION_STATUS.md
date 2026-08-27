@@ -4617,3 +4617,42 @@ branches, never anticipating an automation-managed one.
   safe to change unilaterally, and the manual workaround is a
   two-command fix each time a release is actually cut (an infrequent,
   deliberate action, not part of routine per-PR merging).
+- **One more real gotcha, found merging the release PR a second time**:
+  after `pr-lint.yml`'s fix merged into `main`, PR #14's own `pr-lint`
+  check still showed the old cached failure — `pull_request`-triggered
+  workflows run using the workflow YAML *from the PR's own head
+  branch*, not `main`'s latest, so release-please's branch needed
+  `main` merged into it before its checks would pick up the fix.
+  Fixed with `git merge main` on `release-please--branches--main`
+  (a normal, safe merge — release-please's own diff, the version bump
+  and `CHANGELOG.md`, doesn't touch `pr-lint.yml`, so there was nothing
+  to conflict), then pushed. All 7 checks passed for the first time
+  in the PR's history; merged normally via `gh pr merge --squash`
+  (no `--admin`, no bypass).
+- **Confirmed against the real, live outcome, not just a green
+  workflow run**: `git tag -l` shows `v0.2.0`; `gh api
+  repos/.../releases` shows a real, published GitHub Release with a
+  body containing all 5 named sections (Features/Bug Fixes/
+  Performance/Security/Documentation) and real entries in each —
+  `security(backend): per-user chat rate limiting` (#61) and
+  `refactor`/`docs` commits that were silently missing from every
+  prior changelog preview now appear correctly. `CHANGELOG.md` exists
+  at the repo root for the first time, with the same content.
+  `.release-please-manifest.json` bumped to `0.2.0` automatically.
+
+**Phase 14 — Polish & Production Readiness: COMPLETE. `v0.2.0`
+released — tag, GitHub Release, and `CHANGELOG.md` all live and
+verified.**
+
+## Next recommended step
+
+The entire files/plan.md is now complete except **Phase 12 — RAG
+Evaluation Pipeline**, blocked since Step 11.2 on the same missing
+credential — check `.env` for `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`
+before assuming otherwise (see `[[policypal_llm_key_blocker]]`
+memory). If a key has since been added, Phase 12 (Steps 12.1-12.2,
+plus the still-open Step 11.2 synthetic-docs generation) is the last
+unblocked work in the entire plan. If still blocked, there is no
+further unblocked engineering work in files/plan.md — future sessions
+should check `.env` first before assuming otherwise, per
+`[[policypal_autopilot_workflow]]`.
