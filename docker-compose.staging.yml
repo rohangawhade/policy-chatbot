@@ -1,0 +1,35 @@
+# Staging profile (files/plan.md Step 14.6): closer to production shape
+# than local dev -- no hot reload, no source mounts (that's dev-only,
+# docker-compose.override.yml) -- but Postgres/Redis stay published to
+# the host for easy inspection; docker-compose.prod.yml hardens that
+# away for real production.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.staging.yml up -d
+#
+# Deliberately NOT combined with a bare `docker compose up`: Compose
+# auto-merges docker-compose.override.yml only when no -f flags are
+# given at all. Passing -f explicitly, as above, opts out of that
+# auto-merge, so the dev hot-reload layer never applies here.
+
+services:
+  backend:
+    env_file:
+      - .env.staging
+    restart: unless-stopped
+
+  celery-worker:
+    env_file:
+      - .env.staging
+    restart: unless-stopped
+
+  frontend:
+    env_file:
+      - .env.staging
+    restart: unless-stopped
+
+  postgres:
+    restart: unless-stopped
+
+  redis:
+    restart: unless-stopped

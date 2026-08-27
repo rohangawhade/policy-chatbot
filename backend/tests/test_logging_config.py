@@ -38,6 +38,20 @@ def test_production_env_renders_json(
     assert '"level": "info"' in output
 
 
+def test_staging_env_renders_json(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(app_config, "env", "staging")
+    monkeypatch.setattr(app_config, "debug", False)
+
+    configure_logging()
+    output = _log_and_capture(capsys, "info", "something_happened", foo="bar")
+
+    assert output.startswith("{")
+    assert '"event": "something_happened"' in output
+    assert '"foo": "bar"' in output
+
+
 def test_non_production_env_renders_pretty_console_output(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

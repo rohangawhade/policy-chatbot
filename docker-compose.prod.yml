@@ -1,0 +1,48 @@
+# Production profile (files/plan.md Step 14.6): no hot reload/source
+# mounts, a multi-worker backend, and Postgres/Redis no longer
+# published to the host -- nothing outside the Compose network should
+# reach them directly.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Deliberately NOT combined with a bare `docker compose up`: Compose
+# auto-merges docker-compose.override.yml only when no -f flags are
+# given at all. Passing -f explicitly, as above, opts out of that
+# auto-merge, so the dev hot-reload layer never applies here.
+
+services:
+  backend:
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
+    env_file:
+      - .env.production
+    restart: unless-stopped
+
+  celery-worker:
+    # --loglevel=warning, not the base/staging info -- production
+    # shouldn't be as chatty by default; --concurrency=4, not the dev
+    # override's 1, for real throughput.
+    command: celery -A workers.celery_app worker --loglevel=warning -Q default,embedding,ingestion --concurrency=4
+    env_file:
+      - .env.production
+    restart: unless-stopped
+
+  frontend:
+    env_file:
+      - .env.production
+    restart: unless-stopped
+
+  postgres:
+    # Compose merges list-type fields (like `ports`) by concatenation,
+    # not replacement, by default -- a plain `ports: []` here is a
+    # silent no-op that leaves docker-compose.yml's published port in
+    # place (confirmed empirically: `docker compose ... config` still
+    # showed 5432:5432 with a plain empty list). `!reset` is Compose's
+    # explicit tag for "clear the base value instead of merging into
+    # it" -- verified this actually drops the `ports:` key entirely.
+    ports: !reset []
+    restart: unless-stopped
+
+  redis:
+    ports: !reset []
+    restart: unless-stopped
