@@ -4148,20 +4148,111 @@ blocked). Step 11.3 below was deliberately designed to not depend on
 - README.md: Features checklist line updated, new "⚠️ Error Handling"
   collapsible section.
 
+### Step 14.3 — Rate limiting — DONE
+
+- `backend/src/api/middleware/rate_limiter.py` (new, filling in
+  plan.md's already-named-but-empty file slot) — `RateLimiter`, a
+  Redis-backed **sliding-window-log** limiter (not the cheaper fixed/
+  rolling-counter approximation): each request's timestamp becomes a
+  member of a per-key Redis sorted set; a request is allowed only if
+  fewer than `max_requests` timestamps remain after evicting everything
+  older than `window_seconds`. `RedisCacheAdapter` (Step 3.4) couldn't
+  be reused here — it's a `CachePort` abstraction (get/set/delete/exists
+  with TTL) with no sorted-set primitives — so this constructs its own
+  `redis.asyncio.Redis` client directly from `RedisConfig.url`, same
+  "adapter has no opinion, caller decides" key-construction pattern as
+  every other Redis/cache adapter in this codebase.
+- **Implemented as a single atomic Lua script (`EVAL`), not sequential
+  Python calls, because a naive check-then-act has a real race**:
+  counting existing entries and then adding if under the limit, as two
+  separate round trips, lets two concurrent requests from the same user
+  both read the same "count" before either writes, letting both through
+  even exactly at the limit. Went with the Lua-script approach from the
+  start rather than discovering this the hard way — Redis executes a
+  script as one atomic unit on its single-threaded event loop, which is
+  what actually closes the race. Verified empirically (not just
+  reasoned about): a throwaway script fired 20 concurrent `check()`
+  calls at a limit of 5 against a real Redis container and asserted
+  exactly 5 got through — passed on the first run.
+- `backend/src/config.py` gained `RateLimitConfig` (`RATE_LIMIT_` env
+  prefix, matching every other config section's one-class-per-concern
+  pattern): `chat_max_requests` (default 20), `chat_window_seconds`
+  (default 60). Added to `.env.example`.
+- `backend/src/api/dependencies.py` gained `get_chat_rate_limiter()`,
+  constructing a `RateLimiter` from `redis_config.url` +
+  `rate_limit_config`.
+- `backend/src/api/routes/chat_routes.py`'s `send_message` — the only
+  endpoint in this codebase that calls an LLM (guardrails/routing/
+  retrieval all run before generation, but generation is the expensive,
+  abuse-prone call `files/coding-standards.md` section 8 asks to
+  protect: "Rate limiting on all LLM-calling endpoints") — now takes a
+  `rate_limiter: RateLimiter = Depends(get_chat_rate_limiter)` parameter
+  and calls `await rate_limiter.check(str(current_user.user_id))`
+  **before** `_get_owned_conversation()` or anything else in the
+  handler, so an abusive caller is rejected before even the cheap
+  conversation-ownership check runs, let alone the RAG pipeline —
+  deliberately keyed on `user_id` (per-user, as coding-standards asks),
+  not `employer_id` (would incorrectly let one abusive employee's
+  requests count against every coworker's budget). `RateLimitError`
+  (already defined, Step 14.2) is raised on exceeding the limit;
+  `error_handlers.py` (Step 14.2) already maps it to 429 — no changes
+  needed there.
+- Validation: `ruff check`/`ruff format --check`/`mypy --strict src`
+  all pass with zero suppressions in every new/changed file (one
+  documented `# type: ignore[misc]` in `rate_limiter.py` for a real
+  `redis.asyncio.Redis.eval` stub inaccuracy — its type stub is shared
+  with the sync client and claims `Awaitable[str] | str`, but the async
+  client's `eval()` is always awaitable at runtime). New
+  `tests/test_rate_limiter.py` (7 tests: first request allowed, N
+  requests up to the limit all allowed, request N+1 raises
+  `RateLimitError` with the right code/message, independent keys don't
+  share a budget, a request outside the window is allowed again via a
+  monkeypatched clock, and the Redis key/argument shapes `eval` is
+  called with) against a fake Redis client that re-implements the exact
+  same evict/count/add semantics in pure Python (CI has no Redis
+  service, `ci.yml`'s `backend-quality` job only runs `postgres:16`,
+  Step 3.5's precedent — same reason `test_redis_cache_adapter.py`
+  mocks rather than hits a live server). `tests/test_chat_routes.py`
+  gained a `_FakeRateLimiter` test double and 3 new tests (429 on an
+  exceeded limit, the limiter is checked with the employee's `user_id`,
+  the limit is enforced even for a nonexistent conversation id — proving
+  spamming bogus ids isn't a free bypass). `tests/test_dependencies.py`
+  gained a test for `get_chat_rate_limiter`'s wiring. Full suite: 665
+  tests passing (up from 655), 100% coverage across the entire `src/`
+  tree (3012/3012 statements), zero warnings (`-W error::UserWarning`
+  re-run again). **Additionally verified against a real Redis
+  instance, not just mocks**: `docker compose up -d redis`, ran two
+  throwaway scripts directly against `RateLimiter` — one confirming the
+  basic allow/block/window-expiry sequence, one firing 20 concurrent
+  `check()` calls at a limit of 5 and asserting exactly 5 got through
+  (the atomicity check described above). Both scripts deleted after;
+  `docker compose down` (no `-v`), nothing seeded.
+- README.md: Features checklist line updated, new "🚦 Rate Limiting"
+  collapsible section.
+
+**Phase 14 — Polish & Production Readiness: 3 of 8 steps done
+(14.1-14.3).**
+
 ## Next recommended step
 
-Continue with **Step 14.3 — Rate limiting**
-(`security/chat-rate-limiting`): per-user rate limiting on chat
-endpoints (prevent LLM cost abuse), Redis-backed sliding window.
-`RedisCacheAdapter` (Step 3.4) already exists but is a `CachePort`
-abstraction (get/set/delete/exists with TTL) — a sliding-window counter
-needs Redis primitives (`INCR`/`ZADD`/`EXPIRE`) that port doesn't expose,
-so this step likely needs a small dedicated Redis client usage in a new
-`api/middleware/rate_limiter.py` (already named, empty, in plan.md's file
-tree) rather than reusing `CachePort`. `RateLimitError` (this step) is
-ready to be raised the moment a limit is exceeded — `error_handlers.py`
-already maps it to 429. Fully unblocked — no LLM/Pinecone credentials
-needed. Phase 12 (RAG Evaluation Pipeline) remains blocked by the same
-missing LLM credential as Step 11.2 — check `.env` for
-`ANTHROPIC_API_KEY`/`OPENAI_API_KEY` before assuming otherwise (see
-`[[policypal_llm_key_blocker]]` memory).
+Continue with **Step 14.4 — Retry middleware**
+(`perf/external-call-retries`): exponential backoff with jitter on all
+external calls (LLM API, Pinecone, embedding API), configurable max
+retries/base delay, using `tenacity`. **Mostly already done, likely a
+short step or a no-op audit rather than new code**: `LiteLLMAdapter`
+(Step 3.2) and `PineconeAdapter` (Step 3.3) already retry via `tenacity`
+with exponential backoff (`wait_exponential`) on their own retryable
+transport errors, per explicit per-call-type ceilings in
+`files/coding-standards.md` section 11 — `RedisCacheAdapter` (Step 3.4)
+does too. None of the three currently add *jitter* to the backoff
+(`tenacity.wait_exponential` alone, not `wait_exponential_jitter` /
+`wait_random_exponential`) — confirm whether plan.md's "with jitter"
+phrasing is meant literally (in which case this step is switching 3
+existing `wait_exponential(...)` calls to a jittered variant) or
+whether the existing exponential backoff already satisfies the intent.
+Fully unblocked — no LLM/Pinecone credentials needed to audit or adjust
+existing retry config (no *new* live-call testing required, only
+re-running the existing mocked retry test suites). Phase 12 (RAG
+Evaluation Pipeline) remains blocked by the same missing LLM credential
+as Step 11.2 — check `.env` for `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`
+before assuming otherwise (see `[[policypal_llm_key_blocker]]` memory).
