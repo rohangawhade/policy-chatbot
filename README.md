@@ -167,7 +167,17 @@ cd backend
 <details>
 <summary>📄 Loading Documents</summary>
 
-Not yet available — the document download/generation/seed scripts land in Phase 11.
+```bash
+make download-gov-docs   # fetches 50-100 real government benefits PDFs into data/gov_pdfs/
+make seed                # seeds demo employers/employees/policies, uploads a handful of
+                          # documents per employer through the real upload endpoint
+```
+
+`download_gov_docs.py` (Step 11.1) pulls real, publicly-available plan brochures/SBC templates/compliance guides from OPM.gov, CMS.gov/Medicare.gov, and DOL.gov — idempotent (a `data/gov_pdfs/manifest.json` tracks what's already fetched; safe to interrupt and re-run) and supports `--dry-run`/`--source {opm,cms,dol,all}`/`--limit N`.
+
+`seed_data.py` (Step 11.3) needs Postgres reachable, and — unless run with `--skip-ingestion` — also a running backend + Celery worker (`docker compose up -d postgres redis backend celery-worker` first), since it uploads documents through the real `POST /api/documents/upload` endpoint rather than inserting rows directly. **Not idempotent**: seeded emails/company names are fixed, so re-running against an already-seeded database fails on a unique-constraint conflict rather than creating a second batch — it targets a disposable local/demo database, not a shared one.
+
+LLM-generated synthetic policy documents (`data/synthetic/`, plan.md Step 11.2) are the one part of Phase 11 still blocked — that step's entire deliverable is real generated content, so it needs `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` set for real rather than a mocked stand-in. Both scripts above work fully without it.
 
 </details>
 
@@ -257,11 +267,11 @@ Interactive, always-current docs (every endpoint's request/response schema, exam
 | POST   | `/api/policies`                           | Access token (employer or admin) | Create a policy.                                                                          |
 | GET    | `/api/policies`                           | Access token          | List policies for the current employer.                                                          |
 | GET    | `/api/policies/{id}`                      | Access token          | Get one policy.                                                                                   |
+| GET    | `/api/policies/{id}/enrollments`          | Access token (employer or admin) | Which employees are enrolled in a policy.                                                |
 | PATCH  | `/api/policies/{id}`                      | Access token (employer or admin) | Update a policy (partial).                                                               |
 | DELETE | `/api/policies/{id}`                      | Access token (employer or admin) | Delete a policy.                                                                          |
 | POST   | `/api/policies/{id}/enroll`               | Access token (employer or admin) | Enroll an employee in a policy.                                                          |
 | DELETE | `/api/policies/{id}/enroll/{employee_id}` | Access token (employer or admin) | Unenroll an employee from a policy (soft-delete).                                        |
-
 | POST   | `/api/feedback`                           | Access token          | Submit thumbs up/down (+ optional text) for a message.                                           |
 | GET    | `/api/feedback/analytics`                 | Admin only             | Aggregated feedback stats for one employer.                                                       |
 | GET    | `/api/admin/overview`                     | Admin only             | Top-level summary: query volume, active users, document count, avg satisfaction, cost this month. |
@@ -277,14 +287,19 @@ Interactive, always-current docs (every endpoint's request/response schema, exam
 
 **Standing convention decision**: like every other route file since Step 9.1, these return their Pydantic response model directly — not wrapped in an `APIResponse[T]` envelope (see `auth_routes.py`'s module docstring for the full reasoning).
 
-Phase 9 (API routes) is complete. This table is kept current as endpoints are added.
+This table is kept current as endpoints are added — see `/docs` above for the always-authoritative, auto-generated version.
 
 ## Project Structure
 
 ```
 policypal/
 ├── docker-compose.yml            # postgres, redis, backend, celery-worker, frontend
-├── docker-compose.override.yml   # local dev: hot reload, source mounts
+├── docker-compose.override.yml   # local dev: hot reload, source mounts (auto-merged)
+├── docker-compose.staging.yml    # staging profile (explicit -f, see Environment Profiles)
+├── docker-compose.prod.yml       # production profile (explicit -f)
+├── .env.example                  # dev template — every variable documented
+├── .env.staging.example          # staging template (same variables, different defaults)
+├── .env.production.example       # production template
 ├── backend/
 │   ├── src/
 │   │   ├── main.py              # FastAPI app factory

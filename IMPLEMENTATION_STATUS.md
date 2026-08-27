@@ -4457,26 +4457,79 @@ blocked). Step 11.3 below was deliberately designed to not depend on
 **Phase 14 — Polish & Production Readiness: 6 of 8 steps done
 (14.1-14.6).**
 
+### Step 14.7 — Final README update — DONE
+
+- A consistency audit, not a rewrite, confirmed by actually checking
+  each flagged item against the real codebase rather than assuming —
+  one of the two sections this file's own prior note flagged as stale
+  turned out **not** to be:
+  - **"📄 Loading Documents" was genuinely stale**: still said "Not yet
+    available — the document download/generation/seed scripts land in
+    Phase 11," despite Steps 11.1/11.3 having shipped
+    `download_gov_docs.py`/`seed_data.py` weeks of steps ago. Replaced
+    with real usage (`make download-gov-docs`/`make seed`), each
+    script's actual behavior (idempotent manifest-tracked downloads;
+    seed's real-upload-endpoint approach and non-idempotent, fixed-email
+    design), and a pointer to the one genuinely still-blocked piece
+    (Step 11.2's synthetic docs, needs a real LLM key).
+  - **"🧪 Running RAG Evaluation" was actually still accurate**, not
+    stale — checked `data/eval/`/`eval/` directly rather than assuming
+    from the phase number: both are still empty placeholder directories
+    (just a `.gitkeep`), and `eval/run_eval.py` (what `ci.yml`'s
+    `rag-eval` job checks for) doesn't exist. Phase 12 genuinely hasn't
+    started. Left this section unchanged.
+- **Two real bugs found in the `## API Endpoints` table, not just
+  staleness**: a stray blank line mid-table (between the policies and
+  feedback rows) that would have broken the table's Markdown rendering
+  from that point on — everything after it would render as a second,
+  header-less fragment, not a continuation of the same table; and a
+  fully missing row for `GET /api/policies/{id}/enrollments` (Step
+  10.8), found by mechanically diffing every real `@router.*` decorator
+  across all 9 route files against the table's 45 rows (46 real routes
+  total) rather than eyeballing it.
+- `## Project Structure` tree gained the Step 14.6 files
+  (`docker-compose.staging.yml`/`docker-compose.prod.yml`/
+  `.env.staging.example`/`.env.production.example`) alongside the
+  already-listed `docker-compose.yml`/`.override.yml`/`.env.example`.
+- Fixed a stale closing line under the endpoint table ("Phase 9 (API
+  routes) is complete" — true but long superseded by Phases 10-14's own
+  additions to the same table) to point at `/docs` (Step 14.5) as the
+  actually-authoritative reference instead.
+- Confirmed unchanged, after checking rather than assuming: Architecture
+  Overview's query-flow diagram, the Tech Stack table, "How It Works,"
+  and every Phase 0-13 Features checklist line — all still accurate.
+- Validation: this step touched only `README.md` (no code) — `git diff
+  --stat` confirms a single-file change. No test suite implications;
+  read the full rendered table back afterward to confirm the blank-line
+  fix actually produces one continuous 46-row table, not two fragments.
+- README.md: this step's own set of fixes (see above) — Features
+  checklist line otherwise unchanged (Step 14.8 is the only remaining
+  open Phase 14 item).
+
+**Phase 14 — Polish & Production Readiness: 7 of 8 steps done
+(14.1-14.7).**
+
 ## Next recommended step
 
-Continue with **Step 14.7 — Final README update**
-(`docs/final-readme-refresh`): ensure README.md reflects the complete
-system — architecture, setup, API reference, data pipeline, model
-configuration, evaluation. Given Steps 9-14 have each already updated
-README.md incrementally (Features checklist + a new collapsible section
-per step, per files/coding-standards.md section 14's living-document
-rule), this is likely a *consistency audit* rather than a rewrite:
-check for drift the incremental updates might have missed (e.g. the
-"📄 Loading Documents" and "🧪 Running RAG Evaluation" collapsible
-sections still literally say "Not yet available" despite Phase 11's
-download/seed scripts and Phase 8's ingestion pipeline being long done
-— flagged as stale but out of scope back in Step 14.1's entry, deferred
-here since this step exists specifically for exactly this kind of
-sweep), confirm the Architecture Overview/Tech Stack tables and Project
-Structure tree still match reality, and confirm every Phase 0-13
-Features checklist line is still accurate (Phase 11's Step 11.2 caveat,
-Phase 12's blocked status, etc.). Fully unblocked — no LLM/Pinecone
-credentials needed, pure documentation. Phase 12 (RAG Evaluation
-Pipeline) remains blocked by the same missing LLM credential as Step
-11.2 — check `.env` for `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` before
-assuming otherwise (see `[[policypal_llm_key_blocker]]` memory).
+Continue with **Step 14.8 — Release tagging and changelog**
+(`ci/release-automation`): enable `release.yml` to compute the next
+semver from merged Conventional Commit types and generate
+`CHANGELOG.md` grouped into Features/Bug Fixes/Performance/Security/
+Documentation. **Likely mostly already done, check before assuming
+greenfield work**: `release.yml` (Step 0.4) already uses
+`googleapis/release-please-action@v4` with `release-please-config.json`/
+`.release-please-manifest.json` (seeded at `0.1.0`, Step 2's "Operational
+fix" entry after the premature-v1.0.0 incident) and has been
+successfully cutting releases on every merge to `main` since — verify
+whether `CHANGELOG.md` is already being generated correctly with the
+right section groupings (release-please's default changelog-types
+mapping may need tuning to match "Features/Bug Fixes/Performance/
+Security/Documentation" specifically, e.g. `perf`/`security` commit
+types grouped under their own headings rather than folded into
+"Other"), and confirm a real `CHANGELOG.md` file exists at repo root
+with real entries (check `git log` for merged release-please PRs, not
+just that the workflow runs green). Fully unblocked — no LLM/Pinecone
+credentials needed. Phase 12 (RAG Evaluation Pipeline) remains blocked
+by the same missing LLM credential as Step 11.2 — check `.env` for
+`ANTHROPIC_API_KEY`/`OPENAI_API_KEY` before assuming otherwise (see
+`[[policypal_llm_key_blocker]]` memory).
