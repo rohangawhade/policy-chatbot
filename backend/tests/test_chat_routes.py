@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from api.dependencies import (
+    get_chat_rate_limiter,
     get_conversation_repository,
     get_guardrails_service,
     get_message_repository,
@@ -18,6 +19,7 @@ from api.middleware.tenant_context import get_current_employer_id
 from api.routes import chat_routes
 from core.domain.conversation import Conversation, Message, MessageRole
 from core.domain.employee import UserRole
+from core.domain.errors import RateLimitError
 from core.ports.repository_ports import ConversationRepository, MessageRepository
 from core.services.auth_service import TokenPayload
 from core.services.guardrails_service import GuardrailResult
@@ -82,6 +84,21 @@ class _FakeMessageRepository(MessageRepository):
         end: datetime | None = None,
     ) -> list[Message]:
         raise NotImplementedError
+
+
+class _FakeRateLimiter:
+    def __init__(self, *, exceeded: bool = False) -> None:
+        self._exceeded = exceeded
+        self.checked_keys: list[str] = []
+
+    async def check(self, key: str) -> None:
+        self.checked_keys.append(key)
+        if self._exceeded:
+            raise RateLimitError(
+                "Rate limit exceeded: max 20 requests per 60s. Please slow down and try again "
+                "shortly.",
+                code="rate_limit_exceeded",
+            )
 
 
 class _FakeGuardrailsService:
@@ -152,6 +169,7 @@ def _test_app(
     message_repository: MessageRepository | None = None,
     guardrails_service: object | None = None,
     rag_service: object | None = None,
+    rate_limiter: object | None = None,
 ) -> FastAPI:
     app = FastAPI()
     register_exception_handlers(app)
@@ -164,6 +182,7 @@ def _test_app(
         guardrails_service or _FakeGuardrailsService(allowed=True)
     )
     app.dependency_overrides[get_rag_service] = lambda: rag_service
+    app.dependency_overrides[get_chat_rate_limiter] = lambda: (rate_limiter or _FakeRateLimiter())
     app.dependency_overrides[get_current_user] = lambda: TokenPayload(
         user_id=employee_id, employer_id=employer_id, role=UserRole.EMPLOYEE, token_type="access"
     )
@@ -384,3 +403,77 @@ def test_send_message_streams_a_rejection_when_guardrails_blocks_it() -> None:
         "rejected": True,
     }
     assert guardrails_service.calls == [("What's the weather?", employer_id)]
+
+
+def test_send_message_429s_when_the_rate_limit_is_exceeded() -> None:
+    employee_id, employer_id = uuid4(), uuid4()
+    conversation = _conversation(employee_id=employee_id, employer_id=employer_id)
+    client = TestClient(
+        _test_app(
+            employee_id=employee_id,
+            employer_id=employer_id,
+            conversation_repository=_FakeConversationRepository([conversation]),
+            rate_limiter=_FakeRateLimiter(exceeded=True),
+        )
+    )
+
+    response = client.post(
+        f"/api/chat/conversations/{conversation.id}/messages", json={"content": "hi"}
+    )
+
+    assert response.status_code == 429
+
+
+def test_send_message_checks_the_rate_limiter_with_the_employees_id() -> None:
+    employee_id, employer_id = uuid4(), uuid4()
+    conversation = _conversation(employee_id=employee_id, employer_id=employer_id)
+    metrics = GenerationMetrics(
+        full_text="Hello",
+        model="claude-haiku-4-5-20251001",
+        model_tier="cheap",
+        complexity_score=0.1,
+        top_similarity_score=0.9,
+        is_low_confidence=False,
+        from_cache=False,
+        conversation_id=conversation.id,
+        message_id=uuid4(),
+    )
+    rate_limiter = _FakeRateLimiter()
+    client = TestClient(
+        _test_app(
+            employee_id=employee_id,
+            employer_id=employer_id,
+            conversation_repository=_FakeConversationRepository([conversation]),
+            rag_service=_FakeRAGService(_FakeGenerationStream(["Hello"], metrics)),
+            rate_limiter=rate_limiter,
+        )
+    )
+
+    with client.stream(
+        "POST",
+        f"/api/chat/conversations/{conversation.id}/messages",
+        json={"content": "hi"},
+    ) as response:
+        assert response.status_code == 200
+        "".join(response.iter_text())  # drain the stream
+
+    assert rate_limiter.checked_keys == [str(employee_id)]
+
+
+def test_send_message_checks_the_rate_limit_before_the_conversation_lookup() -> None:
+    """The rate-limit check must reject an abusive caller even for a
+    conversation id that doesn't exist/isn't theirs -- otherwise spamming
+    bogus ids would be a free way around it."""
+    employee_id, employer_id = uuid4(), uuid4()
+    client = TestClient(
+        _test_app(
+            employee_id=employee_id,
+            employer_id=employer_id,
+            conversation_repository=_FakeConversationRepository(),
+            rate_limiter=_FakeRateLimiter(exceeded=True),
+        )
+    )
+
+    response = client.post(f"/api/chat/conversations/{uuid4()}/messages", json={"content": "hi"})
+
+    assert response.status_code == 429

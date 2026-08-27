@@ -26,6 +26,7 @@ from api.dependencies import (
     get_auth_service,
     get_cache_port,
     get_celery_app,
+    get_chat_rate_limiter,
     get_conversation_repository,
     get_document_chunk_repository,
     get_document_repository,
@@ -43,7 +44,8 @@ from api.dependencies import (
     get_rag_service,
     get_vector_store_port,
 )
-from config import auth_config, llm_config
+from api.middleware.rate_limiter import RateLimiter
+from config import auth_config, llm_config, rate_limit_config
 from core.domain.employee import UserRole
 from core.ports.repository_ports import (
     AnalyticsRepository,
@@ -183,6 +185,14 @@ def test_get_cache_port_returns_a_redis_cache_adapter() -> None:
 
 def test_get_vector_store_port_returns_a_pinecone_adapter() -> None:
     assert isinstance(get_vector_store_port(), PineconeAdapter)
+
+
+def test_get_chat_rate_limiter_returns_a_rate_limiter_configured_from_settings() -> None:
+    limiter = get_chat_rate_limiter()
+
+    assert isinstance(limiter, RateLimiter)
+    assert limiter._max_requests == rate_limit_config.chat_max_requests
+    assert limiter._window_seconds == rate_limit_config.chat_window_seconds
 
 
 def test_get_event_bus_returns_an_in_memory_event_bus(db_session: AsyncSession) -> None:

@@ -65,7 +65,8 @@ from adapters.persistence.feedback_repo import PostgresFeedbackRepository
 from adapters.persistence.policy_repo import PostgresEnrollmentRepository, PostgresPolicyRepository
 from adapters.vector_store.pinecone_adapter import PineconeAdapter
 from api.event_subscribers import register_default_subscribers
-from config import auth_config, llm_config, pinecone_config, redis_config
+from api.middleware.rate_limiter import RateLimiter
+from config import auth_config, llm_config, pinecone_config, rate_limit_config, redis_config
 from core.ports.cache_port import CachePort
 from core.ports.event_bus_port import EventBusPort
 from core.ports.llm_port import LLMPort
@@ -155,6 +156,14 @@ def get_llm_port() -> LLMPort:
 
 def get_cache_port() -> CachePort:
     return RedisCacheAdapter(url=redis_config.url)
+
+
+def get_chat_rate_limiter() -> RateLimiter:
+    return RateLimiter(
+        redis_config.url,
+        max_requests=rate_limit_config.chat_max_requests,
+        window_seconds=rate_limit_config.chat_window_seconds,
+    )
 
 
 def get_vector_store_port() -> VectorStorePort:

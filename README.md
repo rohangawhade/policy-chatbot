@@ -42,7 +42,7 @@ See `files/plan.md` for the full design (tech stack rationale, data flow diagram
 - [x] Data acquisition & seeding: real government benefits PDFs, demo employer/employee/policy seed script (Phase 11 — LLM-generated synthetic docs, Step 11.2, blocked on a real `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`)
 - [ ] RAGAS evaluation pipeline (Phase 12 — blocked on the same missing LLM credential)
 - [x] Dependency injection wiring audit (Phase 13)
-- [ ] Production polish (Phase 14): structured logging with correlation IDs, global error handling done; rate limiting, retry middleware, API docs, environment profiles, release automation still open
+- [ ] Production polish (Phase 14): structured logging with correlation IDs, global error handling, chat rate limiting done; retry middleware, API docs, environment profiles, release automation still open
 
 Track detailed step-by-step progress in `IMPLEMENTATION_STATUS.md`.
 
@@ -168,6 +168,13 @@ Every log line goes through `structlog` (`backend/src/logging_config.py`), confi
 <summary>⚠️ Error Handling</summary>
 
 A route or service can raise a plain domain exception (`core/domain/errors.py`'s `PolicyPalError` hierarchy — `NotFoundError`, `AuthenticationError`, `AuthorizationError`, `TenantAccessError`, `RateLimitError`, `ModelUnavailableError`, `DomainError`, `DocumentProcessingError`) without importing anything from `fastapi` at all; a global handler (`backend/src/api/error_handlers.py`, registered in `main.py`) converts it to the right HTTP status code and a safe `{"detail": "..."}` body. Anything else unhandled — a genuine bug — never reaches the client as a stack trace: it's converted to a generic `500 {"detail": "An unexpected error occurred..."}` response, while the real exception (with its correlation ID) is still fully logged server-side via `RequestLoggerMiddleware`.
+
+</details>
+
+<details>
+<summary>🚦 Rate Limiting</summary>
+
+`POST /api/chat/conversations/{id}/messages` (the only endpoint that calls an LLM) is rate-limited per employee via a Redis-backed sliding-window log (`backend/src/api/middleware/rate_limiter.py`) — a single atomic Lua script (`ZREMRANGEBYSCORE`/`ZCARD`/`ZADD`) evicts requests outside the window and admits the new one only if the count is still under the limit, so concurrent requests from the same user can't race past it. Defaults to `RATE_LIMIT_CHAT_MAX_REQUESTS=20` per `RATE_LIMIT_CHAT_WINDOW_SECONDS=60` (see `.env.example`); exceeding it returns `429 {"detail": "Rate limit exceeded..."}` via the same `RateLimitError` → HTTP-status mapping as the rest of the error-handling story above.
 
 </details>
 

@@ -20,12 +20,14 @@ from pydantic import BaseModel
 from starlette.responses import StreamingResponse
 
 from api.dependencies import (
+    get_chat_rate_limiter,
     get_conversation_repository,
     get_guardrails_service,
     get_message_repository,
     get_rag_service,
 )
 from api.middleware.auth_middleware import get_current_user
+from api.middleware.rate_limiter import RateLimiter
 from api.middleware.tenant_context import get_current_employer_id
 from core.domain.conversation import Conversation, Message, MessageRole
 from core.domain.errors import NotFoundError
@@ -134,6 +136,7 @@ async def send_message(
     conversation_repository: ConversationRepository = Depends(get_conversation_repository),
     guardrails_service: GuardrailsService = Depends(get_guardrails_service),
     rag_service: RAGService = Depends(get_rag_service),
+    rate_limiter: RateLimiter = Depends(get_chat_rate_limiter),
 ) -> StreamingResponse:
     """Send a message into an existing conversation; the response is an
     SSE stream of `data: {"token": "..."}` events, ending with one
@@ -142,7 +145,16 @@ async def send_message(
     complete — or `"rejected": true` if `GuardrailsService` (Step 6.1)
     blocked the query as off-topic before any retrieval/generation ever
     ran, per `files/plan.md`'s Query Flow diagram.
+
+    Raises:
+        RateLimitError: 429 (files/plan.md Step 14.3) if this employee
+            has already sent `RateLimitConfig.chat_max_requests` messages
+            within the trailing `chat_window_seconds` -- checked before
+            touching the conversation or the RAG pipeline at all, so an
+            abusive caller never reaches the expensive (LLM-calling) part
+            of this endpoint.
     """
+    await rate_limiter.check(str(current_user.user_id))
     await _get_owned_conversation(conversation_repository, conversation_id, current_user.user_id)
     return StreamingResponse(
         _stream_chat_response(

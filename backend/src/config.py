@@ -110,6 +110,19 @@ class AuthConfig(_Config):
     refresh_token_expire_days: int = 7
 
 
+class RateLimitConfig(_Config):
+    """Redis-backed sliding-window limits (files/plan.md Step 14.3,
+    files/coding-standards.md section 8: "Rate limiting on all
+    LLM-calling endpoints"). Only `chat_routes.py`'s `send_message`
+    actually calls an LLM today, so only its limit is defined here.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="RATE_LIMIT_", env_file=_ENV_FILE, extra="ignore")
+
+    chat_max_requests: int = 20
+    chat_window_seconds: int = 60
+
+
 class CorsConfig(_Config):
     model_config = SettingsConfigDict(env_prefix="CORS_", env_file=_ENV_FILE, extra="ignore")
 
@@ -128,4 +141,5 @@ celery_config = CeleryConfig()
 pinecone_config = PineconeConfig()
 llm_config = LLMConfig()
 auth_config = AuthConfig()
+rate_limit_config = RateLimitConfig()
 cors_config = CorsConfig()
