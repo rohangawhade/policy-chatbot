@@ -91,7 +91,7 @@ from core.ports.repository_ports import (
 
 router = APIRouter(
     prefix="/api/admin",
-    tags=["admin"],
+    tags=["Admin Analytics"],
     dependencies=[Depends(require_role(UserRole.ADMIN))],
 )
 
@@ -237,6 +237,9 @@ async def get_overview(
     document_repository: DocumentRepository = Depends(get_document_repository),
     feedback_repository: FeedbackRepository = Depends(get_feedback_repository),
 ) -> OverviewResponse:
+    """Top-level admin dashboard summary: query volume (today/week/month),
+    active users, document count, average satisfaction, and this
+    month's LLM spend. Admin only."""
     now = datetime.now(UTC)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week_start = now - timedelta(days=7)
@@ -277,6 +280,8 @@ async def get_cost_dashboard(
     end: datetime | None = None,
     analytics_repository: AnalyticsRepository = Depends(get_analytics_repository),
 ) -> CostDashboardResponse:
+    """LLM cost breakdown by model, employer, and day, optionally
+    narrowed to one employer and/or a time range. Admin only."""
     logs = await analytics_repository.list_llm_costs(employer_id=employer_id, start=start, end=end)
 
     by_model: dict[str, list[float]] = defaultdict(list)
@@ -309,6 +314,8 @@ async def get_cost_dashboard_alerts(
     threshold_usd: float | None = None,
     analytics_repository: AnalyticsRepository = Depends(get_analytics_repository),
 ) -> list[CostAlert]:
+    """Employer-days whose LLM spend exceeded `threshold_usd` (default:
+    `LLMConfig.daily_cost_alert_threshold_usd`). Admin only."""
     effective_threshold = (
         threshold_usd if threshold_usd is not None else llm_config.daily_cost_alert_threshold_usd
     )
@@ -337,6 +344,8 @@ async def get_latency(
     end: datetime | None = None,
     analytics_repository: AnalyticsRepository = Depends(get_analytics_repository),
 ) -> LatencyResponse:
+    """p50/p95/p99 request latency, broken out overall, retrieval-only,
+    generation-only, and by model tier. Admin only."""
     logs = await analytics_repository.list_latencies(
         employer_id=employer_id, model_tier=model_tier, start=start, end=end
     )
@@ -388,6 +397,8 @@ async def list_flagged_responses(
     analytics_repository: AnalyticsRepository = Depends(get_analytics_repository),
     message_repository: MessageRepository = Depends(get_message_repository),
 ) -> list[FlaggedResponseItem]:
+    """Low-confidence responses flagged for review, optionally narrowed
+    to one employer and/or review status. Admin only."""
     flagged = await analytics_repository.list_flagged_responses(
         employer_id=employer_id, status=status_filter
     )
@@ -403,14 +414,15 @@ async def update_flagged_response(
     analytics_repository: AnalyticsRepository = Depends(get_analytics_repository),
     message_repository: MessageRepository = Depends(get_message_repository),
 ) -> FlaggedResponseItem:
-    """Mark a flagged response reviewed, dismissed, or escalated.
+    """Mark a flagged response reviewed, dismissed, or escalated. Admin
+    only.
 
     Raises:
         HTTPException: 422 if `status` is `PENDING_REVIEW` — that's the
             initial state a flagged response is created in
             (`FlaggedResponse.status`'s default, Step 6.6), never a
-            target an admin action moves it *to*. 404 if no flagged
-            response with this id exists.
+            target an admin action moves it *to*.
+        NotFoundError: 404 if no flagged response with this id exists.
     """
     if body.status not in _TERMINAL_FLAG_STATUSES:
         raise HTTPException(
@@ -433,6 +445,8 @@ async def list_guardrail_rejections(
     end: datetime | None = None,
     analytics_repository: AnalyticsRepository = Depends(get_analytics_repository),
 ) -> list[GuardrailRejectionItem]:
+    """Off-topic queries `GuardrailsService` rejected, optionally
+    narrowed to one employer and/or a time range. Admin only."""
     rejections = await analytics_repository.list_guardrail_rejections(
         employer_id=employer_id, start=start, end=end
     )
@@ -454,6 +468,8 @@ async def list_unanswered_queries(
     analytics_repository: AnalyticsRepository = Depends(get_analytics_repository),
     message_repository: MessageRepository = Depends(get_message_repository),
 ) -> list[FlaggedResponseItem]:
+    """Flagged responses specifically due to low retrieval confidence —
+    the bot didn't have enough information to answer. Admin only."""
     flagged = await analytics_repository.list_flagged_responses(employer_id=employer_id)
     unanswered = [f for f in flagged if f.flag_reason == _UNANSWERED_FLAG_REASON]
     return [
@@ -468,6 +484,8 @@ async def get_topic_heatmap(
     end: datetime | None = None,
     message_repository: MessageRepository = Depends(get_message_repository),
 ) -> TopicHeatmapResponse:
+    """Query volume per day and policy type — one cell per (day,
+    policy_type) combination. Admin only."""
     messages = await message_repository.list_for_analytics(
         employer_id=employer_id, role=MessageRole.USER, start=start, end=end
     )
@@ -489,6 +507,9 @@ async def get_document_health(
     employer_id: UUID | None = None,
     document_repository: DocumentRepository = Depends(get_document_repository),
 ) -> list[DocumentHealthItem]:
+    """Per-document ingestion health: status, failed-ingestion error
+    message, and whether it's stale (unqueried/unupdated for 6+
+    months). Admin only."""
     now = datetime.now(UTC)
     stale_cutoff = now - timedelta(days=_STALE_THRESHOLD_DAYS)
     documents = await document_repository.list_all(employer_id=employer_id)

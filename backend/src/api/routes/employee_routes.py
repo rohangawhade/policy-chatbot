@@ -10,7 +10,7 @@ model(s) directly, not wrapped in `files/coding-standards.md` section
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from api.dependencies import (
     get_employee_repository,
@@ -29,7 +29,7 @@ from core.ports.repository_ports import (
 )
 from core.services.auth_service import AuthService, TokenPayload
 
-router = APIRouter(prefix="/api/employees", tags=["employees"])
+router = APIRouter(prefix="/api/employees", tags=["Employees"])
 
 # Only these two roles are creatable through this management endpoint —
 # same restriction, and the same reasoning, as auth_routes.py's
@@ -53,6 +53,19 @@ class EmployeeResponse(BaseModel):
 
 
 class EmployeeCreateRequest(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "email": "jane@acme.example",
+                    "password": "correcthorsebatterystaple",
+                    "full_name": "Jane Doe",
+                    "role": "employee",
+                }
+            ]
+        }
+    )
+
     email: str
     password: str
     full_name: str
@@ -154,6 +167,8 @@ async def list_employees(
     employer_id: UUID = Depends(get_current_employer_id),
     employee_repository: EmployeeRepository = Depends(get_employee_repository),
 ) -> list[EmployeeResponse]:
+    """List every employee belonging to the caller's employer.
+    `EMPLOYER`/`ADMIN` only."""
     employees = await employee_repository.list_by_employer(employer_id)
     return [_to_response(employee) for employee in employees]
 
@@ -189,6 +204,12 @@ async def get_employee(
     current_user: TokenPayload = Depends(get_current_user),
     employee_repository: EmployeeRepository = Depends(get_employee_repository),
 ) -> EmployeeResponse:
+    """Get a single employee by id. `EMPLOYER`/`ADMIN` only.
+
+    Raises:
+        NotFoundError: 404 if no such employee exists, or it belongs to
+            another employer (an `EMPLOYER` caller only).
+    """
     employee = await _get_managed_employee(employee_repository, employee_id, current_user)
     return _to_response(employee)
 
@@ -200,6 +221,13 @@ async def update_employee(
     current_user: TokenPayload = Depends(get_current_user),
     employee_repository: EmployeeRepository = Depends(get_employee_repository),
 ) -> EmployeeResponse:
+    """Partially update an employee's full name and/or active status.
+    `EMPLOYER`/`ADMIN` only — omitted fields are left unchanged.
+
+    Raises:
+        NotFoundError: 404 if no such employee exists, or it belongs to
+            another employer (an `EMPLOYER` caller only).
+    """
     employee = await _get_managed_employee(employee_repository, employee_id, current_user)
     updated = await employee_repository.update(
         employee.model_copy(update=body.model_dump(exclude_unset=True))
@@ -217,5 +245,11 @@ async def delete_employee(
     current_user: TokenPayload = Depends(get_current_user),
     employee_repository: EmployeeRepository = Depends(get_employee_repository),
 ) -> None:
+    """Delete an employee. `EMPLOYER`/`ADMIN` only.
+
+    Raises:
+        NotFoundError: 404 if no such employee exists, or it belongs to
+            another employer (an `EMPLOYER` caller only).
+    """
     await _get_managed_employee(employee_repository, employee_id, current_user)
     await employee_repository.delete(employee_id)

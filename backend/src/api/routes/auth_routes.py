@@ -20,7 +20,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from api.dependencies import get_auth_service, get_employee_repository, get_employer_repository
 from api.middleware.auth_middleware import get_current_user
@@ -29,7 +29,7 @@ from core.domain.errors import InvalidCredentialsError, InvalidTokenError, NotFo
 from core.ports.repository_ports import EmployeeRepository, EmployerRepository
 from core.services.auth_service import AuthService, TokenPayload
 
-router = APIRouter(prefix="/api/auth", tags=["auth"])
+router = APIRouter(prefix="/api/auth", tags=["Auth"])
 
 # Only these two roles are self-registerable. ADMIN is a superuser scoped
 # to no employer (core/domain/employee.py) — created out-of-band, never
@@ -38,6 +38,20 @@ _SELF_REGISTERABLE_ROLES = (UserRole.EMPLOYER, UserRole.EMPLOYEE)
 
 
 class RegisterRequest(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "employer_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+                    "email": "jane@acme.example",
+                    "password": "correcthorsebatterystaple",
+                    "full_name": "Jane Doe",
+                    "role": "employee",
+                }
+            ]
+        }
+    )
+
     employer_id: UUID
     email: str
     password: str
@@ -93,8 +107,9 @@ async def register(
 
     Raises:
         HTTPException: 422 if `role` is `ADMIN` (not self-registerable),
-            404 if `employer_id` doesn't reference a real employer, 409 if
-            `email` is already registered.
+            409 if `email` is already registered.
+        NotFoundError: 404 if `employer_id` doesn't reference a real
+            employer.
     """
     if body.role not in _SELF_REGISTERABLE_ROLES:
         raise HTTPException(
@@ -176,7 +191,7 @@ async def me(
     API response should echo back.
 
     Raises:
-        HTTPException: 404 if the token's subject no longer exists (e.g.
+        NotFoundError: 404 if the token's subject no longer exists (e.g.
             the account was deleted after the token was issued).
     """
     employee = await employee_repository.get(current_user.user_id)

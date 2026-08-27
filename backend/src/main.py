@@ -24,11 +24,42 @@ from api.routes import (
 from config import cors_config
 from logging_config import configure_logging
 
+# Tag names here must match each router's own `tags=[...]` exactly
+# (files/plan.md Step 14.5: "Separate tag groups") -- FastAPI attaches
+# this description to a tag purely by matching the string, so a rename
+# on either side silently drops the description rather than erroring.
+_OPENAPI_TAGS = [
+    {"name": "Health", "description": "Liveness/readiness probes for orchestrators."},
+    {
+        "name": "Auth",
+        "description": "Registration, login, token refresh, and the current user's own profile.",
+    },
+    {"name": "Chat", "description": "Conversations and the streaming RAG chat endpoint."},
+    {
+        "name": "Documents",
+        "description": "Benefits document upload, listing, deletion, and ingestion status.",
+    },
+    {"name": "Employers", "description": "Employer (tenant) management. Admin only."},
+    {
+        "name": "Employees",
+        "description": "Employee management and self-service enrolled-policy lookup.",
+    },
+    {"name": "Policies", "description": "Benefits policy CRUD and employee enrollment."},
+    {
+        "name": "Feedback",
+        "description": "Thumbs up/down on chat responses, and aggregated feedback stats.",
+    },
+    {
+        "name": "Admin Analytics",
+        "description": "Cost, latency, quality, and document-health dashboards. Admin only.",
+    },
+]
+
 
 def create_app() -> FastAPI:
     """Build and configure the FastAPI application instance."""
     configure_logging()
-    app = FastAPI(title="PolicyPal", version="0.1.0")
+    app = FastAPI(title="PolicyPal", version="0.1.0", openapi_tags=_OPENAPI_TAGS)
     register_exception_handlers(app)
     # RequestLoggerMiddleware added first (innermost of these two) so
     # TenantContextMiddleware -- added next, wrapping around it -- has

@@ -42,7 +42,7 @@ from core.services.document_service import DocumentService
 
 logger = structlog.get_logger(__name__)
 
-router = APIRouter(prefix="/api/documents", tags=["documents"])
+router = APIRouter(prefix="/api/documents", tags=["Documents"])
 
 # A module-level singleton, not an inline `Depends(require_role(...))` at
 # each call site — ruff's B008 flags a bare function call as a parameter

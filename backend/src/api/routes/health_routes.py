@@ -16,7 +16,7 @@ from starlette.concurrency import run_in_threadpool
 from adapters.persistence.database import engine
 from config import pinecone_config, redis_config
 
-router = APIRouter(tags=["health"])
+router = APIRouter(tags=["Health"])
 
 DependencyStatus = Literal["ok", "error", "not_configured"]
 

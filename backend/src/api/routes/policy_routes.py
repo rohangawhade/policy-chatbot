@@ -29,7 +29,7 @@ same reason).
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, status
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from api.dependencies import (
     get_employee_repository,
@@ -43,7 +43,7 @@ from core.domain.errors import NotFoundError
 from core.domain.policy import Enrollment, Policy, PolicyType
 from core.ports.repository_ports import EmployeeRepository, EnrollmentRepository, PolicyRepository
 
-router = APIRouter(prefix="/api/policies", tags=["policies"])
+router = APIRouter(prefix="/api/policies", tags=["Policies"])
 
 _require_manager = require_role(UserRole.EMPLOYER, UserRole.ADMIN)
 
@@ -57,6 +57,18 @@ class PolicyResponse(BaseModel):
 
 
 class PolicyCreateRequest(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "policy_type": "dental",
+                    "name": "PPO Dental Plan",
+                    "description": "Covers preventive, basic, and major dental care.",
+                }
+            ]
+        }
+    )
+
     policy_type: PolicyType
     name: str
     description: str | None = None
@@ -110,6 +122,8 @@ async def create_policy(
     employer_id: UUID = Depends(get_current_employer_id),
     policy_repository: PolicyRepository = Depends(get_policy_repository),
 ) -> PolicyResponse:
+    """Create a new benefits policy for the caller's employer.
+    `EMPLOYER`/`ADMIN` only."""
     created = await policy_repository.create(
         Policy(
             employer_id=employer_id,
@@ -126,6 +140,7 @@ async def list_policies(
     employer_id: UUID = Depends(get_current_employer_id),
     policy_repository: PolicyRepository = Depends(get_policy_repository),
 ) -> list[PolicyResponse]:
+    """List every policy belonging to the caller's employer."""
     policies = await policy_repository.list_by_employer(employer_id)
     return [_to_response(policy) for policy in policies]
 
@@ -136,6 +151,12 @@ async def get_policy(
     employer_id: UUID = Depends(get_current_employer_id),
     policy_repository: PolicyRepository = Depends(get_policy_repository),
 ) -> PolicyResponse:
+    """Get a single policy by id.
+
+    Raises:
+        NotFoundError: 404 if no such policy exists, or it belongs to
+            another employer.
+    """
     policy = await _get_owned_policy(policy_repository, policy_id, employer_id)
     return _to_response(policy)
 
@@ -176,6 +197,13 @@ async def update_policy(
     employer_id: UUID = Depends(get_current_employer_id),
     policy_repository: PolicyRepository = Depends(get_policy_repository),
 ) -> PolicyResponse:
+    """Partially update a policy's type/name/description.
+    `EMPLOYER`/`ADMIN` only — omitted fields are left unchanged.
+
+    Raises:
+        NotFoundError: 404 if no such policy exists, or it belongs to
+            another employer.
+    """
     policy = await _get_owned_policy(policy_repository, policy_id, employer_id)
     updated = await policy_repository.update(
         policy.model_copy(update=body.model_dump(exclude_unset=True))
@@ -191,6 +219,12 @@ async def delete_policy(
     employer_id: UUID = Depends(get_current_employer_id),
     policy_repository: PolicyRepository = Depends(get_policy_repository),
 ) -> None:
+    """Delete a policy. `EMPLOYER`/`ADMIN` only.
+
+    Raises:
+        NotFoundError: 404 if no such policy exists, or it belongs to
+            another employer.
+    """
     await _get_owned_policy(policy_repository, policy_id, employer_id)
     await policy_repository.delete(policy_id)
 
@@ -216,7 +250,7 @@ async def enroll_employee(
     (`files/plan.md` Step 1.3) only ever allows one.
 
     Raises:
-        HTTPException: 404 if the policy or employee doesn't belong to
+        NotFoundError: 404 if the policy or employee doesn't belong to
             the current employer.
     """
     await _get_owned_policy(policy_repository, policy_id, employer_id)

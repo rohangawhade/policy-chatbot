@@ -9,7 +9,7 @@ model(s) directly, not wrapped in `files/coding-standards.md` section
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, status
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from api.dependencies import get_employer_repository
 from api.middleware.auth_middleware import require_role
@@ -20,7 +20,7 @@ from core.ports.repository_ports import EmployerRepository
 
 router = APIRouter(
     prefix="/api/employers",
-    tags=["employers"],
+    tags=["Employers"],
     dependencies=[Depends(require_role(UserRole.ADMIN))],
 )
 
@@ -32,6 +32,8 @@ class EmployerResponse(BaseModel):
 
 
 class EmployerCreateRequest(BaseModel):
+    model_config = ConfigDict(json_schema_extra={"examples": [{"name": "Acme Corporation"}]})
+
     name: str
 
 
@@ -58,6 +60,7 @@ async def create_employer(
     body: EmployerCreateRequest,
     employer_repository: EmployerRepository = Depends(get_employer_repository),
 ) -> EmployerResponse:
+    """Onboard a new employer (tenant). Admin only."""
     created = await employer_repository.create(Employer(name=body.name))
     return _to_response(created)
 
@@ -66,6 +69,7 @@ async def create_employer(
 async def list_employers(
     employer_repository: EmployerRepository = Depends(get_employer_repository),
 ) -> list[EmployerResponse]:
+    """List every employer. Admin only."""
     employers = await employer_repository.list_all()
     return [_to_response(employer) for employer in employers]
 
@@ -75,6 +79,11 @@ async def get_employer(
     employer_id: UUID,
     employer_repository: EmployerRepository = Depends(get_employer_repository),
 ) -> EmployerResponse:
+    """Get a single employer by id. Admin only.
+
+    Raises:
+        NotFoundError: 404 if no employer with this id exists.
+    """
     employer = await _get_employer_or_404(employer_repository, employer_id)
     return _to_response(employer)
 
@@ -85,6 +94,12 @@ async def update_employer(
     body: EmployerUpdateRequest,
     employer_repository: EmployerRepository = Depends(get_employer_repository),
 ) -> EmployerResponse:
+    """Partially update an employer's name and/or active status. Admin
+    only — omitted fields are left unchanged.
+
+    Raises:
+        NotFoundError: 404 if no employer with this id exists.
+    """
     employer = await _get_employer_or_404(employer_repository, employer_id)
     updated = await employer_repository.update(
         employer.model_copy(update=body.model_dump(exclude_unset=True))
@@ -97,5 +112,10 @@ async def delete_employer(
     employer_id: UUID,
     employer_repository: EmployerRepository = Depends(get_employer_repository),
 ) -> None:
+    """Delete an employer. Admin only.
+
+    Raises:
+        NotFoundError: 404 if no employer with this id exists.
+    """
     await _get_employer_or_404(employer_repository, employer_id)
     await employer_repository.delete(employer_id)

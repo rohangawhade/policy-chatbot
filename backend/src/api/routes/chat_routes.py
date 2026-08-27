@@ -16,7 +16,7 @@ from collections.abc import AsyncIterator
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, status
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from starlette.responses import StreamingResponse
 
 from api.dependencies import (
@@ -36,7 +36,7 @@ from core.services.auth_service import TokenPayload
 from core.services.guardrails_service import GuardrailsService
 from core.services.rag_service import GenerationMetrics, RAGService
 
-router = APIRouter(prefix="/api/chat", tags=["chat"])
+router = APIRouter(prefix="/api/chat", tags=["Chat"])
 
 _DEFAULT_HISTORY_LIMIT = 50
 
@@ -57,6 +57,10 @@ class MessageResponse(BaseModel):
 
 
 class SendMessageRequest(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={"examples": [{"content": "What's my dental deductible?"}]}
+    )
+
     content: str
 
 
@@ -99,6 +103,7 @@ async def create_conversation(
     employer_id: UUID = Depends(get_current_employer_id),
     conversation_repository: ConversationRepository = Depends(get_conversation_repository),
 ) -> ConversationResponse:
+    """Start a new, empty conversation for the current employee."""
     conversation = await conversation_repository.create(
         Conversation(employee_id=current_user.user_id, employer_id=employer_id)
     )
@@ -110,6 +115,7 @@ async def list_conversations(
     current_user: TokenPayload = Depends(get_current_user),
     conversation_repository: ConversationRepository = Depends(get_conversation_repository),
 ) -> list[ConversationResponse]:
+    """List every conversation belonging to the current employee."""
     conversations = await conversation_repository.list_by_employee(current_user.user_id)
     return [_to_conversation_response(conversation) for conversation in conversations]
 
@@ -122,6 +128,12 @@ async def get_conversation_messages(
     conversation_repository: ConversationRepository = Depends(get_conversation_repository),
     message_repository: MessageRepository = Depends(get_message_repository),
 ) -> list[MessageResponse]:
+    """The most recent `limit` messages in a conversation, oldest first.
+
+    Raises:
+        NotFoundError: 404 if the conversation doesn't exist or doesn't
+            belong to the current employee.
+    """
     await _get_owned_conversation(conversation_repository, conversation_id, current_user.user_id)
     messages = await message_repository.list_by_conversation(conversation_id, limit=limit)
     return [_to_message_response(message) for message in messages]
