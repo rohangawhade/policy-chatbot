@@ -42,7 +42,7 @@ See `files/plan.md` for the full design (tech stack rationale, data flow diagram
 - [x] Data acquisition & seeding: real government benefits PDFs, demo employer/employee/policy seed script (Phase 11 — LLM-generated synthetic docs, Step 11.2, blocked on a real `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`)
 - [ ] RAGAS evaluation pipeline (Phase 12 — blocked on the same missing LLM credential)
 - [x] Dependency injection wiring audit (Phase 13)
-- [ ] Production polish (Phase 14): structured logging with correlation IDs, global error handling, chat rate limiting done; retry middleware, API docs, environment profiles, release automation still open
+- [ ] Production polish (Phase 14): structured logging with correlation IDs, global error handling, chat rate limiting, retry middleware done; API docs, environment profiles, release automation still open
 
 Track detailed step-by-step progress in `IMPLEMENTATION_STATUS.md`.
 
@@ -175,6 +175,13 @@ A route or service can raise a plain domain exception (`core/domain/errors.py`'s
 <summary>🚦 Rate Limiting</summary>
 
 `POST /api/chat/conversations/{id}/messages` (the only endpoint that calls an LLM) is rate-limited per employee via a Redis-backed sliding-window log (`backend/src/api/middleware/rate_limiter.py`) — a single atomic Lua script (`ZREMRANGEBYSCORE`/`ZCARD`/`ZADD`) evicts requests outside the window and admits the new one only if the count is still under the limit, so concurrent requests from the same user can't race past it. Defaults to `RATE_LIMIT_CHAT_MAX_REQUESTS=20` per `RATE_LIMIT_CHAT_WINDOW_SECONDS=60` (see `.env.example`); exceeding it returns `429 {"detail": "Rate limit exceeded..."}` via the same `RateLimitError` → HTTP-status mapping as the rest of the error-handling story above.
+
+</details>
+
+<details>
+<summary>🔁 Retries</summary>
+
+Every external call (LiteLLM generation/embedding, Pinecone, Redis) retries with exponential backoff **and jitter** (`tenacity.wait_exponential_jitter`) on transport/availability failures only — never on an auth or bad-request error, which would just fail identically on every attempt. Max attempts and backoff bounds are configurable (`RetryConfig` in `backend/src/config.py`, `RETRY_*` in `.env.example`), defaulting to the exact ceilings `files/coding-standards.md` names: 3 for LLM generation and Pinecone, 2 for embedding, 1-10s backoff.
 
 </details>
 

@@ -32,9 +32,10 @@ from tenacity import (
     retry,
     retry_if_exception_type,
     stop_after_attempt,
-    wait_exponential,
+    wait_exponential_jitter,
 )
 
+from config import retry_config
 from core.ports.llm_port import LLMPort, UsageCost
 
 logger = structlog.get_logger(__name__)
@@ -54,18 +55,26 @@ def _log_retry(retry_state: RetryCallState) -> None:
     )
 
 
-# Max 3 attempts for generation calls, max 2 for embedding calls
-# (files/coding-standards.md section 11).
+# Max attempts + backoff bounds are configurable (files/plan.md Step
+# 14.4); defaults match files/coding-standards.md section 11's literal
+# ceilings (3 for generation, 2 for embedding). Exponential backoff with
+# jitter (`wait_exponential_jitter`, not the plain `wait_exponential`
+# every retry decorator in this codebase used before Step 14.4) to
+# avoid a thundering herd of retries all re-firing at the same instant.
 _generation_retry = retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=1, max=10),
+    stop=stop_after_attempt(retry_config.llm_generation_max_attempts),
+    wait=wait_exponential_jitter(
+        initial=retry_config.base_delay_seconds, max=retry_config.max_delay_seconds
+    ),
     retry=retry_if_exception_type(_RETRYABLE_LLM_ERRORS),
     before_sleep=_log_retry,
     reraise=True,
 )
 _embedding_retry = retry(
-    stop=stop_after_attempt(2),
-    wait=wait_exponential(multiplier=1, min=1, max=10),
+    stop=stop_after_attempt(retry_config.llm_embedding_max_attempts),
+    wait=wait_exponential_jitter(
+        initial=retry_config.base_delay_seconds, max=retry_config.max_delay_seconds
+    ),
     retry=retry_if_exception_type(_RETRYABLE_LLM_ERRORS),
     before_sleep=_log_retry,
     reraise=True,
