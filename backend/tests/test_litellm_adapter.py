@@ -15,8 +15,10 @@ from litellm.types.utils import (
     ModelResponseStream,
     StreamingChoices,
 )
+from tenacity.wait import wait_exponential_jitter
 
 from adapters.llm.litellm_adapter import LiteLLMAdapter
+from config import retry_config
 from core.ports.llm_port import LLMPort
 
 
@@ -34,6 +36,22 @@ def _connection_error() -> APIConnectionError:
 
 def test_is_an_llm_port() -> None:
     assert isinstance(LiteLLMAdapter(), LLMPort)
+
+
+def test_generation_retry_is_sourced_from_retry_config_not_hardcoded() -> None:
+    retrying = LiteLLMAdapter.generate.retry
+
+    assert retrying.stop.max_attempt_number == retry_config.llm_generation_max_attempts
+    assert isinstance(retrying.wait, wait_exponential_jitter)
+    assert retrying.wait.initial == retry_config.base_delay_seconds
+    assert retrying.wait.max == retry_config.max_delay_seconds
+
+
+def test_embedding_retry_is_sourced_from_retry_config_not_hardcoded() -> None:
+    retrying = LiteLLMAdapter.embed.retry
+
+    assert retrying.stop.max_attempt_number == retry_config.llm_embedding_max_attempts
+    assert isinstance(retrying.wait, wait_exponential_jitter)
 
 
 async def test_generate_returns_the_message_content_on_success(

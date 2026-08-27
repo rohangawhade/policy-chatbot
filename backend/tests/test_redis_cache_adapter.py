@@ -4,8 +4,10 @@ from typing import Any
 
 import pytest
 from redis.exceptions import ConnectionError as RedisConnectionError
+from tenacity.wait import wait_exponential_jitter
 
 from adapters.cache.redis_cache_adapter import RedisCacheAdapter
+from config import retry_config
 from core.ports.cache_port import CachePort
 
 
@@ -74,6 +76,15 @@ def _connection_error() -> RedisConnectionError:
 def test_is_a_cache_port(monkeypatch: pytest.MonkeyPatch) -> None:
     adapter, _ = _make_adapter(monkeypatch)
     assert isinstance(adapter, CachePort)
+
+
+def test_get_retry_is_sourced_from_retry_config_not_hardcoded() -> None:
+    retrying = RedisCacheAdapter.get.retry
+
+    assert retrying.stop.max_attempt_number == retry_config.redis_max_attempts
+    assert isinstance(retrying.wait, wait_exponential_jitter)
+    assert retrying.wait.initial == retry_config.base_delay_seconds
+    assert retrying.wait.max == retry_config.max_delay_seconds
 
 
 async def test_get_returns_the_cached_value(monkeypatch: pytest.MonkeyPatch) -> None:

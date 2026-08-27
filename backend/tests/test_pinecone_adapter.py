@@ -4,8 +4,10 @@ from typing import Any
 
 import pytest
 from pinecone.exceptions import ServiceException
+from tenacity.wait import wait_exponential_jitter
 
 from adapters.vector_store.pinecone_adapter import PineconeAdapter
+from config import retry_config
 from core.ports.vector_store_port import VectorMatch, VectorRecord, VectorStorePort
 
 
@@ -104,6 +106,15 @@ def _service_unavailable() -> ServiceException:
 def test_is_a_vector_store_port(monkeypatch: pytest.MonkeyPatch) -> None:
     adapter, _ = _make_adapter(monkeypatch)
     assert isinstance(adapter, VectorStorePort)
+
+
+def test_upsert_retry_is_sourced_from_retry_config_not_hardcoded() -> None:
+    retrying = PineconeAdapter.upsert.retry
+
+    assert retrying.stop.max_attempt_number == retry_config.pinecone_max_attempts
+    assert isinstance(retrying.wait, wait_exponential_jitter)
+    assert retrying.wait.initial == retry_config.base_delay_seconds
+    assert retrying.wait.max == retry_config.max_delay_seconds
 
 
 async def test_upsert_resolves_the_index_by_name_lazily(monkeypatch: pytest.MonkeyPatch) -> None:

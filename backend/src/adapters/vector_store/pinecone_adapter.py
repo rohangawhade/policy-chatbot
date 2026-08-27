@@ -22,9 +22,10 @@ from tenacity import (
     retry,
     retry_if_exception_type,
     stop_after_attempt,
-    wait_exponential,
+    wait_exponential_jitter,
 )
 
+from config import retry_config
 from core.ports.vector_store_port import VectorMatch, VectorRecord, VectorStorePort
 
 logger = structlog.get_logger(__name__)
@@ -44,10 +45,15 @@ def _log_retry(retry_state: RetryCallState) -> None:
     )
 
 
-# Max 3 attempts for Pinecone calls (files/coding-standards.md section 11).
+# Max attempts + backoff bounds are configurable (files/plan.md Step
+# 14.4); default of 3 matches files/coding-standards.md section 11's
+# literal ceiling. Exponential backoff with jitter, not the plain
+# `wait_exponential` this decorator used before Step 14.4.
 _pinecone_retry = retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=1, max=10),
+    stop=stop_after_attempt(retry_config.pinecone_max_attempts),
+    wait=wait_exponential_jitter(
+        initial=retry_config.base_delay_seconds, max=retry_config.max_delay_seconds
+    ),
     retry=retry_if_exception_type(_RETRYABLE_PINECONE_ERRORS),
     before_sleep=_log_retry,
     reraise=True,

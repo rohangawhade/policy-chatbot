@@ -4233,26 +4233,95 @@ blocked). Step 11.3 below was deliberately designed to not depend on
 **Phase 14 — Polish & Production Readiness: 3 of 8 steps done
 (14.1-14.3).**
 
+### Step 14.4 — Retry middleware — DONE
+
+- Resolved the ambiguity this file's own prior "Next recommended step"
+  note flagged: plan.md's "exponential backoff **with jitter**" is
+  meant literally — `LiteLLMAdapter` (Step 3.2), `PineconeAdapter` (Step
+  3.3), and `RedisCacheAdapter` (Step 3.4) already retried via
+  `tenacity` with exponential backoff, but all three used plain
+  `wait_exponential`, not a jittered variant, so unrelated concurrent
+  callers hitting the same failure at the same moment would all
+  re-fire their next attempt at the same instant (the exact thundering-
+  herd scenario jitter exists to avoid). All three switched to
+  `tenacity.wait_exponential_jitter`.
+- `backend/src/config.py` gained `RetryConfig` (`RETRY_` env prefix):
+  `llm_generation_max_attempts` (3), `llm_embedding_max_attempts` (2),
+  `pinecone_max_attempts` (3), `redis_max_attempts` (3),
+  `base_delay_seconds` (1.0), `max_delay_seconds` (10.0) — every
+  default matches the exact numbers already hardcoded before this step,
+  so nothing changes in practice unless someone deliberately overrides
+  one via `.env`. Resolves the *other* half of plan.md's Step 14.4
+  bullet ("configurable max retries and base delay") without
+  contradicting `files/coding-standards.md` section 11's literal,
+  binding ceilings ("Max 3 retries for LLM calls, 3 for Pinecone, 2 for
+  embedding") — those numbers are still exactly what a fresh checkout
+  gets; they're just no longer hardcoded in three separate files.
+- All three adapters' module-level retry decorators
+  (`_generation_retry`/`_embedding_retry`, `_pinecone_retry`,
+  `_redis_retry`) now build their `stop_after_attempt(...)`/
+  `wait_exponential_jitter(...)` from `retry_config` instead of literal
+  ints — each adapter file already had a documented, deliberate
+  precedent for importing `config` directly
+  (`adapters/persistence/database.py`, Step 1.3), so this isn't a new
+  import-boundary exception.
+- **Explicitly out of scope, not overlooked**: section 11 also names a
+  circuit-breaker pattern ("if a model is down for 5+ consecutive
+  calls, stop trying for 60 seconds") — plan.md's own Step 14.4 bullet
+  list (exponential backoff with jitter, configurable retries/delay,
+  `tenacity`) never mentions one, and a circuit breaker is a
+  materially different, stateful pattern `tenacity`'s per-call retry
+  decorators don't provide on their own. Left for a future step if the
+  user wants it; not implied by anything in plan.md's actual Step 14.4
+  text.
+- `api/middleware/rate_limiter.py`'s `RateLimiter` (Step 14.3) is
+  deliberately untouched — it's not in section 11's named list ("LLM
+  API, Pinecone, embedding API") and isn't a retryable external call in
+  the same sense; it's a single atomic check, not a call that fails
+  transiently and benefits from retrying.
+- Validation: `ruff check`/`ruff format --check`/`mypy --strict src`
+  all pass with zero suppressions in every changed file. New tests in
+  `tests/test_litellm_adapter.py` (2), `tests/test_pinecone_adapter.py`
+  (1), `tests/test_redis_cache_adapter.py` (1) — each introspects the
+  real decorated method's `.retry.stop.max_attempt_number`/`.retry.wait`
+  (tenacity exposes the resolved policy directly on the wrapped
+  function) and asserts it matches `retry_config`, not a hardcoded
+  number — proving the wiring is real, not cosmetic (a copy-paste bug
+  swapping which config field feeds which decorator would have passed
+  every *pre-existing* retry test unchanged, since all the new defaults
+  equal the old hardcoded values). Every pre-existing retry-count test
+  in all three files (retry-then-succeed, retry-exhaustion-then-reraise,
+  non-retryable-short-circuits) still passes unmodified — jitter only
+  changes sleep *duration*, never attempt count or control flow. Full
+  suite: 669 tests passing (up from 665), 100% coverage across the
+  entire `src/` tree (3024/3024 statements), zero warnings
+  (`-W error::UserWarning` re-run again). **Additionally verified
+  against a real running server**: booted `uvicorn` and confirmed
+  `/health` still responds `200` — these three adapters are constructed
+  at DI-resolution time for nearly every route, so a config-wiring
+  mistake (e.g. a bad type coercion) would surface immediately at
+  import/construction time, not just in unit tests.
+- README.md: Features checklist line updated, new "🔁 Retries"
+  collapsible section.
+
+**Phase 14 — Polish & Production Readiness: 4 of 8 steps done
+(14.1-14.4).**
+
 ## Next recommended step
 
-Continue with **Step 14.4 — Retry middleware**
-(`perf/external-call-retries`): exponential backoff with jitter on all
-external calls (LLM API, Pinecone, embedding API), configurable max
-retries/base delay, using `tenacity`. **Mostly already done, likely a
-short step or a no-op audit rather than new code**: `LiteLLMAdapter`
-(Step 3.2) and `PineconeAdapter` (Step 3.3) already retry via `tenacity`
-with exponential backoff (`wait_exponential`) on their own retryable
-transport errors, per explicit per-call-type ceilings in
-`files/coding-standards.md` section 11 — `RedisCacheAdapter` (Step 3.4)
-does too. None of the three currently add *jitter* to the backoff
-(`tenacity.wait_exponential` alone, not `wait_exponential_jitter` /
-`wait_random_exponential`) — confirm whether plan.md's "with jitter"
-phrasing is meant literally (in which case this step is switching 3
-existing `wait_exponential(...)` calls to a jittered variant) or
-whether the existing exponential backoff already satisfies the intent.
-Fully unblocked — no LLM/Pinecone credentials needed to audit or adjust
-existing retry config (no *new* live-call testing required, only
-re-running the existing mocked retry test suites). Phase 12 (RAG
-Evaluation Pipeline) remains blocked by the same missing LLM credential
-as Step 11.2 — check `.env` for `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`
-before assuming otherwise (see `[[policypal_llm_key_blocker]]` memory).
+Continue with **Step 14.5 — API documentation**
+(`docs/openapi-annotations`): FastAPI already auto-generates an OpenAPI
+spec from every route's type hints (nothing to newly enable), so this
+step is adding descriptions/examples/response models where they're
+still missing, and separating routes into named tag groups (Auth, Chat,
+Documents, Employers, Employees, Feedback, Admin Analytics, Health) —
+spot-check whether `APIRouter(tags=[...])` is already set consistently
+across all 9 route files (`auth_routes.py`, `chat_routes.py`,
+`document_routes.py`, `employer_routes.py`, `employee_routes.py`,
+`policy_routes.py`, `feedback_routes.py`, `admin_routes.py`,
+`health_routes.py`) before assuming this is greenfield work. Fully
+unblocked — no LLM/Pinecone credentials needed, purely docstrings/
+metadata on existing routes. Phase 12 (RAG Evaluation Pipeline) remains
+blocked by the same missing LLM credential as Step 11.2 — check `.env`
+for `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` before assuming otherwise (see
+`[[policypal_llm_key_blocker]]` memory).
