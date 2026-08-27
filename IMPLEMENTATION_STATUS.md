@@ -4509,27 +4509,78 @@ blocked). Step 11.3 below was deliberately designed to not depend on
 **Phase 14 — Polish & Production Readiness: 7 of 8 steps done
 (14.1-14.7).**
 
+### Step 14.8 — Release tagging and changelog — DONE (config); release cut is a separate decision
+
+- **Checked before assuming greenfield work, per this file's own prior
+  note — mostly already working, one real gap found**: `release.yml`
+  has correctly proposed a version bump on every push to `main` since
+  Step 0.4, and there's a real, currently-open release-please PR (#14,
+  "chore(main): release 0.2.0") that's been kept up to date across
+  every merge since 2026-08-23. Inspected its actual generated
+  changelog body (not just confirmed the workflow runs green) and
+  found the real gap: `docs`, `security`, `refactor`, and `chore`
+  commits — all real, merged commit types in this repo's history
+  (`security(backend): per-user chat rate limiting` #61,
+  `refactor(backend): DI container audit`, several `docs(...)` and
+  `chore(...)` commits) — never appeared anywhere in the generated
+  changelog. `feat`/`fix`/`perf` showed up correctly under "Features"/
+  "Bug Fixes"/"Performance Improvements". Root cause: release-please's
+  *default* `changelog-sections` list only assigns visible sections to
+  `feat`/`fix`/`perf`/`revert` — `docs`/`chore`/`refactor`/`build`/`ci`/
+  `test`/`style` are hidden by default, and `security`/`hotfix` (both
+  real allowed types in *this* repo's own `commitlint.config.js`/
+  `pr-lint.yml`, not standard Conventional Commits types release-please
+  recognizes at all) weren't in release-please's default list in any
+  form — commits of those two types were being silently dropped from
+  the changelog entirely, not just hidden.
+- `release-please-config.json` gained an explicit `changelog-sections`
+  array (this key replaces the default list wholesale, not merges with
+  it, confirmed by reading release-please's own config schema at
+  `googleapis/release-please`'s repo rather than assuming) covering
+  every type this repo's commitlint config allows: `feat`→"Features",
+  `fix`/`hotfix`→"Bug Fixes", `perf`→"Performance", `security`→
+  "Security", `docs`→"Documentation" (files/plan.md's literal 5 named
+  groups), plus `refactor`/`chore`/`build`/`ci`/`test`/`revert` kept
+  `hidden: true` — matching release-please's own sane default of
+  keeping internal-only changes out of a user-facing changelog, since
+  plan.md doesn't ask for those to be surfaced.
+- Validated the JSON directly (`json.load` round-trip) rather than
+  assuming it parses — no test suite covers CI/release config files,
+  consistent with every other workflow-YAML/config-file change in this
+  project (Steps 0.2-0.4).
+- **Deliberately did not merge the pending release-please PR (#14) as
+  part of this step**: fixing the *automation's configuration* is this
+  step's engineering deliverable, and is what's captured here; actually
+  *cutting* the first real `v0.2.0` release (merging #14) creates a
+  public, timestamped GitHub Release + git tag — a real, externally-
+  visible, one-way action whose *timing* is a project/release-
+  management decision, not something inherent to "the automation is
+  configured correctly." Per files/plan.md's own autopilot process
+  (stop and ask on a genuine decision point, not a routine step-PR
+  merge), this is being surfaced to the user directly rather than
+  decided unilaterally, unlike every other PR this phase, which merged
+  autonomously per the user's own standing instruction. Once this PR
+  merges, `release.yml` will re-run against the new config and refresh
+  PR #14's changelog preview automatically — worth re-checking its
+  body afterward to confirm `docs`/`security` sections now actually
+  appear before deciding whether to merge it.
+- README.md: no change — this step's fix lives entirely in CI/release
+  config, not app-facing documentation (matching Step 0.4's own
+  precedent: CI pipeline additions didn't get a README section either).
+
+**Phase 14 — Polish & Production Readiness: 8 of 8 steps done
+(14.1-14.8). COMPLETE, pending the user's call on cutting `v0.2.0`.**
+
 ## Next recommended step
 
-Continue with **Step 14.8 — Release tagging and changelog**
-(`ci/release-automation`): enable `release.yml` to compute the next
-semver from merged Conventional Commit types and generate
-`CHANGELOG.md` grouped into Features/Bug Fixes/Performance/Security/
-Documentation. **Likely mostly already done, check before assuming
-greenfield work**: `release.yml` (Step 0.4) already uses
-`googleapis/release-please-action@v4` with `release-please-config.json`/
-`.release-please-manifest.json` (seeded at `0.1.0`, Step 2's "Operational
-fix" entry after the premature-v1.0.0 incident) and has been
-successfully cutting releases on every merge to `main` since — verify
-whether `CHANGELOG.md` is already being generated correctly with the
-right section groupings (release-please's default changelog-types
-mapping may need tuning to match "Features/Bug Fixes/Performance/
-Security/Documentation" specifically, e.g. `perf`/`security` commit
-types grouped under their own headings rather than folded into
-"Other"), and confirm a real `CHANGELOG.md` file exists at repo root
-with real entries (check `git log` for merged release-please PRs, not
-just that the workflow runs green). Fully unblocked — no LLM/Pinecone
-credentials needed. Phase 12 (RAG Evaluation Pipeline) remains blocked
-by the same missing LLM credential as Step 11.2 — check `.env` for
+**Phase 14 is fully implemented.** The one open item is a decision, not
+engineering work: whether to merge the pending release-please PR (#14,
+proposing `v0.2.0`) now that its changelog config is fixed — surfaced
+to the user directly rather than decided autonomously (see Step 14.8's
+note above). Once that's resolved, the only remaining phase in
+files/plan.md is **Phase 12 — RAG Evaluation Pipeline**, blocked since
+Step 11.2 on the same missing credential — check `.env` for
 `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` before assuming otherwise (see
-`[[policypal_llm_key_blocker]]` memory).
+`[[policypal_llm_key_blocker]]` memory). If a key has since been added,
+Phase 12 (Steps 12.1-12.2, plus the still-open Step 11.2 synthetic-docs
+generation) is the last unblocked work in the entire plan.
