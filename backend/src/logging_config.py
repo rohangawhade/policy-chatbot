@@ -23,10 +23,11 @@ from config import app_config
 
 
 def configure_logging() -> None:
-    """JSON output in production, pretty console output otherwise
-    (files/coding-standards.md section 13). `DEBUG`-level logs (internal
-    state, variable values) only ever emit when `AppConfig.debug` is set
-    -- true by default in dev, expected `false` in production.
+    """JSON output in staging/production, pretty console output
+    otherwise (files/coding-standards.md section 13). `DEBUG`-level logs
+    (internal state, variable values) only ever emit when
+    `AppConfig.debug` is set -- true by default in dev, expected
+    `false` in staging/production.
     """
     shared_processors: list[structlog.types.Processor] = [
         structlog.contextvars.merge_contextvars,
@@ -34,15 +35,20 @@ def configure_logging() -> None:
         structlog.processors.TimeStamper(fmt="iso", utc=True),
         structlog.processors.StackInfoRenderer(),
     ]
-    is_production = app_config.env == "production"
-    if is_production:
+    # Step 14.6: "staging" renders JSON too, not just "production" --
+    # a staging deployment exists specifically to validate the real
+    # deployment shape (including the log pipeline) before it matters
+    # for real, so it should see the same log format production will,
+    # not development's pretty-printed console output.
+    wants_json = app_config.env in ("staging", "production")
+    if wants_json:
         # JSON output has no other way to represent a traceback -- it must
         # be pre-formatted into a plain string field before `JSONRenderer`
         # serializes the event dict.
         shared_processors.append(structlog.processors.format_exc_info)
     renderer: structlog.types.Processor = (
         structlog.processors.JSONRenderer()
-        if is_production
+        if wants_json
         # `ConsoleRenderer` renders `exc_info` itself (its own colorized/
         # `rich`-aware traceback formatter) -- pairing it with
         # `format_exc_info` above would pre-flatten the traceback into a

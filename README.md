@@ -42,7 +42,7 @@ See `files/plan.md` for the full design (tech stack rationale, data flow diagram
 - [x] Data acquisition & seeding: real government benefits PDFs, demo employer/employee/policy seed script (Phase 11 — LLM-generated synthetic docs, Step 11.2, blocked on a real `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`)
 - [ ] RAGAS evaluation pipeline (Phase 12 — blocked on the same missing LLM credential)
 - [x] Dependency injection wiring audit (Phase 13)
-- [ ] Production polish (Phase 14): structured logging with correlation IDs, global error handling, chat rate limiting, retry middleware, API docs done; environment profiles, release automation still open
+- [ ] Production polish (Phase 14): structured logging with correlation IDs, global error handling, chat rate limiting, retry middleware, API docs, environment profiles done; release automation still open
 
 Track detailed step-by-step progress in `IMPLEMENTATION_STATUS.md`.
 
@@ -109,6 +109,29 @@ Inside the Compose network, services reach each other by service name (`redis`, 
 **Adding a new Celery task family**: `workers/celery_app.py`'s `task_routes` sends each task-name prefix (e.g. `embedding.*`) to its own queue. A new prefix needs two changes, not one — the `task_routes` entry *and* `-Q` on the `celery-worker` command in both `docker-compose.yml` and `docker-compose.override.yml` — a queue nothing consumes just accumulates unprocessed tasks silently, with no error. `dead_letter` is deliberately never in `-Q`: it's where a task lands after exhausting its own retries, for manual inspection/replay via a one-off `celery -A workers.celery_app worker -Q dead_letter`, not automatic reprocessing.
 
 **Uploaded documents**: `backend` (the upload route) and `celery-worker` (the ingestion task) are separate containers, so uploaded files are saved to the `document_uploads` named volume — mounted at `/app/uploads` in both services — not either container's own ephemeral filesystem. `docker compose down -v` also removes this volume.
+
+</details>
+
+<details>
+<summary>🌎 Environment Profiles</summary>
+
+A bare `docker compose up` (above) is the **development** profile: Compose auto-merges `docker-compose.override.yml` (hot reload, source mounts) whenever no `-f` flags are given at all. **Staging** and **production** are separate, explicit override files instead — passing `-f` opts out of that auto-merge, so the dev hot-reload layer never applies to them:
+
+```bash
+# Staging: closer to production shape, but Postgres/Redis stay published
+# to the host for easy inspection.
+cp .env.staging.example .env.staging   # fill in real values
+docker compose -f docker-compose.yml -f docker-compose.staging.yml up -d
+# or: make up-staging
+
+# Production: multi-worker backend, Postgres/Redis no longer published
+# to the host.
+cp .env.production.example .env.production   # fill in real values
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# or: make up-prod
+```
+
+All three environment files (`.env`, `.env.staging`, `.env.production`) share the exact same variable list — see `.env.example` for what each one does; `.env.staging.example`/`.env.production.example` just start from different defaults (`APP_ENV`, `APP_DEBUG=false`, real-domain `CORS_ALLOWED_ORIGINS`/`VITE_API_BASE_URL` placeholders). `APP_ENV` drives runtime behavior directly — e.g. `staging`/`production` both get JSON structured logs (Step 14.1), `development` gets pretty console output.
 
 </details>
 

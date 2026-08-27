@@ -4379,24 +4379,104 @@ blocked). Step 11.3 below was deliberately designed to not depend on
 **Phase 14 — Polish & Production Readiness: 5 of 8 steps done
 (14.1-14.5).**
 
+### Step 14.6 — Environment configs — DONE
+
+- **Resolved this file's own prior "check what 'separate configs'
+  means concretely" note** by picking the interpretation that avoids a
+  real Docker Compose footgun: `.env.staging.example`/
+  `.env.production.example` (new) are **full** copies of `.env.example`
+  with only environment-appropriate values changed (`APP_ENV`,
+  `APP_DEBUG=false`, real-domain `CORS_ALLOWED_ORIGINS`/
+  `VITE_API_BASE_URL` placeholders, louder "CHANGE ME" comments on
+  secrets) — not a sparse "just the overrides" file. This isn't
+  arbitrary duplication: Compose merges the `environment:` *mapping*
+  key-by-key across `-f` files, but replaces the `env_file` *list*
+  wholesale, confirmed by reading Compose's actual merge behavior (see
+  below) — a sparse `.env.staging` referenced via `env_file:` in an
+  override file would silently lose every variable `.env` would
+  otherwise have supplied, not merge with it.
+- `docker-compose.staging.yml`/`docker-compose.prod.yml` (new) —
+  override files layered via explicit `-f` flags (`docker compose -f
+  docker-compose.yml -f docker-compose.staging.yml up -d`), never
+  auto-merged the way `docker-compose.override.yml` is by a bare
+  `docker compose up`. Staging: points `env_file` at `.env.staging`,
+  `restart: unless-stopped` everywhere, Postgres/Redis stay published
+  to the host for easy inspection. Production: same plus a
+  multi-worker backend (`uvicorn ... --workers 4`, replacing the base
+  image's single-process default), a less chatty/higher-concurrency
+  Celery worker, and Postgres/Redis **no longer** published to the
+  host.
+- **Real bug found and fixed during validation, not assumed correct
+  from reading the compose spec**: a plain `ports: []` on `postgres`/
+  `redis` in `docker-compose.prod.yml` silently did nothing — `docker
+  compose ... config` still showed `5432:5432`/`6379:6379` published,
+  because Compose merges list-type fields like `ports` by
+  *concatenation*, not replacement, by default. An empty list
+  concatenated onto the base file's non-empty list is a no-op, not a
+  clear. Fixed with Compose's `!reset` merge tag (`ports: !reset []`),
+  confirmed by re-checking the merged config: the `ports:` key is
+  absent entirely, not just empty.
+- `logging_config.py` (Step 14.1) — `wants_json` (renamed from
+  `is_production`) now also covers `"staging"`, not just
+  `"production"`: a staging deployment exists specifically to validate
+  the real deployment shape — including the log pipeline — before it
+  matters for real, so it should see the same JSON structlog output
+  production will, not development's pretty console renderer.
+- `Makefile` gained `make up-staging`/`make up-prod`, matching the
+  existing `make up`'s shape.
+- `.gitignore`: added `!.env.staging.example`/`!.env.production.example`
+  exceptions — without them, the existing broad `.env.*` ignore
+  pattern (correctly keeping real `.env.staging`/`.env.production` out
+  of git) would have also silently swallowed these two new *template*
+  files, the same way `!.env.example` already carves out the original
+  template.
+- Validation: `ruff check`/`ruff format --check`/`mypy --strict src`
+  all pass (the only Python change is `logging_config.py`'s rename +
+  staging condition). New `tests/test_logging_config.py` test
+  (`test_staging_env_renders_json`) proving staging really does render
+  JSON, not just reasoning that it should. Full suite: 670 tests
+  passing (up from 669), 100% coverage across the entire `src/` tree
+  (3031/3031 statements), zero warnings. **Both new Compose files
+  validated for real, not just written and assumed correct**:
+  temporarily copied `.env.staging.example`/`.env.production.example`
+  to real (gitignored) `.env.staging`/`.env.production` files, ran
+  `docker compose -f docker-compose.yml -f docker-compose.{staging,prod}.yml
+  config` for both, inspected the actual merged YAML output line by
+  line (this is what caught the `ports: []` bug above), confirmed
+  `DATABASE_URL`/`REDIS_URL` still correctly resolve to the `postgres`/
+  `redis` service names from the base file's `environment:` block
+  (proving the mapping-merge, not just the list-replace, behaves as
+  expected) and that `.env.production`'s values load correctly via
+  `env_file`. Also re-ran a bare `docker compose config` (no `-f`
+  flags, the default dev path) to confirm the new files don't
+  regress anything there. Deleted the temporary real env files
+  afterward — only the two `.example` templates remain.
+- README.md: Features checklist line updated, new "🌎 Environment
+  Profiles" collapsible section.
+
+**Phase 14 — Polish & Production Readiness: 6 of 8 steps done
+(14.1-14.6).**
+
 ## Next recommended step
 
-Continue with **Step 14.6 — Environment configs**
-(`chore/environment-profiles`): `.env.example` with every variable
-documented (already true — every config section added through Step
-14.5 has a matching `.env.example` block with a comment header), plus
-separate configs for `development`/`staging`/`production` and Docker
-Compose profiles for each. **Check what "separate configs" means
-concretely before assuming new files are needed**: `AppConfig.env`
-(Step 1.4) already distinguishes environments at runtime (drives Step
-14.1's JSON-vs-console logging, for one), so this step is likely about
-formalizing that into actual `.env.staging`/`.env.production` template
-files (not committed with real secrets — `.env.example`-style
-placeholders per environment) and `docker-compose.staging.yml`/
-`docker-compose.prod.yml` override files (e.g. no hot-reload mount, a
-production-grade `uvicorn` worker count) alongside the existing
-`docker-compose.override.yml` (dev-only, already established). Fully
-unblocked — no LLM/Pinecone credentials needed. Phase 12 (RAG
-Evaluation Pipeline) remains blocked by the same missing LLM credential
-as Step 11.2 — check `.env` for `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`
-before assuming otherwise (see `[[policypal_llm_key_blocker]]` memory).
+Continue with **Step 14.7 — Final README update**
+(`docs/final-readme-refresh`): ensure README.md reflects the complete
+system — architecture, setup, API reference, data pipeline, model
+configuration, evaluation. Given Steps 9-14 have each already updated
+README.md incrementally (Features checklist + a new collapsible section
+per step, per files/coding-standards.md section 14's living-document
+rule), this is likely a *consistency audit* rather than a rewrite:
+check for drift the incremental updates might have missed (e.g. the
+"📄 Loading Documents" and "🧪 Running RAG Evaluation" collapsible
+sections still literally say "Not yet available" despite Phase 11's
+download/seed scripts and Phase 8's ingestion pipeline being long done
+— flagged as stale but out of scope back in Step 14.1's entry, deferred
+here since this step exists specifically for exactly this kind of
+sweep), confirm the Architecture Overview/Tech Stack tables and Project
+Structure tree still match reality, and confirm every Phase 0-13
+Features checklist line is still accurate (Phase 11's Step 11.2 caveat,
+Phase 12's blocked status, etc.). Fully unblocked — no LLM/Pinecone
+credentials needed, pure documentation. Phase 12 (RAG Evaluation
+Pipeline) remains blocked by the same missing LLM credential as Step
+11.2 — check `.env` for `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` before
+assuming otherwise (see `[[policypal_llm_key_blocker]]` memory).

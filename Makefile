@@ -1,6 +1,6 @@
 .PHONY: help install install-backend install-frontend dev dev-backend dev-frontend \
 	test test-backend lint lint-backend lint-frontend format format-backend format-frontend \
-	typecheck migrate up down build seed download-gov-docs pre-commit-install
+	typecheck migrate up up-staging up-prod down build seed download-gov-docs pre-commit-install
 
 BACKEND_VENV := backend/.venv/Scripts
 
@@ -14,7 +14,9 @@ help:
 	@echo "make format          Auto-format backend + frontend"
 	@echo "make typecheck       mypy (backend) + tsc --noEmit (frontend)"
 	@echo "make migrate         Apply Alembic migrations"
-	@echo "make up              docker compose up (all services)"
+	@echo "make up              docker compose up (all services, dev profile)"
+	@echo "make up-staging      docker compose up -d (staging profile, needs .env.staging)"
+	@echo "make up-prod         docker compose up -d (production profile, needs .env.production)"
 	@echo "make down            docker compose down"
 	@echo "make build           docker compose build"
 	@echo "make seed            Seed employers/employees/policies + trigger ingestion"
@@ -72,6 +74,12 @@ migrate:
 
 up:
 	docker compose up
+
+up-staging:
+	docker compose -f docker-compose.yml -f docker-compose.staging.yml up -d
+
+up-prod:
+	docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 
 down:
 	docker compose down
