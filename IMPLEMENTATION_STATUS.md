@@ -3781,12 +3781,31 @@ live Groq API key and asked to proceed.
   `RateLimitError` on 26 of 50 documents once cumulative usage climbed
   past ~7000 TPM — `LiteLLMAdapter`'s existing retry/backoff (Step
   14.5) wasn't long enough for Groq's 8-11s TPM reset window repeated
-  across 50 calls. Fixed with a `_REQUEST_INTERVAL_SECONDS = 15.0`
-  pacing delay between requests in the script itself (not a change to
-  the shared adapter's retry policy, which is correctly tuned for
+  across 50 calls. Fixed with a `_REQUEST_INTERVAL_SECONDS` pacing
+  delay between requests in the script itself (not a change to the
+  shared adapter's retry policy, which is correctly tuned for
   transient failures, not sustained-throughput throttling). Manifest
   idempotency meant the second run only regenerated the 26 that had
   failed, skipping the 24 already on disk.
+- **Third real bug, found by actually reading the generated content
+  back rather than trusting a zero-`failed`-count run**: 4 of the 50
+  documents (`benefits_faq`/`employee_handbook_benefits` for 2 of the
+  5 employers) came back 828-856 bytes — effectively empty, title-only
+  PDFs — while `generate_all` still reported `failed=0`, since an
+  empty completion isn't an exception. Root-caused by generating the
+  exact failing prompt directly against the live API with the raw
+  completion written to a file (not printed, to dodge an unrelated
+  Windows console `cp1252` encoding crash on the model's own
+  characters): a real, reproducible 0-length completion, all of
+  `_MAX_TOKENS=1500` consumed by Groq's `gpt-oss` hidden
+  `reasoning_tokens` before any visible output, worst on
+  `benefits_faq`'s more open-ended "at least 8 distinct questions"
+  instruction. Confirmed non-empty, format-correct output at
+  `max_tokens=2500` in repeated live testing; raised `_MAX_TOKENS` to
+  2500 (and `_REQUEST_INTERVAL_SECONDS` to 20.0 alongside it, since a
+  larger budget raises worst-case tokens/request) and re-generated the
+  4 affected documents with `--force` — all 4 now have real content
+  sized in line with the other 46.
 - New `backend/tests/test_generate_synthetic_docs.py` (15 tests,
   `LiteLLMAdapter.generate` monkeypatched to a canned response — no
   real LLM calls in the suite; `_OUTPUT_ROOT`/`_MANIFEST_PATH`

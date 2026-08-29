@@ -86,16 +86,26 @@ _COMPANY_NAMES = [
 _HEADING_MAX_LENGTH = 80  # Must match adapters/chunking/metadata_extractor.py
 _GENERATION_TEMPERATURE = 0.7  # Higher than LLMConfig's 0.1 default -- these
 # are meant to read as 50 distinct real documents, not near-identical ones.
-_MAX_TOKENS = 1500
+# Groq's `openai/gpt-oss-*` models are reasoning models that spend part of
+# `max_tokens` on hidden `reasoning_tokens` before any visible output --
+# empirically confirmed to occasionally consume the entire budget on the
+# `benefits_faq` prompt specifically (its "at least 8 distinct questions"
+# instruction is the most open-ended of this script's prompts), producing a
+# real, reproducible 0-length completion at `_MAX_TOKENS=1500` for two
+# different companies. Raised to 2500, which reliably left enough budget for
+# real, format-following output in repeated testing against the live API.
+_MAX_TOKENS = 2500
 
 # Groq's free tier caps `openai/gpt-oss-20b` at 8000 tokens/minute (TPM), and
-# each request here uses ~1800 (prompt + completion) -- empirically confirmed
-# via a real run that failed 26/50 documents with GroqException rate_limit_
-# exceeded once TPM usage climbed past ~7000. A fixed gap between requests
-# keeps sustained usage under that ceiling instead of relying on retries
-# (LiteLLMAdapter's built-in retry/backoff isn't long enough for an 8s+ TPM
-# reset window on every one of 50 sequential calls).
-_REQUEST_INTERVAL_SECONDS = 15.0
+# each request here uses ~1800 (prompt + completion) at `_MAX_TOKENS=1500` --
+# empirically confirmed via a real run that failed 26/50 documents with
+# GroqException rate_limit_exceeded once TPM usage climbed past ~7000. A
+# fixed gap between requests keeps sustained usage under that ceiling instead
+# of relying on retries (LiteLLMAdapter's built-in retry/backoff isn't long
+# enough for an 8s+ TPM reset window on every one of 50 sequential calls).
+# Widened from 15s to 20s alongside the `_MAX_TOKENS` increase above, since a
+# larger budget raises the worst-case tokens per request.
+_REQUEST_INTERVAL_SECONDS = 20.0
 
 
 def _slugify(name: str) -> str:
