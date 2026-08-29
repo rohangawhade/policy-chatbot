@@ -3720,22 +3720,119 @@ fix, the same script logs in successfully and lands on `/chat`
   `data/gov_pdfs/` (including `manifest.json`) is correctly excluded by
   the pre-existing `.gitignore` entry via `git check-ignore -v`.
 
-## Step 11.2 — Generate synthetic employer policy docs — SKIPPED (blocked)
+## Step 11.2 — Generate synthetic employer policy docs — DONE
 
-Not started. This step's entire deliverable is *real* LLM-generated
-content (`LiteLLMAdapter`, health/dental/vision summaries, employee
-handbook sections, enrollment guides, FAQs for 5 fictional employers) —
-a mock/test-double response would defeat its purpose, unlike steps
-where `MockLLMAdapter` is the deliberate, correct stand-in. Checked
-`.env` directly at the start of this step: `ANTHROPIC_API_KEY` and
-`OPENAI_API_KEY` are both still empty — the same missing-credential
-limitation documented since Step 3.2, now confirmed still true through
-Phase 10 and into Phase 11. Raised this to the user directly rather
-than working around it; they chose to skip ahead and revisit once a
-key is available (see `[[policypal_llm_key_blocker]]` memory — check
-this at the start of any future session before assuming 11.2 is still
-blocked). Step 11.3 below was deliberately designed to not depend on
-11.2 having run.
+Previously skipped (see git history) for lack of any real LLM
+provider key — `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` were both empty
+through Phase 10 and into Phase 11, and this step's entire deliverable
+is *real* LLM-generated content, where a mock/test-double response
+would defeat its purpose. Unblocked when the user supplied a real,
+live Groq API key and asked to proceed.
+
+- **Model discovery, done against the real API, not assumed**: the
+  obvious guess (`llama-3.1-8b-instant`) 404'd. Queried Groq's live
+  `GET /v1/models` with the real key to read the actual current
+  catalog, landing on `groq/openai/gpt-oss-20b` (cheap tier) and
+  `groq/openai/gpt-oss-120b` (powerful tier) — both verified via real
+  `generate`/`generate_stream`/`estimate_cost` calls through the app's
+  actual, **unmodified** `LiteLLMAdapter` before writing a line of this
+  script. `LLM_CHEAP_MODEL`/`LLM_POWERFUL_MODEL` in `.env` (gitignored,
+  never committed) point at these — LiteLLM's `groq/` prefix required
+  zero adapter code changes, confirming the provider-agnostic
+  architecture (Step 3.2) works as designed for a provider it had
+  never actually been run against.
+- **Groq's `openai/gpt-oss-*` models are reasoning models**: a first
+  test with `max_tokens=10` came back with empty content — all 10
+  tokens were consumed by hidden `reasoning_tokens`, not visible
+  output. Not a bug, just model-family behavior; confirmed real output
+  quality at `max_tokens=200` and gave the actual script `_MAX_TOKENS
+  = 1500` for headroom.
+- `backend/scripts/generate_synthetic_docs.py` (same manifest-based
+  idempotency pattern as `download_gov_docs.py`): for each of the 5
+  fictional employers `seed_data.py` seeds, generates 10 document
+  types — one plan-summary per `PolicyType` (health/dental/vision/
+  life/disability) plus 5 employer-wide documents (handbook benefits
+  section, open enrollment guide, benefits FAQ, COBRA continuation
+  guide, wellness program guide) — 50 documents total, alternating
+  DOCX/PDF across the 10 types to exercise both real document
+  processors (Step 3.6). Prompts request `"## Section Heading"`
+  formatting in Title Case under `_HEADING_MAX_LENGTH` characters,
+  matching `MetadataExtractor`'s (Step 4.1) heading-detection heuristic
+  exactly (checked against its source, not assumed) so generated
+  chunks get real `section_title` metadata instead of `None`.
+  `--dry-run`/`--force`/`--employer`/`--doc-type`/`--limit` CLI flags.
+- **Real bug, found by actually rendering generated PDFs and reading
+  them back, not by code review**: PyMuPDF's base-14 `"helv"` font has
+  no glyphs for curly quotes, en/em dashes, non-breaking hyphens, or
+  ellipsis — each renders as a literal `"?"` in the extracted text
+  (minimal repro confirmed: `"X-rays"` round-tripped through
+  `insert_textbox()` + `extract_text()` came back `"X?rays"`). Fixed
+  with a `_UNICODE_PUNCTUATION_TO_ASCII` sanitization pass applied to
+  all generated text before rendering (both PDF and DOCX, for one
+  consistent look). A second pass of real generations found the same
+  bug persisting on `"100 %"` — traced to ` ` (narrow no-break
+  space), which the model uses constantly before `%`; added it plus
+  ` `/` ` defensively. Re-ran generation multiple times after
+  each fix and read every resulting PDF back with the real
+  `PDFProcessor` to confirm zero `"?"` glyphs remained.
+- **Real bug, found running the full 50-document batch, not a
+  hypothetical**: Groq's free tier caps `openai/gpt-oss-20b` at 8000
+  tokens/minute; a full sequential run (~1800 tokens/request) hit
+  `RateLimitError` on 26 of 50 documents once cumulative usage climbed
+  past ~7000 TPM — `LiteLLMAdapter`'s existing retry/backoff (Step
+  14.5) wasn't long enough for Groq's 8-11s TPM reset window repeated
+  across 50 calls. Fixed with a `_REQUEST_INTERVAL_SECONDS` pacing
+  delay between requests in the script itself (not a change to the
+  shared adapter's retry policy, which is correctly tuned for
+  transient failures, not sustained-throughput throttling). Manifest
+  idempotency meant the second run only regenerated the 26 that had
+  failed, skipping the 24 already on disk.
+- **Third real bug, found by actually reading the generated content
+  back rather than trusting a zero-`failed`-count run**: 4 of the 50
+  documents (`benefits_faq`/`employee_handbook_benefits` for 2 of the
+  5 employers) came back 828-856 bytes — effectively empty, title-only
+  PDFs — while `generate_all` still reported `failed=0`, since an
+  empty completion isn't an exception. Root-caused by generating the
+  exact failing prompt directly against the live API with the raw
+  completion written to a file (not printed, to dodge an unrelated
+  Windows console `cp1252` encoding crash on the model's own
+  characters): a real, reproducible 0-length completion, all of
+  `_MAX_TOKENS=1500` consumed by Groq's `gpt-oss` hidden
+  `reasoning_tokens` before any visible output, worst on
+  `benefits_faq`'s more open-ended "at least 8 distinct questions"
+  instruction. Confirmed non-empty, format-correct output at
+  `max_tokens=2500` in repeated live testing; raised `_MAX_TOKENS` to
+  2500 (and `_REQUEST_INTERVAL_SECONDS` to 20.0 alongside it, since a
+  larger budget raises worst-case tokens/request) and re-generated the
+  4 affected documents with `--force` — all 4 now have real content
+  sized in line with the other 46.
+- New `backend/tests/test_generate_synthetic_docs.py` (15 tests,
+  `LiteLLMAdapter.generate` monkeypatched to a canned response — no
+  real LLM calls in the suite; `_OUTPUT_ROOT`/`_MANIFEST_PATH`
+  monkeypatched to an isolated `tmp_path`, matching
+  `test_download_gov_docs.py`'s established pattern): the Unicode
+  punctuation sanitization (curly quotes/dashes and the narrow-no-
+  break-space case that took two real passes to find), section
+  parsing (including the no-`"## "`-format fallback), heading
+  normalization, `Manifest` load/save/round-trip, DOCX/PDF rendering
+  (including a real PyMuPDF round-trip asserting no `"?"` glyphs), and
+  `_generate_all`'s write/manifest-record, dry-run, skip-existing,
+  failure-doesn't-raise, and `--force` paths.
+- Validation: `ruff check`/`ruff format --check`/`mypy --strict` clean
+  on both the script and its test file (matching Step 11.1's bar; not
+  CI-gated for `scripts/`/`tests/`, since the Makefile's `typecheck`
+  target only runs `mypy --strict src`). **Ran the real, full 50-
+  document generation against the live Groq API**: first run,
+  24 generated / 26 failed on rate limiting (the bug above); after the
+  pacing fix, a second run filled in the remaining 26 with
+  `failed=0`; a third run confirmed idempotency
+  (`generated=0 skipped=50 failed=0`, no LLM calls). Read all 25
+  generated PDFs back with the real `PDFProcessor` — zero broken
+  glyphs across the full batch. Full backend suite green: 685 passed
+  (up from 670 — 15 new), run against real Postgres + Redis via
+  `docker compose up -d postgres redis` + `alembic upgrade head`, not
+  skipped. Confirmed `data/synthetic/` (including `manifest.json`) is
+  excluded by the pre-existing `.gitignore` entry.
 
 ### Step 11.3 — Seed script — DONE
 
