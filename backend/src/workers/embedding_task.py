@@ -27,11 +27,13 @@ import structlog
 
 from adapters.event_bus.in_memory_event_bus import InMemoryEventBus
 from adapters.llm.litellm_adapter import LiteLLMAdapter
+from adapters.llm.pinecone_embedding_adapter import PineconeEmbeddingAdapter
 from adapters.persistence.database import async_session_factory, engine
 from adapters.persistence.document_repo import PostgresDocumentChunkRepository
 from adapters.vector_store.pinecone_adapter import PineconeAdapter
 from config import llm_config, pinecone_config
 from core.domain.document import Document, DocumentChunk
+from core.ports.llm_port import LLMPort
 from core.services.embedding_service import EmbeddingService
 from workers.celery_app import app
 
@@ -91,8 +93,13 @@ async def _embed_and_index(
     logger.info("embedding_task_started", document_id=str(document.id), chunk_count=len(chunks))
     try:
         async with async_session_factory() as session:
+            llm: LLMPort = (
+                PineconeEmbeddingAdapter(pinecone_api_key=pinecone_config.api_key)
+                if pinecone_config.api_key
+                else LiteLLMAdapter()
+            )
             service = EmbeddingService(
-                llm=LiteLLMAdapter(),
+                llm=llm,
                 vector_store=PineconeAdapter(
                     api_key=pinecone_config.api_key or "unconfigured",
                     index_name=pinecone_config.index_name,

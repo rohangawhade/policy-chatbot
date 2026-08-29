@@ -5,7 +5,7 @@ from uuid import uuid4
 
 import pytest
 
-from config import llm_config
+from config import llm_config, pinecone_config
 from core.domain.document import Document, DocumentChunk, DocumentStatus
 from workers import embedding_task
 from workers.celery_app import app
@@ -120,6 +120,7 @@ async def test_embed_and_index_wires_adapters_and_commits_the_session(
 ) -> None:
     _FakeEmbeddingService.instances.clear()
     fake_session = _FakeSession()
+    monkeypatch.setattr(pinecone_config, "api_key", None)
     monkeypatch.setattr(
         embedding_task, "async_session_factory", lambda: _FakeSessionContext(fake_session)
     )
@@ -151,6 +152,7 @@ async def test_embed_and_index_defaults_previous_version_to_none(
 ) -> None:
     _FakeEmbeddingService.instances.clear()
     fake_session = _FakeSession()
+    monkeypatch.setattr(pinecone_config, "api_key", None)
     monkeypatch.setattr(
         embedding_task, "async_session_factory", lambda: _FakeSessionContext(fake_session)
     )
@@ -167,6 +169,32 @@ async def test_embed_and_index_defaults_previous_version_to_none(
 
     service = _FakeEmbeddingService.instances[0]
     assert service.embed_and_store_calls == [(chunks, document, None)]
+
+
+async def test_embed_and_index_uses_the_pinecone_embedding_adapter_when_a_key_is_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _FakeEmbeddingService.instances.clear()
+    fake_session = _FakeSession()
+    monkeypatch.setattr(pinecone_config, "api_key", "real-key")
+    monkeypatch.setattr(
+        embedding_task, "async_session_factory", lambda: _FakeSessionContext(fake_session)
+    )
+    monkeypatch.setattr(
+        embedding_task, "PineconeEmbeddingAdapter", lambda *, pinecone_api_key: "fake-pinecone-llm"
+    )
+    monkeypatch.setattr(embedding_task, "PineconeAdapter", _FakePineconeAdapter)
+    monkeypatch.setattr(embedding_task, "PostgresDocumentChunkRepository", _FakeChunkRepository)
+    monkeypatch.setattr(embedding_task, "InMemoryEventBus", lambda: "fake-bus")
+    monkeypatch.setattr(embedding_task, "EmbeddingService", _FakeEmbeddingService)
+
+    document = _document()
+    chunks = [_chunk(document, 0)]
+
+    await embedding_task._embed_and_index(document, chunks, None)
+
+    service = _FakeEmbeddingService.instances[0]
+    assert service.llm == "fake-pinecone-llm"
 
 
 def test_task_deserializes_json_args_and_delegates_to_embed_and_index(

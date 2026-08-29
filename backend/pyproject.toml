@@ -15,7 +15,11 @@ dependencies = [
   "pydantic>=2.9,<3",
   "pydantic-settings>=2.6,<3",
   "litellm>=1.63,<1.64",
-  "pinecone-client>=5.0,<6",
+  # Renamed upstream from `pinecone-client` (<6, no embedding API even at
+  # the low level) to `pinecone` (v7+, adds `client.inference.embed()`) --
+  # needed for Step 12.2's real embeddings via Pinecone's own inference API
+  # (Groq has no embedding endpoint of its own).
+  "pinecone>=9.0,<10",
   "sqlalchemy[asyncio]>=2.0,<2.1",
   "asyncpg>=0.30,<0.31",
   "alembic>=1.14,<1.15",

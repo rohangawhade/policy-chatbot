@@ -445,7 +445,9 @@ class RAGService:
         if cached_response is not None:
             return RetrievalResult(cached_response=cached_response, policy_type=policy_type)
 
-        embeddings = await self._llm.embed([query_text], model=self._embedding_model)
+        embeddings = await self._llm.embed(
+            [query_text], model=self._embedding_model, input_type="query"
+        )
         metadata_filter = {"policy_type": policy_type.value} if policy_type else None
         chunks = await self._vector_store.query(
             str(employer_id),

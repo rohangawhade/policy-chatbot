@@ -49,8 +49,18 @@ class LLMPort(ABC):
         yield ""  # pragma: no cover — the yield makes this an async generator
 
     @abstractmethod
-    async def embed(self, texts: list[str], *, model: str) -> list[list[float]]:
-        """Embed a batch of texts, one vector per input, same order."""
+    async def embed(
+        self, texts: list[str], *, model: str, input_type: str = "passage"
+    ) -> list[list[float]]:
+        """Embed a batch of texts, one vector per input, same order.
+
+        `input_type` distinguishes asymmetric embedding of a document
+        being indexed ("passage", the default) from a search query
+        ("query") — some embedding models (Pinecone's `llama-text-embed-v2`
+        included) embed each differently for better retrieval quality.
+        Implementations without that concept (e.g. a generic LiteLLM
+        embedding call) accept and ignore it.
+        """
         ...
 
     @abstractmethod

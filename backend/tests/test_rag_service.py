@@ -40,7 +40,7 @@ _POWERFUL_MODEL = "powerful-model"
 
 class FakeLLM(LLMPort):
     def __init__(self, stream_tokens: list[str] | None = None) -> None:
-        self.embed_calls: list[tuple[list[str], str]] = []
+        self.embed_calls: list[tuple[list[str], str, str]] = []
         self.generate_stream_calls: list[tuple[str, str]] = []
         self.estimate_cost_calls: list[tuple[str, str, str]] = []
         self._stream_tokens = stream_tokens if stream_tokens is not None else ["hello", " world"]
@@ -57,8 +57,10 @@ class FakeLLM(LLMPort):
         for token in self._stream_tokens:
             yield token
 
-    async def embed(self, texts: list[str], *, model: str) -> list[list[float]]:
-        self.embed_calls.append((texts, model))
+    async def embed(
+        self, texts: list[str], *, model: str, input_type: str = "passage"
+    ) -> list[list[float]]:
+        self.embed_calls.append((texts, model, input_type))
         return [[1.0, 0.0] for _ in texts]
 
     async def estimate_cost(self, model: str, prompt: str, completion: str) -> UsageCost:
@@ -368,7 +370,7 @@ async def test_cache_miss_embeds_and_searches_pinecone() -> None:
 
     assert result.cached_response is None
     assert result.chunks == [match]
-    assert llm.embed_calls == [(["What is generally covered?"], _MODEL)]
+    assert llm.embed_calls == [(["What is generally covered?"], _MODEL, "query")]
     assert len(vector_store.query_calls) == 1
     namespace, _vector, top_k, metadata_filter = vector_store.query_calls[0]
     assert namespace == str(employer_id)
