@@ -100,7 +100,20 @@ _LAST_NAMES = [
     "O'Brien", "Patel", "Quinn", "Rossi", "Santos", "Taylor",
 ]  # fmt: skip
 
-_DOC_CONTENT_TYPES: dict[str, str] = {"pdf": "application/pdf"}
+# Must match api/routes/document_routes.py's own
+# `_ALLOWED_UPLOAD_CONTENT_TYPES` -- real bug, not a hypothetical:
+# this previously only listed "pdf", silently skipping every .docx
+# synthetic document Step 11.2 generates (half of its 50 documents,
+# and the ones data/gov_pdfs/ never has an equivalent for -- health/
+# vision/disability/COBRA/open-enrollment summaries), found by
+# actually running this script against the real, mixed-format
+# synthetic corpus rather than assuming PDF-only coverage was enough.
+_DOC_CONTENT_TYPES: dict[str, str] = {
+    "pdf": "application/pdf",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "xml": "application/xml",
+}
 
 
 def _slugify(name: str) -> str:

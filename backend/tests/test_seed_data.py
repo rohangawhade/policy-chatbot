@@ -110,13 +110,42 @@ async def test_upload_document_skips_an_unsupported_extension_without_a_request(
     def handler(request: httpx.Request) -> httpx.Response:
         raise AssertionError("should not upload an unsupported file type")
 
-    docx = tmp_path / "handbook.docx"
-    docx.write_bytes(b"not really a docx")
+    unsupported = tmp_path / "notes.txt"
+    unsupported.write_bytes(b"plain text, not a supported document type")
 
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(handler), base_url="http://testserver"
     ) as client:
-        await script._upload_document(client, "fake-token", docx)
+        await script._upload_document(client, "fake-token", unsupported)
+
+
+@pytest.mark.parametrize(
+    ("extension", "content_type"),
+    [
+        ("docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+        ("xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        ("xml", "application/xml"),
+    ],
+)
+async def test_upload_document_uploads_every_format_the_api_accepts(
+    tmp_path: Path, extension: str, content_type: str
+) -> None:
+    # Real bug, not a hypothetical: this previously only mapped "pdf",
+    # silently skipping every Step 11.2 .docx synthetic document (half
+    # of its 50 documents) -- must match
+    # api/routes/document_routes.py's own `_ALLOWED_UPLOAD_CONTENT_TYPES`.
+    document = tmp_path / f"summary.{extension}"
+    document.write_bytes(b"fake content")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/documents/upload"
+        assert content_type.encode() in request.content
+        return httpx.Response(201, json={"id": "fake-document-id"})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://testserver"
+    ) as client:
+        await script._upload_document(client, "fake-token", document)
 
 
 async def test_upload_document_posts_multipart_with_the_bearer_token(tmp_path: Path) -> None:
