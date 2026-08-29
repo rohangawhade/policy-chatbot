@@ -30,6 +30,11 @@ from config import retry_config
 
 logger = structlog.get_logger(__name__)
 
+# Pinecone's inference API's own documented/observed ceiling for a
+# single `embed()` call's `inputs` list -- confirmed via a real error
+# (see `embed()`'s docstring-equivalent comment below), not assumed.
+_MAX_BATCH_SIZE = 96
+
 # files/coding-standards.md section 11: retryable transport/availability
 # failures only -- same tuple `PineconeAdapter` uses for its own calls,
 # since this hits the same SDK/service.
@@ -63,9 +68,28 @@ class PineconeEmbeddingAdapter(LiteLLMAdapter):
     def __init__(self, *, pinecone_api_key: str) -> None:
         self._pinecone_client = Pinecone(api_key=pinecone_api_key)
 
-    @_embedding_retry
     async def embed(
         self, texts: list[str], *, model: str, input_type: str = "passage"
+    ) -> list[list[float]]:
+        # Pinecone's inference API caps `inputs` at 96 items per call
+        # (confirmed via a real error, not documentation: a real
+        # ingestion run of a several-page document sent hundreds of
+        # sentences to SemanticChunker's boundary-detection embed()
+        # call in one batch and got a real
+        # `[400 INVALID_ARGUMENT] Input length '439' exceeded inputs
+        # limit of 96 for model 'llama-text-embed-v2'` back) -- unlike
+        # LiteLLM's own embedding path (OpenAI et al.), which accepts
+        # much larger batches. Chunk into batches of `_MAX_BATCH_SIZE`
+        # and concatenate results, order preserved.
+        results: list[list[float]] = []
+        for start in range(0, len(texts), _MAX_BATCH_SIZE):
+            batch = texts[start : start + _MAX_BATCH_SIZE]
+            results.extend(await self._embed_batch(batch, model=model, input_type=input_type))
+        return results
+
+    @_embedding_retry
+    async def _embed_batch(
+        self, texts: list[str], *, model: str, input_type: str
     ) -> list[list[float]]:
         # Pinecone's inference client is synchronous/blocking (no asyncio
         # variant) -- run via `asyncio.to_thread()`, same reasoning as
