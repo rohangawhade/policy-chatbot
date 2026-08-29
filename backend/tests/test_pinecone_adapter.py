@@ -109,7 +109,7 @@ def test_is_a_vector_store_port(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_upsert_retry_is_sourced_from_retry_config_not_hardcoded() -> None:
-    retrying = PineconeAdapter.upsert.retry
+    retrying = PineconeAdapter._upsert_batch.retry
 
     assert retrying.stop.max_attempt_number == retry_config.pinecone_max_attempts
     assert isinstance(retrying.wait, wait_exponential_jitter)
@@ -149,6 +149,35 @@ async def test_upsert_sends_vectors_with_id_values_and_metadata(
     assert client.index.upsert_calls == [{"vectors": [expected_vector], "namespace": "emp-1"}]
 
 
+async def test_upsert_splits_a_large_batch_into_calls_of_at_most_100(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Real, confirmed limit (not assumed): a real ingestion run of an
+    # unusually large source document upserted 1513 records in one
+    # call and got back a real Pinecone "[400] Error, decoded message
+    # length too large: found 8811089 bytes, the limit is: 4194304
+    # bytes" -- Pinecone's own ~4MB per-request cap.
+    adapter, client = _make_adapter(monkeypatch)
+    records = [VectorRecord(id=f"chunk-{i}", values=[0.1], metadata={}) for i in range(250)]
+
+    await adapter.upsert("emp-1", records)
+
+    batch_sizes = [len(call["vectors"]) for call in client.index.upsert_calls]
+    assert batch_sizes == [100, 100, 50]
+    assert all(call["namespace"] == "emp-1" for call in client.index.upsert_calls)
+
+
+async def test_upsert_of_a_small_batch_makes_exactly_one_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, client = _make_adapter(monkeypatch)
+    records = [VectorRecord(id="chunk-1", values=[0.1], metadata={})]
+
+    await adapter.upsert("emp-1", records)
+
+    assert len(client.index.upsert_calls) == 1
+
+
 async def test_upsert_retries_on_a_retryable_error_then_succeeds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -165,7 +194,8 @@ async def test_upsert_retries_on_a_retryable_error_then_succeeds(
 
     client.index.upsert = _flaky_upsert  # type: ignore[method-assign]
 
-    await adapter.upsert("emp-1", [])
+    record = VectorRecord(id="chunk-1", values=[0.1], metadata={})
+    await adapter.upsert("emp-1", [record])
 
     assert call_count == 2
 
@@ -176,8 +206,9 @@ async def test_upsert_gives_up_after_three_attempts_and_reraises(
     adapter, client = _make_adapter(monkeypatch)
     client.index.upsert_side_effect = _service_unavailable()
 
+    record = VectorRecord(id="chunk-1", values=[0.1], metadata={})
     with pytest.raises(ServiceException):
-        await adapter.upsert("emp-1", [])
+        await adapter.upsert("emp-1", [record])
 
     assert len(client.index.upsert_calls) == 3
 
@@ -188,8 +219,9 @@ async def test_upsert_does_not_retry_a_non_retryable_error(
     adapter, client = _make_adapter(monkeypatch)
     client.index.upsert_side_effect = ValueError("bad request")
 
+    record = VectorRecord(id="chunk-1", values=[0.1], metadata={})
     with pytest.raises(ValueError, match="bad request"):
-        await adapter.upsert("emp-1", [])
+        await adapter.upsert("emp-1", [record])
 
     assert len(client.index.upsert_calls) == 1
 

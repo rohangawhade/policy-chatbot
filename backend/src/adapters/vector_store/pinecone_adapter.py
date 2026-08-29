@@ -30,6 +30,10 @@ from core.ports.vector_store_port import VectorMatch, VectorRecord, VectorStoreP
 
 logger = structlog.get_logger(__name__)
 
+# See `upsert()`'s own comment -- empirically safe for this project's
+# typical chunk sizes against Pinecone's ~4MB per-request cap.
+_MAX_UPSERT_BATCH_SIZE = 100
+
 # files/coding-standards.md section 11: retryable transport/availability
 # failures only — never retry e.g. an auth or not-found error, which
 # fails identically on every attempt.
@@ -73,9 +77,23 @@ class PineconeAdapter(VectorStorePort):
             self._index = await asyncio.to_thread(self._client.Index, self._index_name)
         return self._index
 
-    @_pinecone_retry
     async def upsert(self, namespace: str, records: list[VectorRecord]) -> None:
+        # Pinecone caps a single upsert request at ~4MB -- confirmed via
+        # a real error, not documentation: a real, unusually large
+        # source document chunked into 1513 records in one call failed
+        # with "[400] Error, decoded message length too large: found
+        # 8811089 bytes, the limit is: 4194304 bytes" (each record's
+        # metadata carries the chunk's full text, so total payload size
+        # scales with both vector count and chunk length). Batches of
+        # `_MAX_UPSERT_BATCH_SIZE` records stay comfortably under that
+        # limit for this project's typical chunk sizes.
         index = await self._get_index()
+        for start in range(0, len(records), _MAX_UPSERT_BATCH_SIZE):
+            batch = records[start : start + _MAX_UPSERT_BATCH_SIZE]
+            await self._upsert_batch(index, namespace, batch)
+
+    @_pinecone_retry
+    async def _upsert_batch(self, index: Any, namespace: str, records: list[VectorRecord]) -> None:
         vectors = [
             {"id": record.id, "values": record.values, "metadata": record.metadata}
             for record in records
