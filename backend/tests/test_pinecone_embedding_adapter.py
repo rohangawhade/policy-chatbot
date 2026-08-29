@@ -29,7 +29,12 @@ class _FakeInference:
         self.embed_calls.append({"model": model, "inputs": inputs, "parameters": parameters})
         if self.side_effect is not None:
             raise self.side_effect
-        return self.embed_return
+        if self.embed_return.data:
+            return self.embed_return
+        # No preset response -- auto-generate one deterministic vector
+        # per input (its length), enough for batching tests to verify
+        # order/count without presetting a response for every batch.
+        return _FakeEmbedResponse(data=[{"values": [float(len(text))]} for text in inputs])
 
 
 class _FakePineconeClient:
@@ -78,7 +83,7 @@ def test_is_a_litellm_adapter_and_inherits_generate_unchanged() -> None:
 
 
 def test_embedding_retry_is_sourced_from_retry_config_not_hardcoded() -> None:
-    retrying = PineconeEmbeddingAdapter.embed.retry
+    retrying = PineconeEmbeddingAdapter._embed_batch.retry
 
     assert retrying.stop.max_attempt_number == retry_config.llm_embedding_max_attempts
     assert isinstance(retrying.wait, wait_exponential_jitter)
@@ -155,6 +160,43 @@ async def test_embed_gives_up_after_max_attempts_and_reraises(
         await adapter.embed(["hello"], model="llama-text-embed-v2")
 
     assert len(client.inference.embed_calls) == retry_config.llm_embedding_max_attempts
+
+
+async def test_embed_splits_a_large_batch_into_calls_of_at_most_96(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Real, confirmed limit (not assumed): a real ingestion run sent
+    # SemanticChunker's boundary-detection embed() call 439 sentences
+    # in one batch and got back a real Pinecone
+    # "[400 INVALID_ARGUMENT] Input length '439' exceeded inputs limit
+    # of 96 for model 'llama-text-embed-v2'" error.
+    adapter, client = _make_adapter(monkeypatch)
+    texts = [f"sentence-{i}" for i in range(200)]
+
+    result = await adapter.embed(texts, model="llama-text-embed-v2")
+
+    assert len(result) == 200
+    batch_sizes = [len(call["inputs"]) for call in client.inference.embed_calls]
+    assert batch_sizes == [96, 96, 8]
+
+
+async def test_embed_preserves_order_across_batches(monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter, client = _make_adapter(monkeypatch)
+    texts = [f"{'x' * i}" for i in range(150)]  # length i, so result[i] == [float(i)]
+
+    result = await adapter.embed(texts, model="llama-text-embed-v2")
+
+    assert result == [[float(i)] for i in range(150)]
+
+
+async def test_embed_of_a_single_batch_makes_exactly_one_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, client = _make_adapter(monkeypatch)
+
+    await adapter.embed(["a", "b", "c"], model="llama-text-embed-v2")
+
+    assert len(client.inference.embed_calls) == 1
 
 
 async def test_embed_does_not_retry_a_non_retryable_error(monkeypatch: pytest.MonkeyPatch) -> None:
