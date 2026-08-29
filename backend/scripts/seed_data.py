@@ -51,6 +51,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import random
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -118,6 +119,18 @@ _DOC_CONTENT_TYPES: dict[str, str] = {
 
 def _slugify(name: str) -> str:
     return name.lower().replace(" ", "").replace(",", "").replace("'", "")
+
+
+def _synthetic_dir_slugify(name: str) -> str:
+    """Matches generate_synthetic_docs.py's own `_slugify()` (regex-
+    based, hyphenated: "Northwind Traders" -> "northwind-traders") --
+    a real, confirmed DIFFERENT convention than this script's own
+    `_slugify()` above ("northwindtraders", no hyphens, used for HR-
+    contact emails). Needed only to look up `data/synthetic/<slug>/`
+    folder names, which generate_synthetic_docs.py created with its
+    own convention; not worth unifying the two scripts' slugs just for
+    this one lookup, so this is scoped narrowly to that purpose."""
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
 
 
 @dataclass
@@ -210,12 +223,36 @@ async def _seed_database(session: AsyncSession, rng: random.Random) -> list[Seed
     return seeded
 
 
-def _discover_sample_documents() -> list[Path]:
-    documents: list[Path] = []
-    for directory in (_GOV_PDFS_DIR, _SYNTHETIC_DIR):
-        if directory.exists():
-            documents.extend(sorted(p for p in directory.rglob("*") if p.is_file() and p.suffix))
-    return documents
+def _discover_synthetic_documents_by_employer() -> dict[str, list[Path]]:
+    """`data/synthetic/<slug>/*` grouped by employer slug (matching
+    generate_synthetic_docs.py's own folder-per-employer layout).
+
+    Real bug this replaces: the flat, shared pool this function used to
+    build (gov_pdfs + synthetic, one sorted list, round-robinned across
+    ALL employers from a single shared index) sorts "gov_pdfs" before
+    "synthetic" alphabetically -- with a modest `docs_per_employer`,
+    most employers received only generic government PDFs and never
+    their own synthetic health/dental/vision/... summaries, and worse,
+    an employer could receive *another* employer's synthetic document
+    (e.g. Acme's session uploading "Northwind Traders Health Plan
+    Summary"), polluting its Pinecone namespace with mismatched
+    content. `data/eval/golden_dataset.json`'s facts are entirely
+    grounded in each employer's own synthetic corpus, so this
+    misassignment would have made a real evaluation run meaningless.
+    """
+    by_employer: dict[str, list[Path]] = {}
+    if _SYNTHETIC_DIR.exists():
+        for employer_dir in sorted(p for p in _SYNTHETIC_DIR.iterdir() if p.is_dir()):
+            by_employer[employer_dir.name] = sorted(
+                p for p in employer_dir.iterdir() if p.is_file() and p.suffix
+            )
+    return by_employer
+
+
+def _discover_gov_documents() -> list[Path]:
+    if not _GOV_PDFS_DIR.exists():
+        return []
+    return sorted(p for p in _GOV_PDFS_DIR.rglob("*") if p.is_file() and p.suffix)
 
 
 async def _login(client: httpx.AsyncClient, email: str, password: str) -> str:
@@ -254,8 +291,9 @@ async def _upload_document(client: httpx.AsyncClient, token: str, path: Path) ->
 async def _trigger_ingestion(
     seeded: list[SeededEmployer], *, backend_url: str, docs_per_employer: int
 ) -> None:
-    documents = _discover_sample_documents()
-    if not documents:
+    synthetic_by_employer = _discover_synthetic_documents_by_employer()
+    gov_documents = _discover_gov_documents()
+    if not synthetic_by_employer and not gov_documents:
         logger.warning(
             "no_sample_documents_found",
             checked=[str(_GOV_PDFS_DIR), str(_SYNTHETIC_DIR)],
@@ -264,7 +302,7 @@ async def _trigger_ingestion(
         return
 
     async with httpx.AsyncClient(base_url=backend_url, timeout=60.0) as client:
-        doc_index = 0
+        gov_index = 0
         for entry in seeded:
             try:
                 token = await _login(client, entry.employer_contact.email, _SEED_PASSWORD)
@@ -277,11 +315,20 @@ async def _trigger_ingestion(
                 )
                 continue
 
-            for _ in range(docs_per_employer):
-                if doc_index >= len(documents):
-                    doc_index = 0
-                await _upload_document(client, token, documents[doc_index])
-                doc_index += 1
+            # This employer's own synthetic corpus first (the content
+            # data/eval/golden_dataset.json's facts are grounded in),
+            # topped up with shared, generic gov PDFs only if
+            # docs_per_employer asks for more than its own docs provide.
+            slug = _synthetic_dir_slugify(entry.employer.name)
+            documents_for_employer = list(synthetic_by_employer.get(slug, [])[:docs_per_employer])
+            while len(documents_for_employer) < docs_per_employer and gov_documents:
+                if gov_index >= len(gov_documents):
+                    gov_index = 0
+                documents_for_employer.append(gov_documents[gov_index])
+                gov_index += 1
+
+            for path in documents_for_employer:
+                await _upload_document(client, token, path)
 
 
 def _print_credentials(admin_email: str, seeded: list[SeededEmployer]) -> None:
