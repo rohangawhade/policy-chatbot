@@ -39,7 +39,7 @@ See `files/plan.md` for the full design (tech stack rationale, data flow diagram
 - [x] Celery ingestion workers: queue routing, retries, dead-letter handling, full ingestion pipeline, status tracking (Phase 8)
 - [x] API routes: auth, chat, documents, employers/employees/policies, feedback, admin analytics, health (Phase 9)
 - [x] React chat UI + admin dashboard + employer portal (Phase 10)
-- [x] Data acquisition & seeding: real government benefits PDFs, demo employer/employee/policy seed script (Phase 11 — LLM-generated synthetic docs, Step 11.2, blocked on a real `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`)
+- [x] Data acquisition & seeding: real government benefits PDFs, LLM-generated synthetic employer policy docs, demo employer/employee/policy seed script (Phase 11)
 - [ ] RAGAS evaluation pipeline (Phase 12 — blocked on the same missing LLM credential)
 - [x] Dependency injection wiring audit (Phase 13)
 - [ ] Production polish (Phase 14): structured logging with correlation IDs, global error handling, chat rate limiting, retry middleware, API docs, environment profiles done; release automation still open
@@ -169,15 +169,17 @@ cd backend
 
 ```bash
 make download-gov-docs   # fetches 50-100 real government benefits PDFs into data/gov_pdfs/
+python scripts/generate_synthetic_docs.py  # LLM-generates 50 synthetic employer policy
+                          # docs into data/synthetic/ (needs a real LLM provider key)
 make seed                # seeds demo employers/employees/policies, uploads a handful of
                           # documents per employer through the real upload endpoint
 ```
 
 `download_gov_docs.py` (Step 11.1) pulls real, publicly-available plan brochures/SBC templates/compliance guides from OPM.gov, CMS.gov/Medicare.gov, and DOL.gov — idempotent (a `data/gov_pdfs/manifest.json` tracks what's already fetched; safe to interrupt and re-run) and supports `--dry-run`/`--source {opm,cms,dol,all}`/`--limit N`.
 
-`seed_data.py` (Step 11.3) needs Postgres reachable, and — unless run with `--skip-ingestion` — also a running backend + Celery worker (`docker compose up -d postgres redis backend celery-worker` first), since it uploads documents through the real `POST /api/documents/upload` endpoint rather than inserting rows directly. **Not idempotent**: seeded emails/company names are fixed, so re-running against an already-seeded database fails on a unique-constraint conflict rather than creating a second batch — it targets a disposable local/demo database, not a shared one.
+`generate_synthetic_docs.py` (Step 11.2) generates 10 document types (plan summaries per `PolicyType` plus handbook/enrollment/FAQ/COBRA/wellness guides) for each of the 5 demo employers via the configured LLM (`LLM_CHEAP_MODEL`) — 50 documents total, alternating DOCX/PDF. Needs a real provider key (e.g. `GROQ_API_KEY` with `LLM_CHEAP_MODEL=groq/openai/gpt-oss-20b`) since its entire output is real generated content, not a mocked stand-in. Idempotent via `data/synthetic/manifest.json`; supports `--dry-run`/`--force`/`--employer`/`--doc-type`/`--limit`.
 
-LLM-generated synthetic policy documents (`data/synthetic/`, plan.md Step 11.2) are the one part of Phase 11 still blocked — that step's entire deliverable is real generated content, so it needs `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` set for real rather than a mocked stand-in. Both scripts above work fully without it.
+`seed_data.py` (Step 11.3) needs Postgres reachable, and — unless run with `--skip-ingestion` — also a running backend + Celery worker (`docker compose up -d postgres redis backend celery-worker` first), since it uploads documents through the real `POST /api/documents/upload` endpoint rather than inserting rows directly (it recursively discovers everything under `data/synthetic/` alongside `data/gov_pdfs/`). **Not idempotent**: seeded emails/company names are fixed, so re-running against an already-seeded database fails on a unique-constraint conflict rather than creating a second batch — it targets a disposable local/demo database, not a shared one.
 
 </details>
 
