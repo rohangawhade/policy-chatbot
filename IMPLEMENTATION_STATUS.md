@@ -4741,15 +4741,106 @@ branches, never anticipating an automation-managed one.
 released — tag, GitHub Release, and `CHANGELOG.md` all live and
 verified.**
 
+## Step 12.1 — Golden dataset creation — DONE
+
+Unblocked alongside Step 11.2 by the user's real Groq API key. 110
+manually-curated Q&A pairs in `data/eval/golden_dataset.json` (exceeds
+plan.md's 100+ target), covering all five named categories: 40
+simple lookups, 20 multi-policy comparisons, 20 personal enrollment
+queries, 15 edge cases, and 15 off-topic rejections.
+
+- **Documented interpretation**: `employer_id` holds each employer's
+  stable slug (e.g. `"northwind-traders"`, matching `_slugify()` in
+  both `seed_data.py` and `generate_synthetic_docs.py`), not a
+  database UUID, or `null` for a query intentionally spanning multiple
+  employers or none. `seed_data.py` assigns employer UUIDs randomly at
+  seed time with no fixed default seed, so a literal UUID can't be
+  checked into a static dataset file; `eval/run_eval.py` (Step 12.2)
+  will resolve a slug to the real employer row via
+  `EmployerRepository.list_all()` + `_slugify(employer.name)` at
+  evaluation time. Two fields beyond plan.md's literal `{ query,
+  expected_answer, employer_id, policy_type, difficulty }` schema were
+  added: `id` (stable per-entry key for eval reporting) and `category`
+  (one of the five named coverage areas, for per-category RAGAS
+  breakdown) — both minor, directly-motivated extensions, not scope
+  creep.
+- **"Personal enrollment" queries deliberately avoid real seeded
+  employee/enrollment data**: `seed_data.py` assigns each employee's
+  specific policy enrollments via `rng.sample(...)` with no fixed seed
+  by default, so a specific named employee's specific coverage isn't
+  reproducible across runs. Instead, this category uses first-person,
+  life-event-driven questions ("I just got married, how do I add my
+  spouse?", "I was just laid off, how much will COBRA cost?") that are
+  fully answerable from the real generated document content itself
+  (FAQ/COBRA/open-enrollment/handbook guides) without needing a
+  specific authenticated employee's live session data.
+- **Every fact was cross-checked against the real, current content of
+  `data/synthetic/`** (Step 11.2), not written from memory or
+  assumption: extracted all 50 documents' text via the actual
+  `PDFProcessor`/`DOCXProcessor` adapters into a working file, then
+  wrote each entry against that extraction. An automated script then
+  cross-checked every dollar figure appearing in every entry's
+  `expected_answer` against the source employer's combined document
+  text, flagging 6 near-misses that were all confirmed to be
+  regex-punctuation artifacts (a trailing comma), not real errors.
+- **Real content drift caught during this cross-check, not
+  hypothetical**: several documents were re-generated with `--force`
+  during Step 11.2's own validation (fixing truncation/empty-content
+  bugs), which changed some employers' actual numbers between when
+  this dataset's first draft was written and its current state —
+  e.g. Contoso Health Group's regenerated `health_plan_summary.docx`
+  changed its Employee Only premium from $350 to $200 and its
+  deductible from $1,200 (varying by tier) to a flat $1,500, which
+  invalidated several already-drafted comparison/ranking entries
+  (`q009`, `q010`, `q016`, `q044`, `q050`, `q060`, `q092`, `q094`).
+  Similarly, Initech Solutions' and Contoso Health Group's
+  regenerated `employee_handbook_benefits.pdf` no longer mentioned
+  facts an earlier draft had cited (a parental-leave figure, a
+  wellness stipend), and Globex Corporation's regenerated
+  `vision_plan_summary.docx` dropped a dependent-specific contact-lens
+  allowance figure. All were caught by re-reading the final extracted
+  content against every entry before finalizing, and fixed. This is
+  exactly why the dataset's `expected_answer` values are grounded in
+  the corpus as it exists on disk, not treated as fixed once written.
+- **Deliberate edge-case entries exploit real cross-document
+  inconsistencies in the synthetic corpus** rather than smoothing them
+  over: Contoso Health Group's long-term disability percentage
+  disagrees between its employee handbook (50%) and its dedicated
+  disability insurance summary (60%); its basic life insurance amount
+  disagrees between the life insurance summary ($50,000) and the open
+  enrollment guide's mention of a new $500,000 base coverage level;
+  Initech Solutions' dental annual maximum disagrees between the
+  benefits FAQ ($1,200) and the dedicated dental plan summary
+  ($5,000), each with different coverage percentages entirely. These
+  are real artifacts of independently-generated LLM content (Step
+  11.2 used `temperature=0.7` specifically so each of the 50 documents
+  would read as distinct, not templated) and make good tests of
+  whether the RAG pipeline grounds answers in a specific cited source
+  rather than conflating documents.
+- Validation: the JSON parses, all 110 `id` values are unique, every
+  entry has exactly the 7 expected keys, and every `employer_id`/
+  `policy_type`/`difficulty` value is one of its valid enum members —
+  all confirmed via a throwaway validation script, not by inspection
+  alone.
+
 ## Next recommended step
 
-The entire files/plan.md is now complete except **Phase 12 — RAG
-Evaluation Pipeline**, blocked since Step 11.2 on the same missing
-credential — check `.env` for `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`
-before assuming otherwise (see `[[policypal_llm_key_blocker]]`
-memory). If a key has since been added, Phase 12 (Steps 12.1-12.2,
-plus the still-open Step 11.2 synthetic-docs generation) is the last
-unblocked work in the entire plan. If still blocked, there is no
-further unblocked engineering work in files/plan.md — future sessions
-should check `.env` first before assuming otherwise, per
-`[[policypal_autopilot_workflow]]`.
+Only **Step 12.2 — RAGAS evaluation runner** remains from the entire
+files/plan.md. `eval/run_eval.py` needs to: resolve each entry's
+`employer_id` slug to a real seeded employer (requires running
+`make seed` first, and note that `seed_data.py`'s per-employee
+enrollment mix is only reproducible with a fixed `--seed N` — Step
+12.1's personal-enrollment entries were deliberately written to not
+depend on this, but a future contributor extending the dataset should
+know this constraint exists), run each of the 110 golden queries
+through the real `RAGService.query()` pipeline, compute RAGAS metrics
+(faithfulness, answer relevancy, context precision, context recall)
+per `eval/eval_config.yaml` thresholds, and report pass/fail —
+wiring the `rag-eval` CI gate (`.github/workflows/rag-eval.yml`
+currently checks for `eval/run_eval.py` and no-ops if it's missing)
+to something real.
+This requires a working Pinecone connection for real retrieval, which
+remains blocked on the user obtaining a Pinecone API key (see
+`[[policypal_llm_key_blocker]]` memory for the current state of that
+blocker) — check whether one has been added before assuming this is
+still the case.

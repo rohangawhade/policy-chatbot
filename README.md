@@ -40,9 +40,9 @@ See `files/plan.md` for the full design (tech stack rationale, data flow diagram
 - [x] API routes: auth, chat, documents, employers/employees/policies, feedback, admin analytics, health (Phase 9)
 - [x] React chat UI + admin dashboard + employer portal (Phase 10)
 - [x] Data acquisition & seeding: real government benefits PDFs, LLM-generated synthetic employer policy docs, demo employer/employee/policy seed script (Phase 11)
-- [ ] RAGAS evaluation pipeline (Phase 12 — blocked on the same missing LLM credential)
+- [ ] RAGAS evaluation pipeline (Phase 12 — golden dataset done, evaluation runner still open)
 - [x] Dependency injection wiring audit (Phase 13)
-- [ ] Production polish (Phase 14): structured logging with correlation IDs, global error handling, chat rate limiting, retry middleware, API docs, environment profiles done; release automation still open
+- [x] Production polish: structured logging with correlation IDs, global error handling, chat rate limiting, retry middleware, API docs, environment profiles, release automation (Phase 14)
 
 Track detailed step-by-step progress in `IMPLEMENTATION_STATUS.md`.
 
@@ -223,7 +223,9 @@ Every external call (LiteLLM generation/embedding, Pinecone, Redis) retries with
 <details>
 <summary>🧪 Running RAG Evaluation</summary>
 
-Not yet available — lands in Phase 12.
+`data/eval/golden_dataset.json` (Step 12.1) has 110 manually-curated Q&A pairs across simple lookups, multi-policy comparisons, personal enrollment queries, edge cases, and off-topic rejections — each entry's `expected_answer` is grounded in the real content of `data/synthetic/` and `data/gov_pdfs/`. `employer_id` holds each employer's slug (e.g. `"northwind-traders"`), not a database UUID, since `seed_data.py` assigns those randomly at seed time.
+
+The runner itself (`eval/run_eval.py`, computing RAGAS metrics against this dataset) isn't built yet — lands in Step 12.2.
 
 </details>
 
