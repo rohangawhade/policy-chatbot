@@ -4900,24 +4900,118 @@ embeddings now route through Pinecone's own inference API
   `delete_by_metadata`. Local dev Postgres was untouched by any of
   this (still migrated-but-unseeded, confirmed before and after).
 
+## Golden dataset fix — tenant-scoping correctness — DONE
+
+Found while designing Step 12.2's eval runner, before any real
+evaluation budget was spent on it — worth its own entry since it's a
+real correctness bug in Step 12.1's dataset, not just prep work.
+
+**The bug**: 10 `multi_policy_comparison` entries and 2 `edge_case`
+entries (`q043`-`q094`, see the diff) asked the model to compare or
+average facts *across different employers* (e.g. "which employer has
+the lowest dental maximum") with `employer_id: null` and an
+`expected_answer` stating every employer's figures. But PolicyPal is
+tenant-scoped per employer — one Pinecone namespace per employer
+(`RAGService.retrieve()`, Step 3.3) — so a single authenticated chat
+session can only ever retrieve its *own* employer's documents. No real
+query against the live system could ever legitimately answer a
+cross-employer comparison; expecting it to is not "unimplemented," it
+would be a tenant-isolation violation if it somehow did. Grading the
+real system against those `expected_answer`s would score correct,
+security-appropriate refusals as failures.
+
+**Fix**: the 10 comparison entries were rewritten as genuine
+*multi-policy* (not multi-*employer*) comparisons scoped to one real
+employer each (e.g. "compare Northwind Traders' basic life insurance
+to its AD&D benefit," "compare Globex Corporation's health deductible
+to its dental basic-procedure deductible") — arguably closer to what
+plan.md's "multi-policy comparisons" category actually meant in the
+first place. The 2 edge-case entries (`q093`, `q094`) keep their
+cross-employer *premise* (a dual-employed person, an average across
+employers) but their `expected_answer` now describes the correct
+scoped-refusal behavior ("I don't have visibility into another
+employer's plan") instead of stating the other employer's real
+figures. A third entry (`q088`) was simplified from a cross-employer
+meta-question into a real single-employer fact lookup and
+recategorized `edge_case` → `simple_lookup` accordingly (category
+counts drifted slightly as a result: 41/20/20/15/14 instead of the
+original 40/20/20/15/15 — not treated as a hard requirement).
+Re-verified every rewritten entry's dollar figures against the same
+real document-text extraction Step 12.1 used. Full backend suite
+still green (695 passed, no source code touched by this fix).
+
 ## Next recommended step
 
 **Step 12.2 — RAGAS evaluation runner** is the last piece of
-files/plan.md, and is now unblocked. `eval/run_eval.py` needs to:
-resolve each golden-dataset entry's `employer_id` slug to a real
-seeded employer (requires running `make seed` first, and note that
-`seed_data.py`'s per-employee enrollment mix is only reproducible with
-a fixed `--seed N` — Step 12.1's personal-enrollment entries were
-deliberately written to not depend on this, but a future contributor
-extending the dataset should know this constraint exists), run each
-of the 110 golden queries through the real `RAGService.query()`
-pipeline (now backed by real Pinecone retrieval), compute RAGAS
-metrics (faithfulness, answer relevancy, context precision, context
-recall) per `eval/eval_config.yaml` thresholds, and report pass/fail —
-wiring the `rag-eval` CI gate (`.github/workflows/rag-eval.yml`
-currently checks for `eval/run_eval.py` and no-ops if it's missing)
-to something real. This will also be the first real test of document
-ingestion end-to-end (chunking → embedding → upsert) against the new
-synthetic/gov-PDF corpus, not just isolated adapter calls — expect to
-find and fix real issues there, consistent with every other step in
-this project so far.
+files/plan.md. Design work done so far, before writing `eval/
+run_eval.py` for real:
+
+- **`ragas` (the PyPI package) has a real, confirmed packaging
+  problem as of this writing**: both the latest release (0.4.3) and
+  the 0.2.x line fail to import at all — `ragas.llms.base` does
+  `from langchain_community.chat_models.vertexai import
+  ChatVertexAI` unconditionally, and that submodule was removed from
+  `langchain-community` as part of its own sunset/migration to
+  standalone integration packages. Installing `langchain-google-
+  vertexai` alongside it does *not* fix this (the missing module is a
+  `langchain-community` submodule, a different package). Pinning an
+  older `langchain-community` cascades into further `langchain-core`/
+  `langchain-openai` incompatibilities. **`ragas==0.1.21` is the
+  version confirmed to actually import cleanly** (`pip check` reports
+  no broken requirements, all four needed metrics — faithfulness,
+  answer_relevancy, context_precision, context_recall — import fine)
+  in an isolated scratch venv; pin this exact version when adding it.
+- **`ragas` (any version tested) transitively requires `tenacity<9`**,
+  which directly conflicts with this project's own `tenacity>=9,<10`
+  (used by every retry decorator in `backend/src/`) — confirmed via
+  `pip check`, not assumed. **Never add `ragas` to `backend/
+  pyproject.toml`** (neither `dependencies` nor the `dev` extra) —
+  installing it into the same environment as the running app/test
+  suite silently downgrades tenacity app-wide.
+- **Resulting design**: `eval/` (top-level, per plan.md's own file
+  tree — not nested under `backend/`) gets its own `requirements.txt`
+  (`httpx`, `ragas==0.1.21`, `pyyaml`, `litellm`, `pinecone`),
+  installed into a separate Python environment from `backend/.venv`,
+  never both at once. `eval/run_eval.py` talks to a **real, running
+  backend over HTTP** (`POST /api/auth/login`, `POST /api/chat/
+  conversations`, `POST /api/chat/conversations/{id}/messages`) rather
+  than importing `RAGService`/`src/` directly — this is both what
+  keeps the dependency trees fully isolated *and* a more faithful
+  test (exercises real auth, rate limiting, and the real SSE endpoint,
+  not an in-process shortcut).
+- **Auth for the eval runner**: log in as each employer's fixed HR
+  contact account (`hr@{slug}.test` / `SeedPass123!` — deterministic
+  regardless of `seed_data.py`'s random `--seed`, confirmed via
+  `get_current_employer_id`'s only requirement being a non-null
+  `employer_id`, which both `EMPLOYEE` and `EMPLOYER` roles have) —
+  not a random seeded employee, whose email isn't knowable ahead of
+  time without a fixed seed.
+- **`ragas` 0.1.x's customization seam**: subclass `ragas.llms.base.
+  BaseRagasLLM` (implement `generate_text`/`agenerate_text`, wrapping
+  a direct `litellm.acompletion()` call to Groq) and `ragas.
+  embeddings.base.BaseRagasEmbeddings` (implement `embed_query`/
+  `embed_documents`, wrapping a direct Pinecone `inference.embed()`
+  call) rather than fighting ragas's LangChain-`BaseLanguageModel`
+  wrapper — these are ragas's own native abstract bases, no LangChain
+  glue needed.
+- **Remaining work**: `eval/eval_config.yaml` (dataset path, backend
+  URL, per-metric thresholds, model names); `eval/run_eval.py` itself
+  (load dataset → group by `employer_id` → log in once per employer →
+  run each query for real → collect `{question, answer, contexts,
+  ground_truth}` per RAGAS's expected shape → `evaluate()` → report);
+  a real run against the full 110-entry dataset (needs `docker compose
+  up` the full stack, `make seed`, and real document ingestion of the
+  synthetic/gov-PDF corpus into Pinecone first — this will also be the
+  first real test of the ingestion pipeline end-to-end, not just
+  isolated adapter calls, so expect to find and fix real issues there
+  too); and, if time/budget allows after that, wiring `.github/
+  workflows/rag-eval.yml` to actually stand up the stack and run this
+  in CI (today it only checks whether `eval/run_eval.py` exists).
+- **Real cost/time expectation, not hypothetical**: a full run means
+  ~110 real Groq chat completions for the queries themselves, plus
+  RAGAS's own LLM-as-judge calls for each of the 4 metrics per
+  query (several hundred more Groq calls), on top of embedding every
+  chunk of all 50 synthetic + 69 gov-PDF documents into Pinecone.
+  Groq's free-tier ~8000 TPM ceiling (the same constraint Step 11.2
+  hit) means this needs the same kind of paced execution, not a
+  five-minute script run.
