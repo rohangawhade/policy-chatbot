@@ -328,6 +328,7 @@ def test_send_message_streams_tokens_then_a_done_event_with_metrics() -> None:
         from_cache=False,
         conversation_id=conversation.id,
         message_id=uuid4(),
+        retrieved_contexts=["The deductible is $500."],
     )
     stream = _FakeGenerationStream(["Hello", " there"], metrics)
     rag_service = _FakeRAGService(stream)
@@ -359,6 +360,7 @@ def test_send_message_streams_tokens_then_a_done_event_with_metrics() -> None:
     assert done["conversation_id"] == str(conversation.id)
     assert done["message_id"] == str(metrics.message_id)
     assert done["model"] == "claude-haiku-4-5-20251001"
+    assert done["contexts"] == ["The deductible is $500."]
     assert "rejected" not in done
     assert rag_service.last_call == {
         "query_text": "What is my deductible?",
@@ -437,6 +439,7 @@ def test_send_message_checks_the_rate_limiter_with_the_employees_id() -> None:
         from_cache=False,
         conversation_id=conversation.id,
         message_id=uuid4(),
+        retrieved_contexts=[],
     )
     rate_limiter = _FakeRateLimiter()
     client = TestClient(

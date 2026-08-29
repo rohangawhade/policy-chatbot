@@ -219,6 +219,7 @@ def _format_done_event(
                 "model_tier": metrics.model_tier,
                 "is_low_confidence": metrics.is_low_confidence,
                 "from_cache": metrics.from_cache,
+                "contexts": metrics.retrieved_contexts,
             }
         )
     return f"data: {json.dumps(payload)}\n\n"

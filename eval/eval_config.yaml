@@ -1,0 +1,55 @@
+# Configuration for eval/run_eval.py (files/plan.md Step 12.2).
+#
+# This file intentionally has no secrets in it -- the seeded HR-contact
+# login password is fixed and public (scripts/seed_data.py's
+# `_SEED_PASSWORD`, throwaway local/dev data by design), and the backend
+# URL/model names are non-sensitive configuration.
+
+# Real, running backend to evaluate against. `make seed` must have been
+# run against this backend first (real employers/documents/embeddings) --
+# run_eval.py does not seed data itself.
+backend_url: "http://localhost:8000"
+
+dataset_path: "../data/eval/golden_dataset.json"
+report_dir: "reports"
+
+# Employer HR-contact accounts (scripts/seed_data.py) -- deterministic
+# regardless of `--seed N`, unlike individual employee accounts, which
+# is why run_eval.py logs in as these rather than a random employee.
+seed_password: "SeedPass123!"
+
+# The judge LLM used for RAGAS's faithfulness/answer_relevancy/
+# context_precision/context_recall metrics (a separate call path from
+# the chatbot's own responses, which come from the real backend).
+judge_llm:
+  model: "groq/openai/gpt-oss-20b"
+  temperature: 0.0
+
+# The embedding model used for RAGAS's answer_relevancy metric
+# (question/answer similarity) -- same model the backend itself uses
+# for retrieval, so scores reflect the real embedding space.
+judge_embedding:
+  model: "llama-text-embed-v2"
+
+# Per-metric thresholds a query must meet to "pass". Applied per
+# category too (a lower bar for off_topic_rejection's faithfulness,
+# which is often not grounded in any retrieved context by design).
+thresholds:
+  faithfulness: 0.7
+  answer_relevancy: 0.7
+  context_precision: 0.6
+  context_recall: 0.6
+
+# Categories where retrieval-grounded metrics (context_precision/
+# context_recall/faithfulness) don't meaningfully apply -- an
+# off-topic query is correctly rejected by GuardrailsService *before*
+# any retrieval happens, so there are no contexts to score against.
+# answer_relevancy still applies (does the refusal address the query).
+skip_retrieval_metrics_for_categories:
+  - "off_topic_rejection"
+
+# Pacing between real Groq calls (chat queries + RAGAS judge calls) to
+# stay under Groq's free-tier ~8000 TPM ceiling -- the same constraint
+# scripts/generate_synthetic_docs.py hit during Step 11.2. Widen if
+# rate-limit errors persist in practice.
+request_interval_seconds: 20.0
