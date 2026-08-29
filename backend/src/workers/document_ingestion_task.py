@@ -38,6 +38,7 @@ from adapters.chunking.semantic_chunker import SemanticChunker
 from adapters.document_processors.processor_factory import ProcessorFactory
 from adapters.event_bus.in_memory_event_bus import InMemoryEventBus
 from adapters.llm.litellm_adapter import LiteLLMAdapter
+from adapters.llm.pinecone_embedding_adapter import PineconeEmbeddingAdapter
 from adapters.persistence.database import async_session_factory, engine
 from adapters.persistence.document_repo import (
     PostgresDocumentChunkRepository,
@@ -47,6 +48,7 @@ from adapters.vector_store.pinecone_adapter import PineconeAdapter
 from config import llm_config, pinecone_config
 from core.domain.document import Document, DocumentStatus
 from core.domain.events import DocumentProcessedEvent
+from core.ports.llm_port import LLMPort
 from core.services.embedding_service import EmbeddingService
 from workers.celery_app import app
 
@@ -107,7 +109,22 @@ async def _process_document_upload(document: Document, previous_version: Documen
         async with async_session_factory() as session:
             document_repository = PostgresDocumentRepository(session)
             event_bus = InMemoryEventBus()
-            llm = LiteLLMAdapter()
+            # Same conditional as embedding_task.py/api/dependencies.py's
+            # get_llm_port() -- Groq has no embedding endpoint, so embed()
+            # routes through Pinecone's inference API when a real key is
+            # configured. Missing this exact wiring here (this task's own
+            # LLMPort construction, separate from embedding_task.py's) was
+            # a real bug: SemanticChunker's boundary-detection embed()
+            # call below failed on every real document with
+            # "LLM Provider NOT provided ... model=llama-text-embed-v2"
+            # (LiteLLM has no provider prefix to route a raw Pinecone
+            # model name to) -- found by actually running the real
+            # ingestion pipeline, not by code review.
+            llm: LLMPort = (
+                PineconeEmbeddingAdapter(pinecone_api_key=pinecone_config.api_key)
+                if pinecone_config.api_key
+                else LiteLLMAdapter()
+            )
 
             try:
                 processor = ProcessorFactory.get(document.source_type)

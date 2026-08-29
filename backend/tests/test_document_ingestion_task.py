@@ -5,6 +5,7 @@ from uuid import uuid4
 
 import pytest
 
+from config import pinecone_config
 from core.domain.document import Document, DocumentChunk, DocumentStatus
 from core.domain.events import DocumentProcessedEvent, DomainEvent
 from workers import document_ingestion_task
@@ -160,6 +161,7 @@ def _patch_collaborators(
     _FakeChunkerPipeline.raises = chunker_raises
     _FakeEmbeddingService.instances = []
 
+    monkeypatch.setattr(pinecone_config, "api_key", None)
     monkeypatch.setattr(
         document_ingestion_task, "async_session_factory", lambda: _FakeSessionContext(fake_session)
     )
@@ -217,6 +219,26 @@ async def test_successful_ingestion_extracts_chunks_embeds_and_marks_ready(
 
     service = _FakeEmbeddingService.instances[0]
     assert service.embed_and_store_calls == [(chunks, document, None)]
+    assert service.llm == "fake-llm"
+
+
+async def test_uses_the_pinecone_embedding_adapter_when_a_key_is_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_session = _FakeSession()
+    document = _document()
+    _patch_collaborators(monkeypatch, fake_session, chunks_to_return=[_chunk(document, 0)])
+    monkeypatch.setattr(pinecone_config, "api_key", "real-key")
+    monkeypatch.setattr(
+        document_ingestion_task,
+        "PineconeEmbeddingAdapter",
+        lambda *, pinecone_api_key: "fake-pinecone-llm",
+    )
+
+    await document_ingestion_task._process_document_upload(document, None)
+
+    service = _FakeEmbeddingService.instances[0]
+    assert service.llm == "fake-pinecone-llm"
 
     assert document.status == DocumentStatus.READY
     assert document.error_message is None
