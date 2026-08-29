@@ -1,0 +1,18 @@
+# Deliberately a standalone requirements file, not part of
+# backend/pyproject.toml -- ragas transitively requires tenacity<9,
+# which directly conflicts with backend's own tenacity>=9,<10 (used by
+# every retry decorator in backend/src/). Install this into its own
+# virtual environment, never alongside backend's own (dev) install.
+#
+# ragas is pinned to exactly 0.1.21: both the latest release (0.4.3)
+# and the 0.2.x line fail to import at all as of this writing --
+# `ragas.llms.base` unconditionally imports
+# `langchain_community.chat_models.vertexai`, a submodule removed from
+# `langchain-community` during its own sunset/migration. 0.1.21 is the
+# version confirmed (in an isolated scratch venv, not assumed) to
+# import cleanly with all four needed metrics.
+ragas==0.1.21
+httpx>=0.27,<0.28
+pyyaml>=6.0,<7
+litellm>=1.63,<1.64
+pinecone>=9.0,<10

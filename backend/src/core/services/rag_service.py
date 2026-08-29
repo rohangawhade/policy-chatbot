@@ -186,6 +186,14 @@ class GenerationMetrics:
         conversation_id: The conversation this turn was recorded in
             (newly created if the caller didn't pass one to `query()`).
         message_id: The persisted assistant `Message`'s id.
+        retrieved_contexts: The raw text of every chunk retrieval
+            matched, in ranked order -- always empty on a cache hit
+            (no real-time retrieval happens). Exposed so a caller can
+            show its work (a "view sources" panel) or score retrieval
+            quality against it (files/plan.md Step 12.2's RAGAS
+            context_precision/context_recall/faithfulness, which need
+            the actual retrieved passages, not just document titles --
+            `_format_citations` below only ever surfaces titles).
     """
 
     full_text: str
@@ -197,6 +205,7 @@ class GenerationMetrics:
     from_cache: bool
     conversation_id: UUID
     message_id: UUID
+    retrieved_contexts: list[str]
 
 
 class GenerationStream:
@@ -259,6 +268,7 @@ class GenerationStream:
             from_cache=True,
             conversation_id=conversation_id,
             message_id=message_id,
+            retrieved_contexts=[],
         )
 
     async def _stream_generation(self) -> AsyncIterator[str]:
@@ -339,6 +349,7 @@ class GenerationStream:
             from_cache=False,
             conversation_id=conversation_id,
             message_id=message_id,
+            retrieved_contexts=[str(chunk.metadata.get("text", "")) for chunk in retrieval.chunks],
         )
 
 
