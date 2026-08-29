@@ -100,7 +100,7 @@ def _make_adapter(monkeypatch: pytest.MonkeyPatch) -> tuple[PineconeAdapter, _Fa
 
 
 def _service_unavailable() -> ServiceException:
-    return ServiceException(status=503, reason="Service Unavailable")
+    return ServiceException(status_code=503, reason="Service Unavailable")
 
 
 def test_is_a_vector_store_port(monkeypatch: pytest.MonkeyPatch) -> None:

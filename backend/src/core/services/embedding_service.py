@@ -80,7 +80,9 @@ class EmbeddingService:
 
         if chunks:
             embeddings = await self._llm.embed(
-                [chunk.text for chunk in chunks], model=self._embedding_model
+                [chunk.text for chunk in chunks],
+                model=self._embedding_model,
+                input_type="passage",
             )
             records = [
                 self._to_vector_record(chunk, embedding, document)

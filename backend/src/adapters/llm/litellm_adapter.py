@@ -147,7 +147,14 @@ class LiteLLMAdapter(LLMPort):
         return response
 
     @_embedding_retry
-    async def embed(self, texts: list[str], *, model: str) -> list[list[float]]:
+    async def embed(
+        self, texts: list[str], *, model: str, input_type: str = "passage"
+    ) -> list[list[float]]:
+        # `input_type` (passage vs. query) has no generic LiteLLM/OpenAI-
+        # style equivalent -- accepted for LLMPort compatibility, ignored
+        # here. `PineconeEmbeddingAdapter` (a subclass) is what actually
+        # uses it.
+        del input_type
         response = await litellm.aembedding(model=model, input=texts)
         if not isinstance(response, EmbeddingResponse):
             raise TypeError(f"expected an EmbeddingResponse, got {type(response).__name__}")

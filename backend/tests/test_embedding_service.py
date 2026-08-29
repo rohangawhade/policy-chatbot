@@ -16,7 +16,7 @@ _MODEL = "mock-embedding-model"
 
 class FakeLLM(LLMPort):
     def __init__(self) -> None:
-        self.embed_calls: list[tuple[list[str], str]] = []
+        self.embed_calls: list[tuple[list[str], str, str]] = []
 
     async def generate(
         self, prompt: str, *, model: str, temperature: float = 0.1, max_tokens: int = 2048
@@ -29,8 +29,10 @@ class FakeLLM(LLMPort):
         raise NotImplementedError
         yield ""  # pragma: no cover
 
-    async def embed(self, texts: list[str], *, model: str) -> list[list[float]]:
-        self.embed_calls.append((texts, model))
+    async def embed(
+        self, texts: list[str], *, model: str, input_type: str = "passage"
+    ) -> list[list[float]]:
+        self.embed_calls.append((texts, model, input_type))
         return [[float(len(text)), 0.0] for text in texts]
 
     async def estimate_cost(self, model: str, prompt: str, completion: str) -> UsageCost:
@@ -142,7 +144,7 @@ async def test_embeds_each_chunks_text_with_the_configured_model() -> None:
 
     await fakes.service.embed_and_store(chunks, document)
 
-    assert fakes.llm.embed_calls == [([c.text for c in chunks], _MODEL)]
+    assert fakes.llm.embed_calls == [([c.text for c in chunks], _MODEL, "passage")]
 
 
 async def test_upserts_one_vector_record_per_chunk_to_the_employer_namespace() -> None:

@@ -40,7 +40,10 @@ class MockLLMAdapter(LLMPort):
         for word in _CANNED_RESPONSE.split(" "):
             yield f"{word} "
 
-    async def embed(self, texts: list[str], *, model: str) -> list[list[float]]:
+    async def embed(
+        self, texts: list[str], *, model: str, input_type: str = "passage"
+    ) -> list[list[float]]:
+        del input_type  # no real embedding model behind this adapter to vary
         return [self._deterministic_vector(text) for text in texts]
 
     async def estimate_cost(self, model: str, prompt: str, completion: str) -> UsageCost:

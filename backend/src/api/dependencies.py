@@ -49,6 +49,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from adapters.cache.redis_cache_adapter import RedisCacheAdapter
 from adapters.event_bus.in_memory_event_bus import InMemoryEventBus
 from adapters.llm.litellm_adapter import LiteLLMAdapter
+from adapters.llm.pinecone_embedding_adapter import PineconeEmbeddingAdapter
 from adapters.persistence.analytics_repo import PostgresAnalyticsRepository
 from adapters.persistence.conversation_repo import (
     PostgresConversationRepository,
@@ -151,6 +152,15 @@ def get_auth_service(
 
 
 def get_llm_port() -> LLMPort:
+    # Groq (this project's configured LLM provider) has no embedding
+    # endpoint of its own -- when a real Pinecone key is configured,
+    # `embed()` routes through Pinecone's own inference API instead
+    # (generate/generate_stream/estimate_cost are unchanged, inherited
+    # from LiteLLMAdapter). Falls back to the plain LiteLLM adapter
+    # when no Pinecone key is set, same "degrade gracefully, fail only
+    # if actually used" pattern as `get_vector_store_port()` below.
+    if pinecone_config.api_key:
+        return PineconeEmbeddingAdapter(pinecone_api_key=pinecone_config.api_key)
     return LiteLLMAdapter()
 
 

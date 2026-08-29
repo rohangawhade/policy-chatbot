@@ -4823,24 +4823,101 @@ queries, 15 edge cases, and 15 off-topic rejections.
   all confirmed via a throwaway validation script, not by inspection
   alone.
 
+## Real Pinecone embeddings integration — DONE
+
+Unblocked by the user supplying a real Pinecone API key (index name
+`policy-chatbot`). Groq has no embedding endpoint of its own, so
+embeddings now route through Pinecone's own inference API
+(`llama-text-embed-v2`, 1024-dim) instead — `generate`/
+`generate_stream`/`estimate_cost` are untouched.
+
+- **`pinecone-client` (<6, no embedding API even at the low level)
+  upgraded to `pinecone` (9.1.0, adds `client.inference.embed()`)**.
+  Verified real, not just "should work per changelog": ran the
+  existing `PineconeAdapter` (upsert/query/delete_by_metadata)
+  completely unchanged against the new SDK and a real index — the
+  only breakage found was in the *test file's* fake exception
+  construction (`ServiceException(status=...)` → `status_code=...`,
+  a real constructor signature change between v5 and v9), not in the
+  adapter's own production code.
+- **New `backend/src/adapters/llm/pinecone_embedding_adapter.py`**:
+  `PineconeEmbeddingAdapter(LiteLLMAdapter)` — inherits
+  `generate`/`generate_stream`/`estimate_cost` completely unchanged
+  (still generic LiteLLM, still Groq today), overrides only `embed()`
+  to call `pinecone_client.inference.embed()` via `asyncio.to_thread`
+  (same blocking-SDK pattern `PineconeAdapter` already uses), with its
+  own tenacity retry reusing the existing `RETRY_LLM_EMBEDDING_MAX_ATTEMPTS`
+  ceiling.
+- **`LLMPort.embed()` gained a keyword-only `input_type: str =
+  "passage"` parameter** (a real, standard asymmetric-retrieval IR
+  concept — used by `llama-text-embed-v2` and other embedding models
+  generally, not exclusively a Pinecone concept) — `EmbeddingService`
+  passes `"passage"` when embedding a document chunk for storage,
+  `RAGService.retrieve()` passes `"query"` when embedding a user's
+  question. `LiteLLMAdapter`/`MockLLMAdapter` accept and ignore it
+  (no generic equivalent). Verified for real that this measurably
+  matters, not just plausible-sounding: a real query embedded with
+  `input_type="query"` against a real passage embedded with
+  `input_type="passage"` in the live index returned the correct
+  semantic match.
+- **Real index created programmatically** (not via console click-ops,
+  matching this project's "scripts set up their own resources"
+  precedent) — `dimension=1024`, `metric="cosine"`,
+  `ServerlessSpec(cloud="aws", region="us-east-1")`, verified `ready`
+  before use. The Pinecone account already had two unrelated indexes
+  from the user's other projects — confirmed untouched throughout.
+- `get_llm_port()` (`api/dependencies.py`) and `embedding_task.py`'s
+  Celery wiring both now pick `PineconeEmbeddingAdapter` when
+  `PINECONE_API_KEY` is configured, falling back to plain
+  `LiteLLMAdapter()` otherwise — same "degrade gracefully, fail only
+  if actually used" pattern `get_vector_store_port()` already
+  established, so CI/dev environments without a Pinecone key are
+  unaffected.
+- `.env`/`.env.example`/`.env.staging.example`/`.env.production.example`'s
+  `LLM_EMBEDDING_MODEL` corrected from `text-embedding-3-small` (an
+  OpenAI model name that was never actually reachable — Steps 3.2/3.3
+  set it before any real provider was chosen) to `llama-text-embed-v2`.
+- New `backend/tests/test_pinecone_embedding_adapter.py` (9 tests, no
+  real network calls): `LLMPort`/`LiteLLMAdapter` inheritance,
+  `generate`/`generate_stream`/`estimate_cost` identity-equality with
+  `LiteLLMAdapter`'s own (proving they're truly unmodified, not just
+  behaviorally similar), retry-config sourcing, order-preserving
+  vector mapping, `input_type` passthrough and its `"passage"`
+  default, retry-then-succeed, give-up-after-max-attempts, and
+  non-retry-on-non-retryable-error. `test_embedding_task.py` gained a
+  new test for the Pinecone-branch of the wiring conditional; its two
+  existing tests now explicitly monkeypatch `pinecone_config.api_key`
+  to `None` to keep testing the `LiteLLMAdapter` fallback path
+  (needed once a real key started living in `.env`).
+- Validation: `ruff check`/`ruff format --check`/`mypy --strict`
+  clean. Full backend suite green: 695 passed (up from 685 -- 10 new).
+  **Ran the real, full stack end-to-end against the live Pinecone
+  account**: embedded a real sentence with `input_type="passage"`,
+  upserted it into the real index via the real `PineconeAdapter`,
+  embedded a real natural-language question with `input_type="query"`,
+  queried the real index, and got the correct passage back as the top
+  match by score -- then cleaned up the test namespace via
+  `delete_by_metadata`. Local dev Postgres was untouched by any of
+  this (still migrated-but-unseeded, confirmed before and after).
+
 ## Next recommended step
 
-Only **Step 12.2 — RAGAS evaluation runner** remains from the entire
-files/plan.md. `eval/run_eval.py` needs to: resolve each entry's
-`employer_id` slug to a real seeded employer (requires running
-`make seed` first, and note that `seed_data.py`'s per-employee
-enrollment mix is only reproducible with a fixed `--seed N` — Step
-12.1's personal-enrollment entries were deliberately written to not
-depend on this, but a future contributor extending the dataset should
-know this constraint exists), run each of the 110 golden queries
-through the real `RAGService.query()` pipeline, compute RAGAS metrics
-(faithfulness, answer relevancy, context precision, context recall)
-per `eval/eval_config.yaml` thresholds, and report pass/fail —
+**Step 12.2 — RAGAS evaluation runner** is the last piece of
+files/plan.md, and is now unblocked. `eval/run_eval.py` needs to:
+resolve each golden-dataset entry's `employer_id` slug to a real
+seeded employer (requires running `make seed` first, and note that
+`seed_data.py`'s per-employee enrollment mix is only reproducible with
+a fixed `--seed N` — Step 12.1's personal-enrollment entries were
+deliberately written to not depend on this, but a future contributor
+extending the dataset should know this constraint exists), run each
+of the 110 golden queries through the real `RAGService.query()`
+pipeline (now backed by real Pinecone retrieval), compute RAGAS
+metrics (faithfulness, answer relevancy, context precision, context
+recall) per `eval/eval_config.yaml` thresholds, and report pass/fail —
 wiring the `rag-eval` CI gate (`.github/workflows/rag-eval.yml`
 currently checks for `eval/run_eval.py` and no-ops if it's missing)
-to something real.
-This requires a working Pinecone connection for real retrieval, which
-remains blocked on the user obtaining a Pinecone API key (see
-`[[policypal_llm_key_blocker]]` memory for the current state of that
-blocker) — check whether one has been added before assuming this is
-still the case.
+to something real. This will also be the first real test of document
+ingestion end-to-end (chunking → embedding → upsert) against the new
+synthetic/gov-PDF corpus, not just isolated adapter calls — expect to
+find and fix real issues there, consistent with every other step in
+this project so far.
