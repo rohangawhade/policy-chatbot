@@ -255,6 +255,29 @@ def _discover_gov_documents() -> list[Path]:
     return sorted(p for p in _GOV_PDFS_DIR.rglob("*") if p.is_file() and p.suffix)
 
 
+# Mirrors generate_synthetic_docs.py's own `_DOC_SPECS`
+# `policy_type=PolicyType.___` assignments for its 5 per-policy summary
+# documents (the other 5 synthetic types -- handbook, open enrollment,
+# FAQ, COBRA, wellness -- are deliberately employer-wide, no single
+# PolicyType, and gov PDFs have no per-document type info to infer this
+# from at all). Real bug this fixes, not a hypothetical: without this,
+# `/api/documents/upload`'s `policy_type` form field was never sent, so
+# every uploaded chunk's Pinecone metadata carried `policy_type: None`
+# -- and `RAGService.retrieve()`'s own `metadata_filter={"policy_type":
+# ...}` (built from `_detect_policy_type()` on the query text) then
+# matched *zero* chunks for any policy-specific query, even ones with
+# an exact, directly-retrievable match sitting in that same namespace
+# (confirmed by querying Pinecone directly, unfiltered, and getting the
+# right chunk back at a real 0.47 similarity score).
+_SYNTHETIC_DOC_POLICY_TYPES: dict[str, PolicyType] = {
+    "health_plan_summary": PolicyType.HEALTH,
+    "dental_plan_summary": PolicyType.DENTAL,
+    "vision_plan_summary": PolicyType.VISION,
+    "life_insurance_summary": PolicyType.LIFE,
+    "disability_insurance_summary": PolicyType.DISABILITY,
+}
+
+
 async def _login(client: httpx.AsyncClient, email: str, password: str) -> str:
     response = await client.post("/api/auth/login", data={"username": email, "password": password})
     response.raise_for_status()
@@ -269,10 +292,15 @@ async def _upload_document(client: httpx.AsyncClient, token: str, path: Path) ->
         logger.warning("skipping_unsupported_document", path=str(path), extension=extension)
         return
 
+    data = {"title": path.stem}
+    policy_type = _SYNTHETIC_DOC_POLICY_TYPES.get(path.stem)
+    if policy_type is not None:
+        data["policy_type"] = policy_type.value
+
     response = await client.post(
         "/api/documents/upload",
         headers={"Authorization": f"Bearer {token}"},
-        data={"title": path.stem},
+        data=data,
         files={"file": (path.name, path.read_bytes(), content_type)},
     )
     if response.status_code >= 400:

@@ -183,6 +183,54 @@ async def test_upload_document_posts_multipart_with_the_bearer_token(tmp_path: P
         await script._upload_document(client, "fake-token", pdf)
 
 
+@pytest.mark.parametrize(
+    ("filename", "expected_policy_type"),
+    [
+        ("health_plan_summary.docx", "health"),
+        ("dental_plan_summary.pdf", "dental"),
+        ("vision_plan_summary.docx", "vision"),
+        ("life_insurance_summary.pdf", "life"),
+        ("disability_insurance_summary.docx", "disability"),
+    ],
+)
+async def test_upload_document_tags_known_synthetic_doc_types_with_their_policy_type(
+    tmp_path: Path, filename: str, expected_policy_type: str
+) -> None:
+    # Real bug this guards against: without this, every uploaded chunk's
+    # Pinecone metadata carried policy_type=None, and
+    # RAGService.retrieve()'s own metadata_filter then matched zero
+    # chunks for any policy-specific query -- even ones with an exact,
+    # directly-retrievable match sitting in that same namespace.
+    document = tmp_path / filename
+    document.write_bytes(b"fake content")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert b"policy_type" in request.content
+        assert expected_policy_type.encode() in request.content
+        return httpx.Response(201, json={"id": "fake-id"})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://testserver"
+    ) as client:
+        await script._upload_document(client, "fake-token", document)
+
+
+async def test_upload_document_omits_policy_type_for_employer_wide_documents(
+    tmp_path: Path,
+) -> None:
+    document = tmp_path / "employee_handbook_benefits.pdf"
+    document.write_bytes(b"fake content")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert b"policy_type" not in request.content
+        return httpx.Response(201, json={"id": "fake-id"})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://testserver"
+    ) as client:
+        await script._upload_document(client, "fake-token", document)
+
+
 async def test_trigger_ingestion_warns_and_returns_early_with_no_sample_documents(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
