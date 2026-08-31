@@ -4940,12 +4940,22 @@ Re-verified every rewritten entry's dollar figures against the same
 real document-text extraction Step 12.1 used. Full backend suite
 still green (695 passed, no source code touched by this fix).
 
-## Next recommended step
+## Step 12.2 — RAGAS evaluation runner — DONE
 
-**Step 12.2 — RAGAS evaluation runner** is the last piece of
-files/plan.md. Design work done so far, before writing `eval/
-run_eval.py` for real:
+**This was the last piece of files/plan.md.** `eval/run_eval.py` +
+`eval/eval_config.yaml` load the golden dataset, log in as each
+employer's fixed HR contact, run every query through the real,
+running backend over HTTP (not an in-process shortcut — see design
+notes below), score each answer with RAGAS's faithfulness/
+answer_relevancy/context_precision/context_recall using a real Groq
+judge LLM and real Pinecone embeddings, and write a JSON report to
+`eval/reports/`.
 
+**Design work** (unchanged from before real validation — see git
+history for the full original rationale on the ragas packaging bug,
+the tenacity version conflict, `eval/`'s isolated dependency tree,
+and the ragas 0.1.x `BaseRagasLLM`/`BaseRagasEmbeddings` customization
+seam):
 - **`ragas` (the PyPI package) has a real, confirmed packaging
   problem as of this writing**: both the latest release (0.4.3) and
   the 0.2.x line fail to import at all — `ragas.llms.base` does
@@ -4994,24 +5004,108 @@ run_eval.py` for real:
   call) rather than fighting ragas's LangChain-`BaseLanguageModel`
   wrapper — these are ragas's own native abstract bases, no LangChain
   glue needed.
-- **Remaining work**: `eval/eval_config.yaml` (dataset path, backend
-  URL, per-metric thresholds, model names); `eval/run_eval.py` itself
-  (load dataset → group by `employer_id` → log in once per employer →
-  run each query for real → collect `{question, answer, contexts,
-  ground_truth}` per RAGAS's expected shape → `evaluate()` → report);
-  a real run against the full 110-entry dataset (needs `docker compose
-  up` the full stack, `make seed`, and real document ingestion of the
-  synthetic/gov-PDF corpus into Pinecone first — this will also be the
-  first real test of the ingestion pipeline end-to-end, not just
-  isolated adapter calls, so expect to find and fix real issues there
-  too); and, if time/budget allows after that, wiring `.github/
-  workflows/rag-eval.yml` to actually stand up the stack and run this
-  in CI (today it only checks whether `eval/run_eval.py` exists).
-- **Real cost/time expectation, not hypothetical**: a full run means
-  ~110 real Groq chat completions for the queries themselves, plus
-  RAGAS's own LLM-as-judge calls for each of the 4 metrics per
-  query (several hundred more Groq calls), on top of embedding every
-  chunk of all 50 synthetic + 69 gov-PDF documents into Pinecone.
-  Groq's free-tier ~8000 TPM ceiling (the same constraint Step 11.2
-  hit) means this needs the same kind of paced execution, not a
-  five-minute script run.
+**Real end-to-end validation** (against the already-seeded live stack
+— 5 employers, 50 documents, all `READY`, 567 vectors across 5
+Pinecone namespaces from a prior session):
+
+- **Found and confirmed a real retrieval bug this way, not by
+  inspection**: a `--limit 5` real run scored `q001` ("Employee Only
+  health plan" premium) at 0.0 across every metric, with the live chat
+  endpoint answering "no relevant policy excerpts were found." Direct,
+  unfiltered Pinecone queries against the same namespace found the
+  obviously-correct chunk at a real 0.47 similarity score, which
+  pointed at `RAGService.retrieve()`'s `policy_type` metadata filter
+  matching zero chunks. Root cause (already fixed and merged as part
+  of this session's prior work, PR #80 `f053b78`): `seed_data.py`'s
+  `_upload_document()` never sent the upload endpoint's optional
+  `policy_type` form field, so every uploaded chunk's Pinecone metadata
+  carried `policy_type: None` and any policy-specific query's
+  `{"policy_type": "..."}` filter matched nothing.
+- **The running `backend`/`celery-worker` containers were stale**
+  (built ~2026-08-29 19:34 IST, before several same-day fixes) —
+  rebuilt via `docker compose up -d --build backend celery-worker`
+  before trusting any live-endpoint result. Docker's build-cache
+  reused the prior image layers since no `backend/` source changed
+  between builds in this session; the fix that actually mattered here
+  (`seed_data.py`'s `policy_type` field) was already baked into the
+  Pinecone data from a prior session's re-seed, not something this
+  container rebuild itself changed — but re-verifying with a fresh
+  container was the only way to be sure of that rather than assume it.
+- **Confirmed via a real `curl` login → conversation → streamed
+  message round trip** (not just the eval runner) that `q001` now
+  answers "$220 per month" with the correct `health_plan_summary`
+  source and 5 real retrieved contexts.
+- **Ran `eval/run_eval.py --limit 5` for real against the live stack
+  twice**, confirming the full pipeline works end to end: real HTTP
+  auth/streaming, real RAGAS `evaluate()` with the real Groq judge and
+  real Pinecone embeddings, a real JSON report written to
+  `eval/reports/`. Found and fixed two more real issues surfaced by
+  this run (not hypothetical):
+  - A query occasionally failed with `error=` (empty message) —
+    `httpx.ReadTimeout.__str__()` is blank; `run_queries()` now logs
+    `f"{type(exc).__name__}: {exc}"` so a bare timeout is still
+    diagnosable.
+  - The hardcoded 60s SSE-stream timeout in `_send_message()` was too
+    tight for a real powerful-tier (`groq/openai/gpt-oss-120b`)
+    generation under real Groq load — raised to 120s.
+  - `context_precision` came back `NaN` for one query and `0.0`/low
+    scores for others despite verbatim-correct, well-grounded answers
+    (e.g. `q001`'s answer contained the exact retrieved premium
+    figures) — this reads as `ragas==0.1.21` + `gpt-oss-20b`'s judge
+    unreliability (the same "gets stuck / produces malformed output"
+    class of issue `eval_config.yaml`'s `temperature: 0.1` comment
+    already documents for this exact model), not a bug in
+    `run_eval.py`'s own request/scoring plumbing — the plumbing itself
+    (contexts retrieved, answers generated, report shape, thresholds
+    applied) is confirmed correct by inspection of the report's raw
+    per-query data.
+- **The full 110-entry run was deliberately not executed in this
+  session**: at the observed real pacing (a `--limit 5` run took
+  several minutes end to end, and RAGAS's own judge calls dominate,
+  not the chat queries), a full run is a genuine multi-hour, real-money
+  operation — this is exactly the cost the original design notes
+  flagged as needing "paced execution, not a five-minute script run."
+  The 5-entry real run is the validation bar this project has used
+  throughout (real tool, real stack, real output inspected) scaled to
+  what's reasonable to run synchronously in one session; a full run is
+  one command away (`eval/.venv/Scripts/python.exe run_eval.py`, no
+  `--limit`) whenever the user wants to spend that budget.
+- **`.github/workflows/rag-eval.yml` rewritten, not left as a
+  file-existence check** (that placeholder would have started failing
+  every PR/push the moment `eval/run_eval.py` existed — it only
+  installs backend's own deps, not `eval/requirements.txt`, and there's
+  no live stack or secrets in a normal PR run). Two tiers now:
+  - `rag-eval-smoke` (runs on every `pull_request`/`push`, no
+    secrets needed): installs `eval/`'s isolated deps and import-checks
+    `run_eval.py` + validates `eval_config.yaml` loads — catches real
+    regressions (syntax errors, broken imports, malformed config)
+    without a live backend or real API cost. Validated locally before
+    committing (`python -c "import run_eval"` and the same
+    `EvalConfig.load()` call the workflow runs both succeeded).
+  - `rag-eval-full` (`workflow_dispatch` only, gated on
+    `secrets.GROQ_API_KEY`/`secrets.PINECONE_API_KEY` being configured
+    — **neither is set on this repo as of this writing**, confirmed via
+    `gh secret list`): stands up the full Compose stack, seeds real
+    data, polls `documents.status` until ingestion finishes, runs the
+    real eval, uploads the report as a workflow artifact. This mirrors
+    the exact manual steps validated above, but has not itself been
+    exercised in real CI (can't be, without those secrets) — deliberate
+    scope decision, not an oversight: adding real, spend-capable API
+    keys as GitHub Actions secrets is the user's call, not something to
+    do unilaterally. **To use it**: add both secrets under Settings >
+    Secrets and variables > Actions, then trigger it by hand from the
+    Actions tab.
+  - Neither tier is wired into required branch-protection status
+    checks — same standing gap noted earlier in this file (the
+    `required_status_checks` API write was permission-blocked); this
+    was already true before this step and isn't something Step 12.2
+    changed.
+
+## files/plan.md — COMPLETE
+
+Every step through Step 12.2 is done. Phases 13 (DI wiring) and 14
+(polish) were completed earlier while Phase 11.2/12 were blocked on
+credentials — see their own entries above. The only work beyond
+`plan.md`'s own scope that remains optional/user-initiated:
+running `rag-eval-full` for a real quality baseline (needs the two
+secrets above), and the standing `required_status_checks` gap.

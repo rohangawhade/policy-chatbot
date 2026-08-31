@@ -21,9 +21,17 @@ seed_password: "SeedPass123!"
 # The judge LLM used for RAGAS's faithfulness/answer_relevancy/
 # context_precision/context_recall metrics (a separate call path from
 # the chatbot's own responses, which come from the real backend).
+#
+# temperature is NOT 0.0 deliberately -- confirmed via a real,
+# reproducible test that this exact model (Groq's `openai/gpt-oss-20b`,
+# a reasoning model) gets stuck in an infinite repetitive reasoning
+# loop at temperature=0.0 on simple prompts (finish_reason="length",
+# ~3000 reasoning tokens burned repeating the same few phrases,
+# visible content empty). temperature=0.1 produces correct, concise
+# output on the same prompt every time it was retried.
 judge_llm:
   model: "groq/openai/gpt-oss-20b"
-  temperature: 0.0
+  temperature: 0.1
 
 # The embedding model used for RAGAS's answer_relevancy metric
 # (question/answer similarity) -- same model the backend itself uses

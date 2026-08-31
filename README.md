@@ -40,7 +40,7 @@ See `files/plan.md` for the full design (tech stack rationale, data flow diagram
 - [x] API routes: auth, chat, documents, employers/employees/policies, feedback, admin analytics, health (Phase 9)
 - [x] React chat UI + admin dashboard + employer portal (Phase 10)
 - [x] Data acquisition & seeding: real government benefits PDFs, LLM-generated synthetic employer policy docs, demo employer/employee/policy seed script (Phase 11)
-- [ ] RAGAS evaluation pipeline (Phase 12 — golden dataset done, evaluation runner still open)
+- [x] RAGAS evaluation pipeline (Phase 12)
 - [x] Dependency injection wiring audit (Phase 13)
 - [x] Production polish: structured logging with correlation IDs, global error handling, chat rate limiting, retry middleware, API docs, environment profiles, release automation (Phase 14)
 
@@ -225,7 +225,15 @@ Every external call (LiteLLM generation/embedding, Pinecone, Redis) retries with
 
 `data/eval/golden_dataset.json` (Step 12.1) has 110 manually-curated Q&A pairs across simple lookups, multi-policy comparisons, personal enrollment queries, edge cases, and off-topic rejections — each entry's `expected_answer` is grounded in the real content of `data/synthetic/` and `data/gov_pdfs/`. `employer_id` holds each employer's slug (e.g. `"northwind-traders"`), not a database UUID, since `seed_data.py` assigns those randomly at seed time.
 
-The runner itself (`eval/run_eval.py`, computing RAGAS metrics against this dataset) isn't built yet — lands in Step 12.2.
+The runner (`eval/run_eval.py`, Step 12.2) logs in as each employer's fixed HR contact (`hr@{slug}.test` / `SeedPass123!`), runs every query through the real, running backend over HTTP, and scores each answer with RAGAS's faithfulness/answer_relevancy/context_precision/context_recall using a real Groq judge LLM and real Pinecone embeddings — a separate, isolated dependency tree (`eval/requirements.txt`, `ragas==0.1.21` pinned; see that file's comments for why) from `backend/`'s own, since `ragas` transitively conflicts with `backend`'s `tenacity` pin. Prerequisites: the full stack running (`docker compose up -d postgres redis backend celery-worker`) and seeded (`cd backend && python scripts/seed_data.py`) with ingestion finished. Then:
+
+```bash
+cd eval
+python -m venv .venv && .venv/Scripts/pip install -r requirements.txt   # once
+.venv/Scripts/python run_eval.py --config eval_config.yaml              # --limit N for a smaller real run
+```
+
+A full 110-entry run is a genuine multi-hour, real-money operation (Groq's free-tier rate limits plus RAGAS's own several-hundred judge calls) — pass `--limit N` for a quick real check against a live stack. `.github/workflows/rag-eval.yml`'s `rag-eval-full` job runs the real thing in CI on manual `workflow_dispatch`, gated on `GROQ_API_KEY`/`PINECONE_API_KEY` repo secrets (not configured by default — add them under Settings > Secrets and variables > Actions to enable it); every `pull_request`/`push` instead runs `rag-eval-smoke`, a fast secret-free import/config sanity check.
 
 </details>
 
