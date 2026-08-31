@@ -1,43 +1,174 @@
 name: RAG Evaluation
 
+# Two tiers, deliberately not the same job:
+#
+# 1. `rag-eval-smoke` (pull_request/push) -- a fast, free, secret-free
+#    sanity check that `eval/run_eval.py` and `eval/eval_config.yaml`
+#    are structurally sound (isolated deps install cleanly, the module
+#    imports, argparse/config loading works). This is NOT a real
+#    evaluation -- it never talks to a live backend or a real LLM.
+# 2. `rag-eval-full` (workflow_dispatch only) -- the real thing: stands
+#    up the full Docker Compose stack, seeds real data, waits for real
+#    Pinecone ingestion, and runs all 110 golden-dataset queries through
+#    real Groq generations and real RAGAS judge calls. This costs real
+#    money and takes on the order of an hour (confirmed via a real
+#    `--limit 5` run against the live stack -- ~30-60s per query once
+#    Groq's free-tier rate limiting is accounted for, before the RAGAS
+#    judge's own several-hundred calls). It only runs on manual
+#    dispatch, and only if `secrets.GROQ_API_KEY` /
+#    `secrets.PINECONE_API_KEY` are configured on this repo -- neither
+#    is set as of this writing, so add them under Settings > Secrets
+#    and variables > Actions before triggering this job.
+#
+# `rag-eval-full` is deliberately NOT wired into `pull_request`/`push`:
+# every PR triggering a real, paid, hour-long LLM evaluation run would
+# be both a cost surprise and a CI-latency regression the rest of this
+# project's fast (mocked) test suite doesn't have. Trigger it by hand
+# (Actions tab > RAG Evaluation > Run workflow) when you want a real
+# quality signal before a release.
+
 on:
   pull_request:
     branches: [main]
   push:
     branches: [main]
+  workflow_dispatch: {}
 
 jobs:
-  rag-eval:
-    name: rag-eval
+  rag-eval-smoke:
+    name: rag-eval-smoke
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check for the RAGAS eval runner
-        id: check
-        run: |
-          if [ -f "eval/run_eval.py" ]; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - uses: actions/setup-python@v5
-        if: steps.check.outputs.exists == 'true'
         with:
           python-version: "3.12"
 
-      - name: Install backend dependencies
-        if: steps.check.outputs.exists == 'true'
-        working-directory: backend
+      - name: Install eval's isolated dependencies
+        working-directory: eval
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install -r requirements.txt
 
-      - name: Run RAGAS golden-dataset evaluation
-        if: steps.check.outputs.exists == 'true'
-        run: python eval/run_eval.py --config eval/eval_config.yaml
+      - name: Import-check run_eval.py and validate eval_config.yaml
+        working-directory: eval
+        run: |
+          python -c "import run_eval"
+          python -c "
+          from pathlib import Path
+          from run_eval import EvalConfig
+          config = EvalConfig.load(Path('eval_config.yaml'))
+          assert config.dataset_path.name == 'golden_dataset.json'
+          print('eval_config.yaml loads cleanly:', config.backend_url)
+          "
 
-      - name: Eval runner not built yet
-        if: steps.check.outputs.exists == 'false'
-        run: echo "eval/run_eval.py not found yet — skipping (Phase 12 adds the RAGAS runner)."
+  rag-eval-full:
+    name: rag-eval-full
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check required secrets are configured
+        id: secrets_check
+        run: |
+          if [ -z "${{ secrets.GROQ_API_KEY }}" ] || [ -z "${{ secrets.PINECONE_API_KEY }}" ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Missing secrets
+        if: steps.secrets_check.outputs.ready == 'false'
+        run: |
+          echo "::error::GROQ_API_KEY and/or PINECONE_API_KEY are not configured as repo secrets (Settings > Secrets and variables > Actions). rag-eval-full needs both to run a real evaluation."
+          exit 1
+
+      - uses: actions/setup-python@v5
+        if: steps.secrets_check.outputs.ready == 'true'
+        with:
+          python-version: "3.12"
+
+      - name: Write CI .env
+        if: steps.secrets_check.outputs.ready == 'true'
+        run: |
+          cp .env.example .env
+          {
+            echo "GROQ_API_KEY=${{ secrets.GROQ_API_KEY }}"
+            echo "PINECONE_API_KEY=${{ secrets.PINECONE_API_KEY }}"
+            echo "PINECONE_INDEX_NAME=policy-chatbot"
+            echo "LLM_CHEAP_MODEL=groq/openai/gpt-oss-20b"
+            echo "LLM_POWERFUL_MODEL=groq/openai/gpt-oss-120b"
+            echo "LLM_EMBEDDING_MODEL=llama-text-embed-v2"
+            echo "APP_SECRET_KEY=ci-only-not-a-real-secret"
+            echo "AUTH_JWT_SECRET_KEY=ci-only-not-a-real-secret"
+          } >> .env
+
+      - name: Start the full stack
+        if: steps.secrets_check.outputs.ready == 'true'
+        run: docker compose up -d --build postgres redis backend celery-worker
+
+      - name: Wait for the backend to become healthy
+        if: steps.secrets_check.outputs.ready == 'true'
+        run: |
+          for _ in $(seq 1 60); do
+            if curl -sf http://localhost:8000/health > /dev/null; then
+              echo "backend healthy"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::backend never became healthy"
+          docker compose logs backend
+          exit 1
+
+      - name: Seed real employers, documents, and trigger ingestion
+        if: steps.secrets_check.outputs.ready == 'true'
+        working-directory: backend
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -e ".[dev]"
+          DATABASE_URL=postgresql+asyncpg://policypal:policypal@localhost:5432/policypal .venv/bin/python scripts/seed_data.py
+
+      - name: Wait for ingestion to finish (every document READY or FAILED)
+        if: steps.secrets_check.outputs.ready == 'true'
+        run: |
+          for _ in $(seq 1 120); do
+            counts=$(docker compose exec -T postgres psql -U policypal -d policypal -tAc \
+              "select count(*) filter (where status not in ('READY','FAILED')), count(*) filter (where status = 'FAILED') from documents")
+            pending=$(echo "$counts" | cut -d'|' -f1)
+            failed=$(echo "$counts" | cut -d'|' -f2)
+            echo "pending=$pending failed=$failed"
+            if [ "$pending" = "0" ]; then
+              if [ "$failed" != "0" ]; then
+                echo "::warning::$failed document(s) failed ingestion -- continuing anyway, run_eval.py will just retrieve fewer contexts for the affected employer."
+              fi
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::ingestion did not finish within 20 minutes"
+          exit 1
+
+      - name: Install eval's isolated dependencies
+        if: steps.secrets_check.outputs.ready == 'true'
+        working-directory: eval
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -r requirements.txt
+
+      - name: Run the real RAGAS evaluation
+        if: steps.secrets_check.outputs.ready == 'true'
+        working-directory: eval
+        run: .venv/bin/python run_eval.py --config eval_config.yaml
+
+      - name: Upload evaluation report
+        if: steps.secrets_check.outputs.ready == 'true' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rag-eval-report
+          path: eval/reports/*.json
