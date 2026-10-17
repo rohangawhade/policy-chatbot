@@ -77,6 +77,19 @@ async def test_keyword_match_is_case_insensitive() -> None:
     assert llm.generate_calls == []
 
 
+async def test_general_benefits_question_is_accepted_without_an_llm_call() -> None:
+    """Regression: "what benefits does <employer> offer?" names no specific
+    sub-topic (dental/vision/etc.) and used to fall through to the LLM
+    classifier, which sometimes misclassified it as off-topic."""
+    llm, bus = FakeLLM(), FakeEventBus()
+    service = _service(llm, bus)
+
+    result = await service.check("What benefits does Acme Manufacturing offer?", uuid4())
+
+    assert result.allowed is True
+    assert llm.generate_calls == []
+
+
 async def test_ambiguous_query_classified_on_topic_by_the_llm_is_accepted() -> None:
     llm, bus = FakeLLM(response="YES"), FakeEventBus()
     service = _service(llm, bus)
