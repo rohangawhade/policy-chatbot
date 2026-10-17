@@ -39,6 +39,7 @@ from core.services.rag_service import GenerationMetrics, RAGService
 router = APIRouter(prefix="/api/chat", tags=["Chat"])
 
 _DEFAULT_HISTORY_LIMIT = 50
+_GUARDRAIL_HISTORY_LIMIT = 4
 
 
 class ConversationResponse(BaseModel):
@@ -146,6 +147,7 @@ async def send_message(
     current_user: TokenPayload = Depends(get_current_user),
     employer_id: UUID = Depends(get_current_employer_id),
     conversation_repository: ConversationRepository = Depends(get_conversation_repository),
+    message_repository: MessageRepository = Depends(get_message_repository),
     guardrails_service: GuardrailsService = Depends(get_guardrails_service),
     rag_service: RAGService = Depends(get_rag_service),
     rate_limiter: RateLimiter = Depends(get_chat_rate_limiter),
@@ -168,6 +170,12 @@ async def send_message(
     """
     await rate_limiter.check(str(current_user.user_id))
     await _get_owned_conversation(conversation_repository, conversation_id, current_user.user_id)
+    recent = await message_repository.list_by_conversation(
+        conversation_id, limit=_GUARDRAIL_HISTORY_LIMIT
+    )
+    history = [
+        f"{'Employee' if m.role == MessageRole.USER else 'Assistant'}: {m.content}" for m in recent
+    ]
     return StreamingResponse(
         _stream_chat_response(
             guardrails_service,
@@ -176,6 +184,7 @@ async def send_message(
             body.content,
             current_user.user_id,
             employer_id,
+            history,
         ),
         media_type="text/event-stream",
     )
@@ -188,8 +197,9 @@ async def _stream_chat_response(
     query_text: str,
     employee_id: UUID,
     employer_id: UUID,
+    history: list[str] | None = None,
 ) -> AsyncIterator[str]:
-    guardrail = await guardrails_service.check(query_text, employer_id)
+    guardrail = await guardrails_service.check(query_text, employer_id, history)
     if not guardrail.allowed:
         yield _format_token_event(guardrail.rejection_message or "")
         yield _format_done_event(conversation_id, rejected=True)

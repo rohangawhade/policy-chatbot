@@ -12,6 +12,8 @@ from core.domain.analytics import (
 )
 from core.domain.conversation import Conversation, Message, MessageRole
 from core.domain.document import Document
+from core.domain.employee import Employee, UserRole
+from core.domain.employer import Employer
 from core.domain.events import (
     ChatMessageReceivedEvent,
     ChatResponseGeneratedEvent,
@@ -26,6 +28,8 @@ from core.ports.repository_ports import (
     AnalyticsRepository,
     ConversationRepository,
     DocumentRepository,
+    EmployeeRepository,
+    EmployerRepository,
     EnrollmentRepository,
     MessageRepository,
 )
@@ -294,6 +298,49 @@ class FakeDocumentRepository(DocumentRepository):
         self.mark_queried_calls.append(document_ids)
 
 
+class FakeEmployeeRepository(EmployeeRepository):
+    def __init__(self, employee: Employee | None = None) -> None:
+        self._employee = employee
+
+    async def get(self, entity_id: UUID) -> Employee | None:
+        return self._employee
+
+    async def create(self, entity: Employee) -> Employee:
+        raise NotImplementedError
+
+    async def update(self, entity: Employee) -> Employee:
+        raise NotImplementedError
+
+    async def delete(self, entity_id: UUID) -> None:
+        raise NotImplementedError
+
+    async def get_by_email(self, email: str) -> Employee | None:
+        raise NotImplementedError
+
+    async def list_by_employer(self, employer_id: UUID) -> list[Employee]:
+        raise NotImplementedError
+
+
+class FakeEmployerRepository(EmployerRepository):
+    def __init__(self, employer: Employer | None = None) -> None:
+        self._employer = employer
+
+    async def get(self, entity_id: UUID) -> Employer | None:
+        return self._employer
+
+    async def create(self, entity: Employer) -> Employer:
+        raise NotImplementedError
+
+    async def update(self, entity: Employer) -> Employer:
+        raise NotImplementedError
+
+    async def delete(self, entity_id: UUID) -> None:
+        raise NotImplementedError
+
+    async def list_all(self) -> list[Employer]:
+        raise NotImplementedError
+
+
 class FakeEventBus(EventBusPort):
     def __init__(self) -> None:
         self.published: list[DomainEvent] = []
@@ -323,6 +370,8 @@ def _service(
     message_repository: FakeMessageRepository | None = None,
     event_bus: FakeEventBus | None = None,
     document_repository: FakeDocumentRepository | None = None,
+    employee_repository: FakeEmployeeRepository | None = None,
+    employer_repository: FakeEmployerRepository | None = None,
     top_k: int = 5,
     low_confidence_threshold: float = 0.5,
 ) -> RAGService:
@@ -337,6 +386,8 @@ def _service(
         message_repository or FakeMessageRepository(),
         event_bus or FakeEventBus(),
         document_repository or FakeDocumentRepository(),
+        employee_repository or FakeEmployeeRepository(),
+        employer_repository or FakeEmployerRepository(),
         embedding_model=_MODEL,
         top_k=top_k,
         low_confidence_threshold=low_confidence_threshold,
@@ -347,10 +398,10 @@ async def test_cache_hit_short_circuits_before_any_retrieval_work() -> None:
     employer_id, employee_id = uuid4(), uuid4()
     llm, vector_store, enrollment_repo = FakeLLM(), FakeVectorStore(), FakeEnrollmentRepository()
     service = _service(llm, FakeCache(), vector_store, enrollment_repo)
-    cache_key = service._cache_key(employer_id, "What's my deductible?")
+    cache_key = service._cache_key(employer_id, "What is the deductible?")
     service = _service(llm, FakeCache({cache_key: "cached answer"}), vector_store, enrollment_repo)
 
-    result = await service.retrieve("What's my deductible?", employee_id, employer_id)
+    result = await service.retrieve("What is the deductible?", employee_id, employer_id)
 
     assert result.cached_response == "cached answer"
     assert result.chunks == []
@@ -466,8 +517,8 @@ async def test_cache_key_is_deterministic_for_the_same_inputs() -> None:
     service = _service(FakeLLM(), FakeCache(), FakeVectorStore(), FakeEnrollmentRepository())
     employer_id = uuid4()
 
-    key_one = service._cache_key(employer_id, "What's my deductible?")
-    key_two = service._cache_key(employer_id, "What's my deductible?")
+    key_one = service._cache_key(employer_id, "What is the deductible?")
+    key_two = service._cache_key(employer_id, "What is the deductible?")
 
     assert key_one == key_two
 
@@ -475,8 +526,8 @@ async def test_cache_key_is_deterministic_for_the_same_inputs() -> None:
 async def test_cache_key_differs_across_employers_for_the_same_query() -> None:
     service = _service(FakeLLM(), FakeCache(), FakeVectorStore(), FakeEnrollmentRepository())
 
-    key_one = service._cache_key(uuid4(), "What's my deductible?")
-    key_two = service._cache_key(uuid4(), "What's my deductible?")
+    key_one = service._cache_key(uuid4(), "What is the deductible?")
+    key_two = service._cache_key(uuid4(), "What is the deductible?")
 
     assert key_one != key_two
 
@@ -485,7 +536,7 @@ async def test_cache_key_differs_across_queries_for_the_same_employer() -> None:
     service = _service(FakeLLM(), FakeCache(), FakeVectorStore(), FakeEnrollmentRepository())
     employer_id = uuid4()
 
-    key_one = service._cache_key(employer_id, "What's my deductible?")
+    key_one = service._cache_key(employer_id, "What is the deductible?")
     key_two = service._cache_key(employer_id, "What's my copay?")
 
     assert key_one != key_two
@@ -495,9 +546,9 @@ async def test_cache_key_differs_across_policy_types_for_the_same_query() -> Non
     service = _service(FakeLLM(), FakeCache(), FakeVectorStore(), FakeEnrollmentRepository())
     employer_id = uuid4()
 
-    key_dental = service._cache_key(employer_id, "What's my deductible?", PolicyType.DENTAL)
-    key_vision = service._cache_key(employer_id, "What's my deductible?", PolicyType.VISION)
-    key_none = service._cache_key(employer_id, "What's my deductible?", None)
+    key_dental = service._cache_key(employer_id, "What is the deductible?", PolicyType.DENTAL)
+    key_vision = service._cache_key(employer_id, "What is the deductible?", PolicyType.VISION)
+    key_none = service._cache_key(employer_id, "What is the deductible?", None)
 
     assert len({key_dental, key_vision, key_none}) == 3
 
@@ -506,7 +557,7 @@ async def test_cache_key_for_a_detected_policy_type_shares_the_invalidation_pref
     service = _service(FakeLLM(), FakeCache(), FakeVectorStore(), FakeEnrollmentRepository())
     employer_id = uuid4()
 
-    key = service._cache_key(employer_id, "What's my dental deductible?", PolicyType.DENTAL)
+    key = service._cache_key(employer_id, "What is the dental deductible?", PolicyType.DENTAL)
 
     assert key.startswith(service._cache_key_prefix(employer_id, PolicyType.DENTAL))
 
@@ -516,12 +567,12 @@ async def test_retrieve_uses_the_detected_policy_types_cache_key() -> None:
     llm, vector_store = FakeLLM(), FakeVectorStore()
     probe_service = _service(llm, FakeCache(), vector_store, FakeEnrollmentRepository())
     expected_key = probe_service._cache_key(
-        employer_id, "What's my dental deductible?", PolicyType.DENTAL
+        employer_id, "What is the dental deductible?", PolicyType.DENTAL
     )
     cache = FakeCache({expected_key: "cached dental answer"})
     service = _service(llm, cache, vector_store, FakeEnrollmentRepository())
 
-    result = await service.retrieve("What's my dental deductible?", employee_id, employer_id)
+    result = await service.retrieve("What is the dental deductible?", employee_id, employer_id)
 
     assert result.cached_response == "cached dental answer"
     assert result.policy_type == PolicyType.DENTAL
@@ -560,10 +611,10 @@ async def test_query_caches_using_the_detected_policy_types_key() -> None:
     cache = FakeCache()
     service = _service(llm, cache, FakeVectorStore(), FakeEnrollmentRepository())
     expected_key = service._cache_key(
-        employer_id, "What's my dental deductible?", PolicyType.DENTAL
+        employer_id, "What is the dental deductible?", PolicyType.DENTAL
     )
 
-    stream = await service.query("What's my dental deductible?", employee_id, employer_id)
+    stream = await service.query("What is the dental deductible?", employee_id, employer_id)
     await _consume(stream)
 
     assert len(cache.set_calls) == 1
@@ -594,14 +645,14 @@ def _enrollment(**overrides: Any) -> Enrollment:
 def test_render_with_no_context_includes_the_no_context_notice() -> None:
     template = PromptTemplate()
 
-    prompt = template.render("What's my deductible?", [], [])
+    prompt = template.render("What is the deductible?", [], [])
 
     assert template.role_definition in prompt
     assert template.domain_restriction in prompt
     assert template.no_context_notice in prompt
     assert "Retrieved policy excerpts" not in prompt
     assert "current enrollments" not in prompt
-    assert "Employee's question: What's my deductible?" in prompt
+    assert "Employee's question: What is the deductible?" in prompt
 
 
 def test_render_includes_each_chunk_with_source_attribution() -> None:
@@ -672,6 +723,8 @@ def test_assemble_prompt_uses_a_custom_prompt_template() -> None:
         FakeMessageRepository(),
         FakeEventBus(),
         FakeDocumentRepository(),
+        FakeEmployeeRepository(),
+        FakeEmployerRepository(),
         embedding_model=_MODEL,
         prompt_template=custom_template,
     )
@@ -689,11 +742,11 @@ async def test_query_cache_hit_yields_cached_text_without_calling_the_llm() -> N
     employer_id, employee_id = uuid4(), uuid4()
     llm, analytics = FakeLLM(), FakeAnalyticsRepository()
     service = _service(llm, FakeCache(), FakeVectorStore(), FakeEnrollmentRepository(), analytics)
-    cache_key = service._cache_key(employer_id, "What's my deductible?")
+    cache_key = service._cache_key(employer_id, "What is the deductible?")
     cache = FakeCache({cache_key: "cached answer"})
     service = _service(llm, cache, FakeVectorStore(), FakeEnrollmentRepository(), analytics)
 
-    stream = await service.query("What's my deductible?", employee_id, employer_id)
+    stream = await service.query("What is the deductible?", employee_id, employer_id)
     tokens = await _consume(stream)
 
     assert tokens == ["cached answer"]
@@ -714,7 +767,7 @@ async def test_query_streams_tokens_from_the_llm_on_a_cache_miss() -> None:
     llm = FakeLLM(stream_tokens=["Your ", "deductible ", "is $500."])
     service = _service(llm, FakeCache(), FakeVectorStore(), FakeEnrollmentRepository())
 
-    stream = await service.query("What's my deductible?", employee_id, employer_id)
+    stream = await service.query("What is the deductible?", employee_id, employer_id)
     tokens = await _consume(stream)
 
     assert "".join(tokens).startswith("Your deductible is $500.")
@@ -743,7 +796,7 @@ async def test_query_omits_citations_when_no_chunks_were_retrieved() -> None:
     llm = FakeLLM(stream_tokens=["answer"])
     service = _service(llm, FakeCache(), FakeVectorStore([]), FakeEnrollmentRepository())
 
-    stream = await service.query("What's my deductible?", employee_id, employer_id)
+    stream = await service.query("What is the deductible?", employee_id, employer_id)
     tokens = await _consume(stream)
 
     assert "Sources:" not in "".join(tokens)
@@ -754,9 +807,9 @@ async def test_query_caches_the_full_response_after_streaming() -> None:
     llm = FakeLLM(stream_tokens=["full answer"])
     cache = FakeCache()
     service = _service(llm, cache, FakeVectorStore(), FakeEnrollmentRepository())
-    expected_key = service._cache_key(employer_id, "What's my deductible?")
+    expected_key = service._cache_key(employer_id, "What is the deductible?")
 
-    stream = await service.query("What's my deductible?", employee_id, employer_id)
+    stream = await service.query("What is the deductible?", employee_id, employer_id)
     await _consume(stream)
 
     assert len(cache.set_calls) == 1
@@ -772,7 +825,7 @@ async def test_query_logs_llm_cost_and_latency_after_streaming() -> None:
     analytics = FakeAnalyticsRepository()
     service = _service(llm, FakeCache(), FakeVectorStore(), FakeEnrollmentRepository(), analytics)
 
-    stream = await service.query("What's my deductible?", employee_id, employer_id)
+    stream = await service.query("What is the deductible?", employee_id, employer_id)
     await _consume(stream)
 
     assert len(analytics.llm_cost_logs) == 1
@@ -811,7 +864,7 @@ async def test_query_selects_the_cheap_model_for_a_simple_query() -> None:
     llm = FakeLLM(stream_tokens=["answer"])
     service = _service(llm, FakeCache(), FakeVectorStore(), FakeEnrollmentRepository())
 
-    stream = await service.query("What's my deductible?", employee_id, employer_id)
+    stream = await service.query("What is the deductible?", employee_id, employer_id)
     await _consume(stream)
 
     assert llm.generate_stream_calls[0][1] == _CHEAP_MODEL
@@ -831,7 +884,7 @@ async def test_query_flags_low_confidence_below_the_threshold() -> None:
         low_confidence_threshold=0.5,
     )
 
-    stream = await service.query("What's my deductible?", employee_id, employer_id)
+    stream = await service.query("What is the deductible?", employee_id, employer_id)
     await _consume(stream)
 
     assert stream.metrics is not None
@@ -851,7 +904,7 @@ async def test_query_does_not_flag_confidence_at_or_above_the_threshold() -> Non
         low_confidence_threshold=0.5,
     )
 
-    stream = await service.query("What's my deductible?", employee_id, employer_id)
+    stream = await service.query("What is the deductible?", employee_id, employer_id)
     await _consume(stream)
 
     assert stream.metrics is not None
@@ -863,7 +916,7 @@ async def test_query_top_similarity_score_is_none_without_retrieved_chunks() -> 
     llm = FakeLLM(stream_tokens=["answer"])
     service = _service(llm, FakeCache(), FakeVectorStore([]), FakeEnrollmentRepository())
 
-    stream = await service.query("What's my deductible?", employee_id, employer_id)
+    stream = await service.query("What is the deductible?", employee_id, employer_id)
     await _consume(stream)
 
     assert stream.metrics is not None
@@ -876,7 +929,7 @@ async def test_metrics_is_none_before_the_stream_is_consumed() -> None:
     llm = FakeLLM(stream_tokens=["answer"])
     service = _service(llm, FakeCache(), FakeVectorStore(), FakeEnrollmentRepository())
 
-    stream = await service.query("What's my deductible?", employee_id, employer_id)
+    stream = await service.query("What is the deductible?", employee_id, employer_id)
 
     assert stream.metrics is None
 
@@ -920,7 +973,7 @@ async def test_query_starts_a_new_conversation_when_none_is_given() -> None:
         conversation_repository=conversation_repo,
     )
 
-    stream = await service.query("What's my deductible?", employee_id, employer_id)
+    stream = await service.query("What is the deductible?", employee_id, employer_id)
     await _consume(stream)
 
     assert len(conversation_repo.created) == 1
@@ -969,13 +1022,13 @@ async def test_query_persists_the_user_and_assistant_messages() -> None:
         message_repository=message_repo,
     )
 
-    stream = await service.query("What's my deductible?", employee_id, employer_id)
+    stream = await service.query("What is the deductible?", employee_id, employer_id)
     await _consume(stream)
 
     assert len(message_repo.created) == 2
     user_message, assistant_message = message_repo.created
     assert user_message.role == MessageRole.USER
-    assert user_message.content == "What's my deductible?"
+    assert user_message.content == "What is the deductible?"
     assert assistant_message.role == MessageRole.ASSISTANT
     assert assistant_message.content == "Your answer."
     assert assistant_message.model_used == _CHEAP_MODEL
@@ -989,7 +1042,7 @@ async def test_query_publishes_chat_message_received_and_response_generated_even
         llm, FakeCache(), FakeVectorStore(), FakeEnrollmentRepository(), event_bus=event_bus
     )
 
-    stream = await service.query("What's my deductible?", employee_id, employer_id)
+    stream = await service.query("What is the deductible?", employee_id, employer_id)
     await _consume(stream)
 
     received_events = [e for e in event_bus.published if isinstance(e, ChatMessageReceivedEvent)]
@@ -1018,7 +1071,7 @@ async def test_query_low_confidence_persists_flagged_response_and_publishes_even
         low_confidence_threshold=0.5,
     )
 
-    stream = await service.query("What's my deductible?", employee_id, employer_id)
+    stream = await service.query("What is the deductible?", employee_id, employer_id)
     await _consume(stream)
 
     assert len(analytics.flagged_responses) == 1
@@ -1070,7 +1123,7 @@ async def test_query_high_confidence_does_not_flag_or_publish() -> None:
         low_confidence_threshold=0.5,
     )
 
-    stream = await service.query("What's my deductible?", employee_id, employer_id)
+    stream = await service.query("What is the deductible?", employee_id, employer_id)
     await _consume(stream)
 
     assert analytics.flagged_responses == []
@@ -1087,13 +1140,13 @@ async def test_query_cache_hit_still_persists_a_conversation_turn() -> None:
         FakeEnrollmentRepository(),
         message_repository=message_repo,
     )
-    cache_key = service._cache_key(employer_id, "What's my deductible?")
+    cache_key = service._cache_key(employer_id, "What is the deductible?")
     cache = FakeCache({cache_key: "cached answer"})
     service = _service(
         llm, cache, FakeVectorStore(), FakeEnrollmentRepository(), message_repository=message_repo
     )
 
-    stream = await service.query("What's my deductible?", employee_id, employer_id)
+    stream = await service.query("What is the deductible?", employee_id, employer_id)
     await _consume(stream)
 
     assert len(message_repo.created) == 2
@@ -1110,13 +1163,13 @@ async def test_query_cache_hit_does_not_publish_response_generated_event() -> No
     service = _service(
         llm, FakeCache(), FakeVectorStore(), FakeEnrollmentRepository(), event_bus=event_bus
     )
-    cache_key = service._cache_key(employer_id, "What's my deductible?")
+    cache_key = service._cache_key(employer_id, "What is the deductible?")
     cache = FakeCache({cache_key: "cached answer"})
     service = _service(
         llm, cache, FakeVectorStore(), FakeEnrollmentRepository(), event_bus=event_bus
     )
 
-    stream = await service.query("What's my deductible?", employee_id, employer_id)
+    stream = await service.query("What is the deductible?", employee_id, employer_id)
     await _consume(stream)
 
     assert not any(isinstance(e, ChatResponseGeneratedEvent) for e in event_bus.published)
@@ -1152,3 +1205,67 @@ async def test_query_passes_conversation_history_into_the_prompt() -> None:
 
     prompt = llm.generate_stream_calls[0][0]
     assert "What plans are available?" in prompt
+
+
+def _employee_and_employer() -> tuple[Employee, Employer]:
+    employer = Employer(name="Acme Manufacturing")
+    employee = Employee(
+        employer_id=employer.id,
+        email="jane@acme.test",
+        hashed_password="x",
+        full_name="Jane Doe",
+        role=UserRole.EMPLOYEE,
+    )
+    return employee, employer
+
+
+async def test_prompt_includes_employee_and_employer_context() -> None:
+    employee, employer = _employee_and_employer()
+    service = _service(
+        FakeLLM(),
+        FakeCache(),
+        FakeVectorStore(),
+        FakeEnrollmentRepository(),
+        employee_repository=FakeEmployeeRepository(employee),
+        employer_repository=FakeEmployerRepository(employer),
+    )
+
+    retrieval = await service.retrieve("Who is my employer?", employee.id, employer.id)
+    prompt = service.assemble_prompt("Who is my employer?", retrieval)
+
+    assert "About the employee you're helping:" in prompt
+    assert "Acme Manufacturing" in prompt
+    assert "Jane Doe" in prompt
+
+
+def test_prompt_omits_employee_section_when_records_are_missing() -> None:
+    prompt = PromptTemplate().render("hi", [], [])
+
+    assert "About the employee you're helping" not in prompt
+
+
+async def test_personal_query_neither_reads_nor_writes_the_cache() -> None:
+    employer_id, employee_id = uuid4(), uuid4()
+    cache = FakeCache()
+    service = _service(FakeLLM(), cache, FakeVectorStore(), FakeEnrollmentRepository())
+    # Pre-seed what the (wrong) shared key would hold: it must be ignored.
+    cache_key = service._cache_key(employer_id, "What is my deductible?")
+    await cache.set(cache_key, "SOMEONE ELSE'S ANSWER", ttl_seconds=60)
+
+    stream = await service.query("What is my deductible?", employee_id, employer_id)
+    tokens = await _consume(stream)
+
+    assert "SOMEONE ELSE'S ANSWER" not in "".join(tokens)
+    assert stream.metrics is not None and stream.metrics.from_cache is False
+    assert await cache.get(cache_key) == "SOMEONE ELSE'S ANSWER"
+
+
+async def test_non_personal_query_is_still_cached() -> None:
+    employer_id, employee_id = uuid4(), uuid4()
+    cache = FakeCache()
+    service = _service(FakeLLM(), cache, FakeVectorStore(), FakeEnrollmentRepository())
+
+    stream = await service.query("What is the deductible?", employee_id, employer_id)
+    await _consume(stream)
+
+    assert await cache.get(service._cache_key(employer_id, "What is the deductible?")) is not None
