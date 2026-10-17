@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { createConversation, getConversationMessages, listConversations } from "../../api/chat";
+import { LogoutButton } from "../common/LogoutButton";
 import { useChatStore } from "../../stores/chatStore";
 
 export function ConversationSidebar() {
@@ -85,6 +86,9 @@ export function ConversationSidebar() {
             {conversation.title ?? "New conversation"}
           </button>
         ))}
+      </div>
+      <div className="border-t border-gray-200 p-3">
+        <LogoutButton className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100" />
       </div>
     </aside>
   );

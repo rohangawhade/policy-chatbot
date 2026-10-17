@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { LogoutButton } from "../components/common/LogoutButton";
 import AnalyticsDashboard from "../components/admin/AnalyticsDashboard";
 import CostDashboard from "../components/admin/CostDashboard";
 import DocumentHealth from "../components/admin/DocumentHealth";
@@ -19,7 +20,10 @@ export default function AdminDashboard() {
   return (
     <div className="min-h-screen bg-gray-50">
       <div className="mx-auto max-w-6xl px-4 py-8">
-        <h1 className="mb-8 text-3xl font-bold text-gray-900">Admin Dashboard</h1>
+        <div className="mb-8 flex items-center justify-between">
+          <h1 className="text-3xl font-bold text-gray-900">Admin Dashboard</h1>
+          <LogoutButton />
+        </div>
 
         {/* Tab Navigation */}
         <div className="mb-6 border-b border-gray-200">
