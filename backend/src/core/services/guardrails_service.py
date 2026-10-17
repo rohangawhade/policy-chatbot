@@ -19,14 +19,41 @@ _REJECTION_MESSAGE = (
     "rephrase your question around one of those topics?"
 )
 _DEFAULT_ALLOWED_DOMAINS = frozenset(
-    {"health", "dental", "vision", "life", "disability", "enrollment", "coverage", "claims"}
+    {
+        "health",
+        "dental",
+        "vision",
+        "life",
+        "disability",
+        "enrollment",
+        "coverage",
+        "claims",
+        # Real bug: a general "what benefits/plans does my employer offer"
+        # question names none of the specific sub-topics above, so it used
+        # to skip the free keyword path and fall to the LLM classifier --
+        # which a cheap model sometimes got wrong (observed: "What dental
+        # benefits does Acme Manufacturing offer?" passed via the "dental"
+        # keyword, but "what benefits does Acme Manufacturing offer?" alone
+        # was misclassified NO and rejected outright). These umbrella terms
+        # are unambiguously in-domain for a benefits-only chatbot, so they
+        # belong on the free fast path rather than depending on an LLM call
+        # to get a meta-level question right.
+        "benefit",
+        "benefits",
+        "plan",
+        "plans",
+        "policy",
+        "policies",
+    }
 )
 _CLASSIFICATION_MAX_TOKENS = 5
 _CLASSIFICATION_PROMPT = (
-    "You are a strict binary classifier for an employee benefits chatbot. "
-    "Reply with exactly one word: YES or NO. Do not explain.\n\n"
-    "Is the following question about one of these employee benefits topics: "
-    "{domains}?\n\nQuestion: {query}"
+    "You are a binary classifier for an employee benefits chatbot. Reply "
+    "with exactly one word: YES or NO. Do not explain.\n\n"
+    "Is the following question about employee benefits in general, or "
+    "about one of these specific topics: {domains}? A general question "
+    "like 'what benefits/plans does my employer offer' counts as YES even "
+    "though it doesn't name a specific topic.\n\nQuestion: {query}"
 )
 
 
