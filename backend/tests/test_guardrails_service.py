@@ -105,10 +105,10 @@ async def test_ambiguous_query_classified_on_topic_by_the_llm_is_accepted() -> N
 
 async def test_ambiguous_query_classified_off_topic_by_the_llm_is_rejected() -> None:
     employer_id = uuid4()
-    llm, bus = FakeLLM(response="NO"), FakeEventBus()
+    llm, bus = FakeLLM(response="OFF_TOPIC"), FakeEventBus()
     service = _service(llm, bus)
 
-    result = await service.check("What's the weather like today?", employer_id)
+    result = await service.check("Write me a python script.", employer_id)
 
     assert result.allowed is False
     assert result.rejection_message is not None
@@ -117,7 +117,7 @@ async def test_ambiguous_query_classified_off_topic_by_the_llm_is_rejected() -> 
 
 async def test_rejection_publishes_a_guardrail_rejection_event() -> None:
     employer_id = uuid4()
-    llm, bus = FakeLLM(response="NO"), FakeEventBus()
+    llm, bus = FakeLLM(response="OFF_TOPIC"), FakeEventBus()
     service = _service(llm, bus)
 
     await service.check("What's the weather like today?", employer_id)
@@ -130,24 +130,40 @@ async def test_rejection_publishes_a_guardrail_rejection_event() -> None:
     assert event.rejection_reason == "off_topic"
 
 
-async def test_llm_response_is_parsed_leniently() -> None:
-    for response in ("yes", "Yes.", "YES!", "  yes  "):
+async def test_allowed_and_unparseable_llm_responses_allow() -> None:
+    for response in ("ALLOWED", "allowed.", "NO", "yes", "maybe", "", "garbage ???"):
         llm, bus = FakeLLM(response=response), FakeEventBus()
         service = _service(llm, bus)
 
-        result = await service.check("Something ambiguous here.", uuid4())
+        result = await service.check("who is my employer", uuid4())
 
         assert result.allowed is True, f"expected acceptance for LLM response {response!r}"
+        assert bus.published == []
 
 
-async def test_llm_response_that_does_not_start_with_yes_is_rejected() -> None:
-    for response in ("no", "not sure", "maybe"):
+async def test_off_topic_response_is_parsed_leniently() -> None:
+    for response in ("off_topic", "Off-Topic.", "  OFF_TOPIC  ", "OFF TOPIC"):
         llm, bus = FakeLLM(response=response), FakeEventBus()
         service = _service(llm, bus)
 
         result = await service.check("Something ambiguous here.", uuid4())
 
         assert result.allowed is False, f"expected rejection for LLM response {response!r}"
+
+
+async def test_history_is_included_in_the_classifier_prompt_truncated_and_limited() -> None:
+    llm, bus = FakeLLM(response="ALLOWED"), FakeEventBus()
+    service = _service(llm, bus)
+    history = ["Employee: oldest turn"] + [f"Employee: turn {i}" for i in range(4)]
+    history[-1] = "Assistant: " + "x" * 1000
+
+    await service.check("what about my spouse?", uuid4(), history)
+
+    prompt = llm.generate_calls[0][0]
+    assert "oldest turn" not in prompt
+    assert "Employee: turn 1" in prompt
+    assert "x" * 289 in prompt and "x" * 301 not in prompt
+    assert "what about my spouse?" in prompt
 
 
 async def test_custom_allowed_domains_override_the_default_vocabulary() -> None:
@@ -161,7 +177,7 @@ async def test_custom_allowed_domains_override_the_default_vocabulary() -> None:
 
 
 async def test_custom_allowed_domains_no_longer_match_the_default_keywords() -> None:
-    llm, bus = FakeLLM(response="NO"), FakeEventBus()
+    llm, bus = FakeLLM(response="OFF_TOPIC"), FakeEventBus()
     service = _service(llm, bus, allowed_domains=frozenset({"payroll"}))
 
     result = await service.check("What's my dental deductible?", uuid4())

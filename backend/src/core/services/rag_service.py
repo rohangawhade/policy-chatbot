@@ -20,6 +20,8 @@ import structlog
 
 from core.domain.analytics import FlaggedResponse, LLMCostLog, RequestLatencyLog
 from core.domain.conversation import Conversation, Message, MessageRole
+from core.domain.employee import Employee
+from core.domain.employer import Employer
 from core.domain.events import (
     ChatMessageReceivedEvent,
     ChatResponseGeneratedEvent,
@@ -33,6 +35,8 @@ from core.ports.repository_ports import (
     AnalyticsRepository,
     ConversationRepository,
     DocumentRepository,
+    EmployeeRepository,
+    EmployerRepository,
     EnrollmentRepository,
     MessageRepository,
 )
@@ -49,20 +53,28 @@ _LOW_CONFIDENCE_FLAG_REASON = "low_retrieval_confidence"
 _PERSONAL_PRONOUNS = frozenset({"my", "i", "me", "i'm", "i've", "mine", "myself"})
 
 _ROLE_DEFINITION = (
-    "You are PolicyPal, a benefits assistant for this employee's employer. You "
-    "help employees understand their health, dental, vision, life, and "
-    "disability benefits."
+    "You are PolicyPal, a friendly benefits assistant on this employee's "
+    "employer portal. You help employees understand their health, dental, "
+    "vision, life, and disability benefits, enrollment, and claims."
 )
 _DOMAIN_RESTRICTION = (
-    "Answer using ONLY the retrieved policy excerpts and enrollment information "
-    "below. Never invent or assume information that isn't explicitly stated in "
-    "the provided context — if the context doesn't contain enough information "
-    "to answer confidently, say so directly instead of guessing. Always cite "
-    "which document and section your answer is drawn from."
+    "Policy and benefit facts must come ONLY from the retrieved policy "
+    "excerpts and enrollment information below. Never invent or assume "
+    "policy details that aren't explicitly stated — if the context doesn't "
+    "contain enough information, say so directly instead of guessing, and "
+    "cite which document and section your answer is drawn from. You may "
+    "answer questions about the employee's own name, employer, and "
+    "enrollments from the 'About the employee' section. You may respond "
+    "briefly and warmly to greetings and thanks, and explain what you can "
+    "help with (the benefits scope above) when asked. Politely decline "
+    "anything clearly unrelated to benefits."
 )
 _NO_CONTEXT_NOTICE = (
-    "No relevant policy excerpts were found for this question. Say so plainly "
-    "and suggest the employee rephrase or contact HR, rather than guessing."
+    "No relevant policy excerpts were found for this question. If it can be "
+    "answered from the employee information below, or is a greeting or a "
+    "question about what you can do, answer it directly. Otherwise say "
+    "plainly that you couldn't find it and suggest the employee rephrase or "
+    "contact HR, rather than guessing."
 )
 
 
@@ -83,6 +95,9 @@ class RetrievalResult:
     chunks: list[VectorMatch] = field(default_factory=list)
     enrollment: list[Enrollment] = field(default_factory=list)
     policy_type: PolicyType | None = None
+    employee: Employee | None = None
+    employer: Employer | None = None
+    cacheable: bool = True
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -113,8 +128,20 @@ class PromptTemplate:
         chunks: list[VectorMatch],
         enrollment: list[Enrollment],
         history: list[Message] | None = None,
+        employee: Employee | None = None,
+        employer: Employer | None = None,
     ) -> str:
         sections = [self.role_definition, "", self.domain_restriction]
+
+        about = []
+        if employer is not None:
+            about.append(f"- Employer: {employer.name}")
+        if employee is not None:
+            about.append(f"- Employee name: {employee.full_name}")
+        if about:
+            sections.append("")
+            sections.append("About the employee you're helping:")
+            sections.extend(about)
 
         sections.append("")
         if chunks:
@@ -302,9 +329,10 @@ class GenerationStream:
 
         full_text = "".join(pieces)
         model_tier = service._query_router.tier_for_model(model)
-        await service._cache_response(
-            self._employer_id, self._query_text, full_text, retrieval.policy_type
-        )
+        if retrieval.cacheable:
+            await service._cache_response(
+                self._employer_id, self._query_text, full_text, retrieval.policy_type
+            )
         await service._log_generation(
             employer_id=self._employer_id,
             model=model,
@@ -407,6 +435,8 @@ class RAGService:
         message_repository: MessageRepository,
         event_bus: EventBusPort,
         document_repository: DocumentRepository,
+        employee_repository: EmployeeRepository,
+        employer_repository: EmployerRepository,
         embedding_model: str,
         top_k: int = _DEFAULT_TOP_K,
         cache_ttl_seconds: int = _DEFAULT_CACHE_TTL_SECONDS,
@@ -424,6 +454,8 @@ class RAGService:
         self._message_repository = message_repository
         self._event_bus = event_bus
         self._document_repository = document_repository
+        self._employee_repository = employee_repository
+        self._employer_repository = employer_repository
         self._embedding_model = embedding_model
         self._top_k = top_k
         self._cache_ttl_seconds = cache_ttl_seconds
@@ -451,10 +483,14 @@ class RAGService:
         # to be a real, prefix-scannable operation, which requires
         # policy_type to be part of the key at both read and write time.
         policy_type = self._detect_policy_type(query_text)
-        cache_key = self._cache_key(employer_id, query_text, policy_type)
-        cached_response = await self._cache.get(cache_key)
-        if cached_response is not None:
-            return RetrievalResult(cached_response=cached_response, policy_type=policy_type)
+        # Personal queries are never cached: the key is per employer, not per
+        # employee, and personal answers include the employee's own details.
+        is_personal = self._is_personal_query(query_text)
+        if not is_personal:
+            cache_key = self._cache_key(employer_id, query_text, policy_type)
+            cached_response = await self._cache.get(cache_key)
+            if cached_response is not None:
+                return RetrievalResult(cached_response=cached_response, policy_type=policy_type)
 
         embeddings = await self._llm.embed(
             [query_text], model=self._embedding_model, input_type="query"
@@ -468,12 +504,22 @@ class RAGService:
         )
 
         enrollment: list[Enrollment] = []
-        if self._is_personal_query(query_text):
+        if is_personal:
             enrollment = await self._enrollment_repository.list_by_employee(employee_id)
 
         await self._mark_matched_documents_queried(chunks)
 
-        return RetrievalResult(chunks=chunks, enrollment=enrollment, policy_type=policy_type)
+        employee = await self._employee_repository.get(employee_id)
+        employer = await self._employer_repository.get(employer_id)
+
+        return RetrievalResult(
+            chunks=chunks,
+            enrollment=enrollment,
+            policy_type=policy_type,
+            employee=employee,
+            employer=employer,
+            cacheable=not is_personal,
+        )
 
     async def _mark_matched_documents_queried(self, chunks: list[VectorMatch]) -> None:
         document_ids: set[UUID] = set()
@@ -502,7 +548,12 @@ class RAGService:
                 order) — `None`/empty for a new conversation.
         """
         return self._prompt_template.render(
-            query_text, retrieval.chunks, retrieval.enrollment, history
+            query_text,
+            retrieval.chunks,
+            retrieval.enrollment,
+            history,
+            retrieval.employee,
+            retrieval.employer,
         )
 
     async def query(

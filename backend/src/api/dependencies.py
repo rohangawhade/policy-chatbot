@@ -265,6 +265,8 @@ def get_rag_service(
     message_repository: MessageRepository = Depends(get_message_repository),
     event_bus: EventBusPort = Depends(get_event_bus),
     document_repository: DocumentRepository = Depends(get_document_repository),
+    employee_repository: EmployeeRepository = Depends(get_employee_repository),
+    employer_repository: EmployerRepository = Depends(get_employer_repository),
 ) -> RAGService:
     return RAGService(
         llm,
@@ -277,5 +279,7 @@ def get_rag_service(
         message_repository,
         event_bus,
         document_repository,
+        employee_repository,
+        employer_repository,
         embedding_model=llm_config.embedding_model,
     )

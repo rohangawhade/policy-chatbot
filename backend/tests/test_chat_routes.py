@@ -106,7 +106,9 @@ class _FakeGuardrailsService:
         self._result = GuardrailResult(allowed=allowed, rejection_message=rejection_message)
         self.calls: list[tuple[str, UUID]] = []
 
-    async def check(self, query_text: str, employer_id: UUID) -> GuardrailResult:
+    async def check(
+        self, query_text: str, employer_id: UUID, history: list[str] | None = None
+    ) -> GuardrailResult:
         self.calls.append((query_text, employer_id))
         return self._result
 
