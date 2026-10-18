@@ -50,7 +50,6 @@ autouse fixture creates that database if missing and runs
 is never touched and tests never depend on it being empty.
 """
 
-import asyncio
 import os
 import subprocess
 import sys
@@ -106,29 +105,39 @@ _TEST_DATABASE_URL = _resolve_test_database_url()
 os.environ["DATABASE_URL"] = _TEST_DATABASE_URL
 
 
-async def _create_database_if_missing(url_str: str) -> None:
-    import asyncpg
+_CREATE_DATABASE_SCRIPT = """
+import asyncio, sys
+import asyncpg
+from sqlalchemy.engine import make_url
 
+async def main(url_str):
     url = make_url(url_str)
     conn = await asyncpg.connect(
-        host=url.host,
-        port=url.port,
-        user=url.username,
-        password=url.password,
-        database="postgres",
+        host=url.host, port=url.port, user=url.username,
+        password=url.password, database="postgres",
     )
     try:
-        exists = await conn.fetchval("SELECT 1 FROM pg_database WHERE datname = $1", url.database)
+        exists = await conn.fetchval(
+            "SELECT 1 FROM pg_database WHERE datname = $1", url.database
+        )
         if not exists:
-            await conn.execute(f'CREATE DATABASE "{url.database}"')
+            await conn.execute('CREATE DATABASE "' + url.database + '"')
     finally:
         await conn.close()
+
+asyncio.run(main(sys.argv[1]))
+"""
 
 
 @pytest.fixture(scope="session", autouse=True)
 def _test_database() -> None:
-    """Create the dedicated test database if missing and migrate it."""
-    asyncio.run(_create_database_if_missing(_TEST_DATABASE_URL))
+    """Create the dedicated test database if missing and migrate it.
+
+    Both steps run in subprocesses (not in-process asyncio) so the pytest
+    process itself never touches asyncpg outside the tests -- an in-process
+    `asyncio.run` here made the interpreter segfault at exit on CI.
+    """
+    subprocess.run([sys.executable, "-c", _CREATE_DATABASE_SCRIPT, _TEST_DATABASE_URL], check=True)
     subprocess.run(
         [sys.executable, "-m", "alembic", "upgrade", "head"],
         cwd=_BACKEND_DIR,
