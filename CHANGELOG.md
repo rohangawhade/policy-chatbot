@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.3.0](https://github.com/rohangawhade/policy-chatbot/compare/v0.2.0...v0.3.0) (2026-10-18)
+
+
+### Features
+
+* **chat:** expose retrieved contexts in chat responses; scaffold eval tooling ([#75](https://github.com/rohangawhade/policy-chatbot/issues/75)) ([e0365f0](https://github.com/rohangawhade/policy-chatbot/commit/e0365f0f285cc13bf3cf70e7d6fa8d712dfa65eb))
+* **eval:** add RAGAS evaluation runner (Step 12.2) ([#81](https://github.com/rohangawhade/policy-chatbot/issues/81)) ([ccd02f7](https://github.com/rohangawhade/policy-chatbot/commit/ccd02f7ef220908245a431e7028e169647930e37))
+* **frontend:** add a logout button to every role view ([#83](https://github.com/rohangawhade/policy-chatbot/issues/83)) ([3c1cb0e](https://github.com/rohangawhade/policy-chatbot/commit/3c1cb0e7517df40787c71bb95f911c3b68831b1a))
+* **frontend:** render assistant responses as markdown in chat ([#86](https://github.com/rohangawhade/policy-chatbot/issues/86)) ([29ec196](https://github.com/rohangawhade/policy-chatbot/commit/29ec196c8781a09d660e7429c7421b233c1544c3))
+* **llm:** wire real Pinecone embeddings via inference API ([#73](https://github.com/rohangawhade/policy-chatbot/issues/73)) ([3197ce2](https://github.com/rohangawhade/policy-chatbot/commit/3197ce2c58f36dff294ff4c36b200d1e39426e31))
+* **scripts:** generate synthetic employer policy docs via LLM (Step 11.2) ([#71](https://github.com/rohangawhade/policy-chatbot/issues/71)) ([890e3f4](https://github.com/rohangawhade/policy-chatbot/commit/890e3f4b7995e9aa7b9020e03d653fb7d000159a))
+
+
+### Bug Fixes
+
+* **docker:** copy alembic.ini and alembic/ into the backend image ([#82](https://github.com/rohangawhade/policy-chatbot/issues/82)) ([8e417f5](https://github.com/rohangawhade/policy-chatbot/commit/8e417f5751056bcc8fc2f8afd18a2ff2c58739f4))
+* **docker:** make Vite HMR pick up host edits under Docker on Windows ([#84](https://github.com/rohangawhade/policy-chatbot/issues/84)) ([56a454c](https://github.com/rohangawhade/policy-chatbot/commit/56a454c0f0d04c919ecb1006387953d86d86c537))
+* **eval:** remove cross-tenant assumptions from golden dataset ([#74](https://github.com/rohangawhade/policy-chatbot/issues/74)) ([98015b2](https://github.com/rohangawhade/policy-chatbot/commit/98015b21e257b6fc0312a70cea2f4095adc7b6ef))
+* **guardrails:** accept general "what benefits does X offer" questions ([#85](https://github.com/rohangawhade/policy-chatbot/issues/85)) ([9451127](https://github.com/rohangawhade/policy-chatbot/commit/94511275701e0afd456e1739c75f80f4bbf61be7))
+* **guardrails:** allow by default, reject only clearly off-topic; give prompt employee context ([#87](https://github.com/rohangawhade/policy-chatbot/issues/87)) ([2b8e2ef](https://github.com/rohangawhade/policy-chatbot/commit/2b8e2efb9722c75541bafb8a363c025eeca56f48))
+* **ingestion:** wire Pinecone embeddings into the ingestion task; support .docx/.xlsx/.xml uploads in seed_data.py ([#76](https://github.com/rohangawhade/policy-chatbot/issues/76)) ([e5ee2c2](https://github.com/rohangawhade/policy-chatbot/commit/e5ee2c278862e8bfdebdbde91f11072ee958dcc7))
+* isolate test DB, conditional Sources footer, non-blocking mark_queried ([#88](https://github.com/rohangawhade/policy-chatbot/issues/88)) ([942156e](https://github.com/rohangawhade/policy-chatbot/commit/942156e42283ff9607cf2812c006d2ea2bdbdb94))
+* **llm:** batch Pinecone embed() calls to stay under its 96-input limit ([#77](https://github.com/rohangawhade/policy-chatbot/issues/77)) ([3f23c28](https://github.com/rohangawhade/policy-chatbot/commit/3f23c286e34c5182a9c0b6c56305e9f905a179ac))
+* **seed:** give each employer its own synthetic documents, not a shared round-robin pool ([#79](https://github.com/rohangawhade/policy-chatbot/issues/79)) ([c1bb744](https://github.com/rohangawhade/policy-chatbot/commit/c1bb7440282b5a2097f80ad79acb2231285bd757))
+* **seed:** tag synthetic policy-summary uploads with their policy_type ([#80](https://github.com/rohangawhade/policy-chatbot/issues/80)) ([f053b78](https://github.com/rohangawhade/policy-chatbot/commit/f053b78bb9acd7709be6207bf2d6e48aa9dda044))
+* **vector-store:** batch Pinecone upsert() to stay under its 4MB request limit ([#78](https://github.com/rohangawhade/policy-chatbot/issues/78)) ([3970c0a](https://github.com/rohangawhade/policy-chatbot/commit/3970c0a55d1fed930f33e5c8f67d7bdc37c282d0))
+
+
+### Documentation
+
+* confirm v0.2.0 release cut and close out Phase 14 ([#69](https://github.com/rohangawhade/policy-chatbot/issues/69)) ([ee13f07](https://github.com/rohangawhade/policy-chatbot/commit/ee13f07898e38337220fc5e38c361bc115e9e8cc))
+
 ## [0.2.0](https://github.com/rohangawhade/policy-chatbot/compare/v0.1.0...v0.2.0) (2026-08-27)
 
 
