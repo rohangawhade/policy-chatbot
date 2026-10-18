@@ -62,7 +62,11 @@ _DOMAIN_RESTRICTION = (
     "excerpts and enrollment information below. Never invent or assume "
     "policy details that aren't explicitly stated — if the context doesn't "
     "contain enough information, say so directly instead of guessing, and "
-    "cite which document and section your answer is drawn from. You may "
+    "whenever your answer uses the excerpts, you MUST name the source "
+    "document by its title, exactly as given "
+    "in the excerpt header. Do not cite documents for greetings, questions "
+    "about what you can do, or answers drawn from the 'About the employee' "
+    "section. You may "
     "answer questions about the employee's own name, employer, and "
     "enrollments from the 'About the employee' section. You may respond "
     "briefly and warmly to greetings and thanks, and explain what you can "
@@ -322,7 +326,7 @@ class GenerationStream:
             yield token
         llm_ms = int((time.monotonic() - llm_start) * 1000)
 
-        citations = service._format_citations(retrieval.chunks)
+        citations = service._format_citations(retrieval.chunks, "".join(pieces))
         if citations:
             pieces.append(citations)
             yield citations
@@ -719,11 +723,14 @@ class RAGService:
             )
         )
 
-    def _format_citations(self, chunks: list[VectorMatch]) -> str:
+    def _format_citations(self, chunks: list[VectorMatch], response_text: str) -> str:
+        """Footer listing only retrieved documents the answer references
+        (case-insensitive title match in the response text)."""
+        lowered = response_text.lower()
         sources: list[str] = []
         for chunk in chunks:
             title = chunk.metadata.get("document_title")
-            if not title or title in sources:
+            if not title or str(title) in sources or str(title).lower() not in lowered:
                 continue
             sources.append(str(title))
         if not sources:

@@ -41,13 +41,26 @@ platform-specific: `crypt` is POSIX-only, so this only ever fires on
 Linux (CI) — on this Windows dev machine the import raises `ImportError`
 instead (caught internally by passlib, no warning), so the bug was
 invisible until CI caught it. Same fix, same reasoning.
+
+Test database isolation: the whole run is pointed at a dedicated
+`<dbname>_test` database (override with `TEST_DATABASE_URL`) by setting
+`DATABASE_URL` below, before `config` is first imported. A session-scoped
+autouse fixture creates that database if missing and runs
+`alembic upgrade head` against it, so the (possibly seeded) dev database
+is never touched and tests never depend on it being empty.
 """
 
 import os
+import subprocess
+import sys
 import warnings
 from collections.abc import AsyncIterator
+from pathlib import Path
 
+import pytest
 import pytest_asyncio
+from dotenv import dotenv_values
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 with warnings.catch_warnings():
@@ -68,6 +81,71 @@ with warnings.catch_warnings():
     import passlib.context  # noqa: F401
 
 
+_BACKEND_DIR = Path(__file__).resolve().parent.parent
+_DEFAULT_DATABASE_URL = "postgresql+asyncpg://policypal:policypal@localhost:5432/policypal"
+
+
+def _resolve_test_database_url() -> str:
+    explicit = os.environ.get("TEST_DATABASE_URL")
+    if explicit:
+        return explicit
+    base = (
+        os.environ.get("DATABASE_URL")
+        or dotenv_values(_BACKEND_DIR.parent / ".env").get("DATABASE_URL")
+        or _DEFAULT_DATABASE_URL
+    )
+    url = make_url(base)
+    name = url.database or "policypal"
+    if not name.endswith("_test"):
+        name += "_test"
+    return url.set(database=name).render_as_string(hide_password=False)
+
+
+_TEST_DATABASE_URL = _resolve_test_database_url()
+os.environ["DATABASE_URL"] = _TEST_DATABASE_URL
+
+
+_CREATE_DATABASE_SCRIPT = """
+import asyncio, sys
+import asyncpg
+from sqlalchemy.engine import make_url
+
+async def main(url_str):
+    url = make_url(url_str)
+    conn = await asyncpg.connect(
+        host=url.host, port=url.port, user=url.username,
+        password=url.password, database="postgres",
+    )
+    try:
+        exists = await conn.fetchval(
+            "SELECT 1 FROM pg_database WHERE datname = $1", url.database
+        )
+        if not exists:
+            await conn.execute('CREATE DATABASE "' + url.database + '"')
+    finally:
+        await conn.close()
+
+asyncio.run(main(sys.argv[1]))
+"""
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _test_database() -> None:
+    """Create the dedicated test database if missing and migrate it.
+
+    Both steps run in subprocesses (not in-process asyncio) so the pytest
+    process itself never touches asyncpg outside the tests -- an in-process
+    `asyncio.run` here made the interpreter segfault at exit on CI.
+    """
+    subprocess.run([sys.executable, "-c", _CREATE_DATABASE_SCRIPT, _TEST_DATABASE_URL], check=True)
+    subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        cwd=_BACKEND_DIR,
+        env={**os.environ, "DATABASE_URL": _TEST_DATABASE_URL},
+        check=True,
+    )
+
+
 @pytest_asyncio.fixture
 async def db_session() -> AsyncIterator[AsyncSession]:
     """A real Postgres-backed session for repository integration tests
@@ -78,11 +156,10 @@ async def db_session() -> AsyncIterator[AsyncSession]:
     "committed at the API layer" — files/plan.md Step 3.5), so a rollback
     here always fully undoes everything a test did.
 
-    Requires a live Postgres reachable at `DATABASE_URL` (or its default)
-    with migrations already applied — `docker compose up -d postgres &&
-    alembic upgrade head` locally; `ci.yml`'s `backend-quality` job runs
-    a `postgres:16` service and an `alembic upgrade head` step for
-    exactly this.
+    Requires a live Postgres server reachable at `DATABASE_URL` (or its
+    default); the dedicated `<dbname>_test` database is created and
+    migrated automatically by the session-scoped `_test_database`
+    fixture. `ci.yml`'s `backend-quality` job runs a `postgres:16` service.
     """
     from config import database_config
 

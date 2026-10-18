@@ -779,16 +779,30 @@ async def test_query_streams_tokens_from_the_llm_on_a_cache_miss() -> None:
 async def test_query_appends_source_citations_when_chunks_have_titles() -> None:
     employer_id, employee_id = uuid4(), uuid4()
     match = VectorMatch(id="c1", score=0.9, metadata={"document_title": "SPD.pdf"})
-    llm = FakeLLM(stream_tokens=["answer"])
-    service = _service(llm, FakeCache(), FakeVectorStore([match]), FakeEnrollmentRepository())
+    llm = FakeLLM(stream_tokens=["Per spd.pdf, ", "it is $50. See SPD.pdf again."])
+    store = FakeVectorStore([match, match])
+    service = _service(llm, FakeCache(), store, FakeEnrollmentRepository())
 
     stream = await service.query("What's my dental deductible?", employee_id, employer_id)
     tokens = await _consume(stream)
 
     full_text = "".join(tokens)
-    assert "Sources: SPD.pdf" in full_text
+    assert full_text.endswith("\n\nSources: SPD.pdf")
+    assert full_text.count("Sources:") == 1
     assert stream.metrics is not None
     assert stream.metrics.full_text == full_text
+
+
+async def test_query_omits_citations_when_answer_does_not_reference_the_titles() -> None:
+    employer_id, employee_id = uuid4(), uuid4()
+    match = VectorMatch(id="c1", score=0.9, metadata={"document_title": "SPD.pdf"})
+    llm = FakeLLM(stream_tokens=["Hi! I can help with your benefits."])
+    service = _service(llm, FakeCache(), FakeVectorStore([match]), FakeEnrollmentRepository())
+
+    stream = await service.query("hi", employee_id, employer_id)
+    tokens = await _consume(stream)
+
+    assert "Sources:" not in "".join(tokens)
 
 
 async def test_query_omits_citations_when_no_chunks_were_retrieved() -> None:

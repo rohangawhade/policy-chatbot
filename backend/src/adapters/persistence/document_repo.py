@@ -78,9 +78,17 @@ class PostgresDocumentRepository(PostgresRepository[Document, models.Document], 
     async def mark_queried(self, document_ids: list[UUID]) -> None:
         if not document_ids:
             return
+        # Best-effort timestamp: SKIP LOCKED so a chat stream never blocks
+        # (for the rest of another request's open transaction) on a document
+        # row some other in-flight request already touched.
+        lockable = (
+            select(models.Document.id)
+            .where(models.Document.id.in_(document_ids))
+            .with_for_update(skip_locked=True)
+        )
         await self._session.execute(
             update(models.Document)
-            .where(models.Document.id.in_(document_ids))
+            .where(models.Document.id.in_(lockable))
             .values(last_queried_at=datetime.now(UTC))
         )
         await self._session.flush()
