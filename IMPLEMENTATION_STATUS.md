@@ -5109,3 +5109,20 @@ credentials — see their own entries above. The only work beyond
 `plan.md`'s own scope that remains optional/user-initiated:
 running `rag-eval-full` for a real quality baseline (needs the two
 secrets above), and the standing `required_status_checks` gap.
+
+## Test DB isolation + conditional Sources footer
+
+- Backend tests now run against a dedicated `<dbname>_test` database
+  (override with `TEST_DATABASE_URL`). `tests/conftest.py` points
+  `DATABASE_URL` at it before `config` is imported, and a session-scoped
+  fixture creates it if missing and runs `alembic upgrade head`. No manual
+  migrate step is needed, and a seeded dev `policypal` DB no longer breaks
+  tests. CI is unchanged: the postgres service user can create databases.
+- `RAGService._format_citations` appends "Sources:" only for retrieved
+  document titles the generated answer actually mentions (case-insensitive);
+  the prompt tells the model to cite titles exactly and not to cite for
+  greetings, capability questions, or "About the employee" answers.
+- `PostgresDocumentRepository.mark_queried` now uses `FOR UPDATE SKIP LOCKED`:
+  concurrent chat streams touching the same documents previously blocked on
+  each other's open transactions, and an aborted stream could wedge every
+  later chat request behind a leaked lock.
